@@ -1,0 +1,29 @@
+# Sekrety — nigdy nie commituj
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# System
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logi
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp

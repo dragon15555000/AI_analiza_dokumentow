@@ -1,0 +1,1685 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MZK Gorzów — System RAG</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <style>
+        body { background: #f0f2f5; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+        .topbar { background: #1a1f36; color: #fff; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
+        .topbar h1 { font-size: 1.1rem; font-weight: 700; margin: 0; letter-spacing: 0.3px; }
+        .topbar .badge-stat { background: #2d3561; border-radius: 20px; padding: 4px 12px; font-size: 0.8rem; color: #a0aec0; }
+        .topbar .badge-stat span { color: #63b3ed; font-weight: 700; }
+        .nav-tabs { border-bottom: 2px solid #dee2e6; background: #fff; padding: 0 24px; }
+        .nav-tabs .nav-link { border: none; color: #6c757d; padding: 12px 20px; font-weight: 600; font-size: 0.9rem; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+        .nav-tabs .nav-link.active { color: #0d6efd; border-bottom-color: #0d6efd; background: none; }
+        .main-wrap { max-width: 1400px; margin: 0 auto; padding: 20px 16px; }
+
+        /* Wyszukiwarka */
+        .search-card { background: #fff; border-radius: 10px; padding: 20px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 16px; }
+        .search-card h2 { font-size: 1.15rem; font-weight: 700; color: #1a1f36; margin-bottom: 16px; }
+        .filter-badge { cursor: pointer; display: inline-block; padding: 3px 10px; border-radius: 20px; background: #e8f0fe; color: #1a73e8; font-size: 0.78rem; font-weight: 600; margin: 2px; border: 1px solid #c5d8fc; transition: all 0.15s; }
+        .filter-badge:hover { background: #1a73e8; color: #fff; }
+        .filter-badge.active { background: #1a73e8; color: #fff; }
+        #filterFileLabel { font-size: 0.8rem; color: #6c757d; }
+
+        /* Szablony */
+        .prompt-btn { cursor: pointer; display: block; width: 100%; text-align: left; padding: 7px 10px; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; font-size: 0.82rem; color: #343a40; margin-bottom: 5px; transition: all 0.15s; white-space: normal; }
+        .prompt-btn:hover { background: #e9ecef; border-color: #adb5bd; transform: translateX(2px); }
+        .cat-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; color: #6c757d; margin: 12px 0 6px; }
+
+        /* Wyniki */
+        .ai-box { background: #eef2ff; border-left: 5px solid #4f46e5; border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
+        .ai-box h5 { color: #4f46e5; font-weight: 700; font-size: 0.95rem; margin-bottom: 10px; }
+        .result-card { background: #fff; border-radius: 8px; border-left: 5px solid #0d6efd; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); overflow: hidden; }
+        .result-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: #f8f9fa; cursor: pointer; user-select: none; }
+        .result-header:hover { background: #f0f2f5; }
+        .result-fname { font-weight: 700; font-size: 0.9rem; color: #0d6efd; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 10px; }
+        .result-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        .result-body { padding: 14px 16px; font-size: 0.88rem; line-height: 1.65; color: #2d3748; white-space: pre-wrap; display: none; }
+        .result-body.show { display: block; }
+        .result-preview { padding: 8px 16px 10px; font-size: 0.82rem; color: #6c757d; background: #fafafa; border-top: 1px solid #f0f0f0; overflow: hidden; max-height: 3.2em; text-overflow: ellipsis; white-space: nowrap; }
+        .chevron { transition: transform 0.2s; font-size: 0.75rem; color: #adb5bd; }
+        .chevron.open { transform: rotate(180deg); }
+        mark { background: #ffeb3b; color: #000; padding: 1px 3px; border-radius: 3px; font-weight: 600; }
+
+        /* Browser dokumentów */
+        .doc-table-wrap { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
+        .doc-search-bar { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; display: flex; gap: 10px; align-items: center; }
+        #docFilterInput { max-width: 360px; font-size: 0.88rem; }
+        .ext-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; }
+        .ext-pdf  { background: #fee2e2; color: #b91c1c; }
+        .ext-docx { background: #dbeafe; color: #1d4ed8; }
+        .ext-xlsx { background: #d1fae5; color: #065f46; }
+        .ext-json { background: #fef3c7; color: #92400e; }
+        .ext-md   { background: #ede9fe; color: #5b21b6; }
+        .ext-txt  { background: #f1f5f9; color: #475569; }
+        .ext-csv  { background: #ecfdf5; color: #047857; }
+        .doc-row-btn { background: none; border: none; color: #0d6efd; font-size: 0.78rem; padding: 2px 8px; border-radius: 4px; cursor: pointer; }
+        .doc-row-btn:hover { background: #e8f0fe; }
+        table { margin: 0; }
+        th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; color: #6c757d; font-weight: 700; background: #f8f9fa; }
+        td { font-size: 0.85rem; vertical-align: middle; }
+        .chunks-bar { height: 6px; background: #e9ecef; border-radius: 3px; margin-top: 3px; }
+        .chunks-bar-fill { height: 6px; background: #0d6efd; border-radius: 3px; }
+        .verify-box { border-radius: 8px; padding: 16px 20px; margin-top: 12px; }
+        .verify-box.ok   { background:#f0fdf4; border-left:5px solid #16a34a; }
+        .verify-box.warn { background:#fffbeb; border-left:5px solid #d97706; }
+        .verify-box.bad  { background:#fef2f2; border-left:5px solid #dc2626; }
+        .verify-box.loading { background:#f8f9fa; border-left:5px solid #6c757d; }
+        .verify-claim { font-size:0.82rem; line-height:1.7; white-space:pre-wrap; font-family:inherit; }
+        .verify-stats span { display:inline-block; padding:2px 10px; border-radius:12px; font-size:0.75rem; font-weight:700; margin-right:6px; }
+        .vs-ok   { background:#dcfce7; color:#166534; }
+        .vs-warn { background:#fef9c3; color:#854d0e; }
+        .vs-bad  { background:#fee2e2; color:#991b1b; }
+    </style>
+</head>
+<body>
+
+<div class="topbar">
+    <h1>MZK Gorzów &mdash; Inteligentny System RAG</h1>
+    <div class="badge-stat">Wektory: <span id="statVectors">...</span></div>
+    <div class="badge-stat">Status: <span id="statStatus">...</span></div>
+    <div class="badge-stat">Model: <span>768 · Nomic</span></div>
+    <div class="badge-stat">Baza: <span id="statActiveCol">mzk_documents</span></div>
+</div>
+
+<ul class="nav nav-tabs" id="mainTabs">
+    <li class="nav-item">
+        <a class="nav-link active" href="#" onclick="showTab('search'); return false;">Wyszukiwanie</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('docs'); return false;" id="tabDocsLink">Dokumenty (<span id="tabDocsCount">...</span>)</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('ai'); return false;">AI z bazy</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('network'); return false;">Sieć powiązań</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('collections'); return false;">Bazy</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('import'); return false;">Import</a>
+    </li>
+</ul>
+
+<!-- TAB: WYSZUKIWANIE -->
+<div id="tabSearch" class="main-wrap">
+    <div class="row g-3">
+        <div class="col-lg-8">
+            <div class="search-card">
+                <h2>Wyszukiwanie śledcze</h2>
+                <div class="mb-2" id="filterFileWrap" style="display:none;">
+                    <span id="filterFileLabel">Filtr pliku:</span>
+                    <span class="filter-badge active" id="filterFileBadge"></span>
+                    <span class="filter-badge" onclick="clearFileFilter()" style="background:#fee2e2;color:#b91c1c;border-color:#fca5a5;">✕ Wyczyść filtr</span>
+                </div>
+                <div class="input-group input-group-lg mb-2">
+                    <input type="text" id="queryInput" class="form-control" placeholder="Wybierz szablon lub wpisz pytanie..." onkeydown="if(event.key==='Enter') executeSearch()">
+                    <button class="btn btn-primary px-4" onclick="executeSearch()" id="searchBtn">Analizuj</button>
+                </div>
+                <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
+                    <select class="form-select form-select-sm" id="searchMode" style="max-width:220px;">
+                        <option value="normal">Standardowy</option>
+                        <option value="detective">🔍 Detektyw — anomalie</option>
+                        <option value="legal">⚖️ Prawny — przepisy</option>
+                        <option value="inconsistency">⚡ Niespójności</option>
+                        <option value="extract">📊 Ekstrakcja danych</option>
+                    </select>
+                    <select class="form-select form-select-sm" id="resultLimit" style="max-width:140px;">
+                        <option value="5">5 wyników</option>
+                        <option value="8" selected>8 wyników</option>
+                        <option value="12">12 wyników</option>
+                        <option value="15">15 wyników</option>
+                        <option value="20">20 wyników</option>
+                    </select>
+                    <small class="text-muted">Baza: <strong id="searchScope">wszystkie dokumenty</strong></small>
+                </div>
+                <div id="modeDesc" class="mt-2 small rounded px-3 py-2 d-none"
+                    style="background:#f0f4ff;border-left:3px solid #4f46e5;color:#4f46e5;"></div>
+                <div class="mt-2 d-flex align-items-center gap-2">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="verifyToggle">
+                        <label class="form-check-label small fw-semibold" for="verifyToggle"
+                            style="cursor:pointer;">Weryfikacja (2× LLM)</label>
+                    </div>
+                    <span class="small text-muted">— Krytyk sprawdza czy Generator nie zmyślił</span>
+                </div>
+            </div>
+
+            <div id="loader" class="text-center py-4 d-none">
+                <div class="spinner-border text-primary"></div>
+                <p class="mt-2 text-muted small">Generowanie embeddingu, wyszukiwanie semantyczne i synteza LLM...</p>
+            </div>
+
+            <div id="aiResponseContainer"></div>
+            <div id="resultsContainer"></div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="search-card" style="max-height:82vh; overflow-y:auto; padding: 16px;">
+                <h2 style="font-size:1rem;">Szablony (20)</h2>
+
+                <div class="cat-label">1. Zarząd i Odpowiedzialność</div>
+                <button class="prompt-btn" onclick="selectPrompt('Roman Maksymiak Iwona Trzcińska odpowiedzialność niegospodarność')">Rola i odpowiedzialność zarządu</button>
+                <button class="prompt-btn" onclick="selectPrompt('Zmiana w planie celów zarządczych na 2023 kar umownych')">Kary umowne a cele 2023</button>
+                <button class="prompt-btn" onclick="selectPrompt('Zarząd MZK poświadczenie nieprawdy Art 271 K.k. Art 296 K.k.')">Naruszenie Art. 271 i 296 K.k.</button>
+                <button class="prompt-btn" onclick="selectPrompt('Aneksy i zmiana planu celów zarządczych wpływ na premie')">Wpływ aneksów na premie</button>
+                <button class="prompt-btn" onclick="selectPrompt('Zajączkowski Romuald wydruk Uchwała NZW nr 22')">Uchwała NZW nr 22</button>
+
+                <div class="cat-label">2. Anomalie Excel</div>
+                <button class="prompt-btn" onclick="selectPrompt('Anomalia zmiennoprzecinkowa Goal Seek kwota 92 247 144.999999985')">Ślad Goal Seek 92 mln</button>
+                <button class="prompt-btn" onclick="selectPrompt('TABELA 2025 - 2026.xlsx Przychody fabrykacja budżetu koszty')">Budżet w TABELA 2025-2026</button>
+                <button class="prompt-btn" onclick="selectPrompt('Przyczyny Prognoza Korekta PKO rozliczenie inwentaryzacji niedobory')">Niedobory w Korekcie PKO</button>
+                <button class="prompt-btn" onclick="selectPrompt('Rozbieżności między Dziennikiem a ZOiS ręczne usuwanie transakcji')">Rozbieżności Dziennik vs ZOiS</button>
+                <button class="prompt-btn" onclick="selectPrompt('Wartość rekompensaty wpisana z precyzją do 9 miejsc po przecinku')">Precyzja zapisu rekompensat</button>
+
+                <div class="cat-label">3. Przetargi i Zmowy</div>
+                <button class="prompt-btn" onclick="selectPrompt('REFUNDA Ekoenergetyka zmowa przetargowa Bid Rigging PFU EOS')">Zmowa REFUNDA i Ekoenergetyka</button>
+                <button class="prompt-btn" onclick="selectPrompt('Modyfikacja wymogów budowlanych w trakcie przetargu PFU EOS')">Faworyzowanie systemu EOS</button>
+                <button class="prompt-btn" onclick="selectPrompt('Podejrzenie naruszenia Art 305 K.k. zakłócanie przetargu publicznego')">Zakłócanie przetargu Art. 305</button>
+                <button class="prompt-btn" onclick="selectPrompt('BTC Dysant Clustering Faktur seryjne fakturowanie ominięcie progów')">Seryjne fakturowanie BTC/Dysant</button>
+                <button class="prompt-btn" onclick="selectPrompt('Provector Sp. z o.o. Mariusz Dziakowicz przekształcenie JDG')">Podmiot Provector Sp. z o.o.</button>
+
+                <div class="cat-label">4. Akta i Sygnalista</div>
+                <button class="prompt-btn" onclick="selectPrompt('Raport z audytu śledczego nr 01/2026/MZK 60')">Raport z audytu nr 01/2026</button>
+                <button class="prompt-btn" onclick="selectPrompt('Raport_Sledczy_Zal11.docx Kwalifikacja prawna tabela zarzutów')">Tabela zarzutów w Zal11</button>
+                <button class="prompt-btn" onclick="selectPrompt('Marcin Gallos Sygnalista ustawa o ochronie sygnalistów rekomendacje')">Status sygnalisty</button>
+                <button class="prompt-btn" onclick="selectPrompt('Email_NIK_FINAL.docx wniosek o przeprowadzenie kontroli doraznej')">Wniosek do NIK</button>
+                <button class="prompt-btn" onclick="selectPrompt('Bilans Aktywa Pasywa Rachunek zysków i strat BNW 10.03.2026')">Bilans BNW marzec 2026</button>
+
+                <div style="border-top:2px dashed #dee2e6;margin:16px 0 10px;"></div>
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <span style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.8px;font-weight:700;color:#4f46e5;">AI z bazy</span>
+                    <button onclick="loadSuggestions(true)" id="suggestRefreshBtn"
+                        style="background:none;border:1px solid #e0e0ff;color:#4f46e5;border-radius:12px;padding:2px 10px;font-size:0.72rem;cursor:pointer;">
+                        ↺ Odśwież
+                    </button>
+                </div>
+                <div id="suggestionsContainer">
+                    <div id="suggestLoader" class="text-center py-2">
+                        <div class="spinner-border spinner-border-sm text-indigo" style="color:#4f46e5;" role="status"></div>
+                        <span class="ms-2 small text-muted">Generowanie sugestii...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- TAB: DOKUMENTY -->
+<div id="tabDocs" class="main-wrap" style="display:none;">
+    <div class="doc-table-wrap">
+        <div id="noiseScanPanel" class="d-none" style="background:#fff8f0;border-bottom:1px solid #fed7aa;padding:12px 16px;">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+                <strong style="color:#c2410c;font-size:0.9rem;">🗑 Wykryte pliki-śmieci</strong>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-danger btn-sm" onclick="deleteNoise()">Usuń wszystkie zaznaczone śmieci</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="closeNoiseScan()">✕ Zamknij</button>
+                </div>
+            </div>
+            <div id="noiseList" style="max-height:200px;overflow-y:auto;font-size:0.82rem;"></div>
+        </div>
+        <div class="doc-search-bar">
+            <input type="text" id="docFilterInput" class="form-control" placeholder="Filtruj po nazwie pliku..." oninput="filterDocTable()">
+            <span class="text-muted small" id="docCountLabel"></span>
+            <button class="btn btn-outline-warning btn-sm ms-2 flex-shrink-0" onclick="scanNoise()" id="scanNoiseBtn"
+                style="font-size:0.8rem;">🔍 Skanuj szum</button>
+            <div id="deleteBar" class="d-none d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                <span class="small fw-bold text-danger" id="selectedCount"></span>
+                <button class="btn btn-danger btn-sm" onclick="deleteSelected()">🗑 Usuń zaznaczone</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">Odznacz</button>
+            </div>
+        </div>
+        <div style="overflow-x:auto; max-height:75vh; overflow-y:auto;">
+            <table class="table table-hover table-sm mb-0">
+                <thead style="position:sticky;top:0;z-index:1;">
+                    <tr>
+                        <th style="width:36px;text-align:center;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)"></th>
+                        <th style="width:40px;">#</th>
+                        <th>Plik</th>
+                        <th style="width:80px;">Typ</th>
+                        <th style="width:120px;">Chunki</th>
+                        <th style="width:100px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="docTableBody">
+                    <tr><td colspan="6" class="text-center text-muted py-4">Ładowanie...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- TAB: AI Z BAZY -->
+<div id="tabAi" class="main-wrap" style="display:none;">
+    <div class="row g-3">
+        <div class="col-lg-8">
+            <div class="search-card">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <div>
+                        <h2 style="margin:0;">Sugestie pytań generowane przez AI</h2>
+                        <p class="text-muted small mb-0 mt-1">Llama3 analizuje losową próbkę z bazy i proponuje pytania śledcze dopasowane do aktualnej zawartości dokumentów.</p>
+                    </div>
+                    <button onclick="loadSuggestions(true)" id="suggestRefreshBtn2"
+                        class="btn btn-outline-primary btn-sm" style="flex-shrink:0;margin-left:16px;">
+                        ↺ Generuj nowe
+                    </button>
+                </div>
+                <div id="aiTabSuggestionsContainer">
+                    <div class="text-center py-4 text-muted small">Przejdź do tej zakładki aby załadować sugestie.</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="search-card" style="background:#f8f9ff;border:1px solid #e0e0ff;">
+                <h2 style="font-size:1rem;color:#4f46e5;">Jak to działa?</h2>
+                <ol class="small text-muted ps-3" style="line-height:1.9;">
+                    <li>Pobiera 25 losowych fragmentów z różnych plików z Qdrant Cloud</li>
+                    <li>Wysyła je do Llama3 z poleceniem wygenerowania pytań śledczych</li>
+                    <li>Wyniki są cache'owane 30 minut</li>
+                    <li>Kliknięcie pytania przenosi do wyszukiwania i od razu uruchamia analizę</li>
+                </ol>
+                <hr style="border-color:#e0e0ff;">
+                <p class="small text-muted mb-0">Każde "Generuj nowe" losuje inną próbkę → inne pytania. Przydatne do odkrywania nowych wątków w bazie.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- TAB: SIEĆ POWIĄZAŃ -->
+<div id="tabNetwork" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-lg-4">
+    <div class="search-card">
+      <h2>Sieć powiązań</h2>
+      <p class="small text-muted">LLM wyciąga osoby, firmy, kwoty i relacje z dokumentów pasujących do zapytania.</p>
+      <div class="input-group mb-2">
+        <input type="text" id="networkQuery" class="form-control" placeholder="Zapytanie do analizy..." onkeydown="if(event.key==='Enter') buildNetwork()">
+        <button class="btn btn-primary" onclick="buildNetwork()" id="networkBtn">Buduj graf</button>
+      </div>
+      <div class="mb-2">
+        <select class="form-select form-select-sm" id="networkLimit">
+          <option value="10">10 dokumentów</option>
+          <option value="15" selected>15 dokumentów</option>
+          <option value="20">20 dokumentów</option>
+        </select>
+      </div>
+      <div id="networkStats" class="small text-muted mt-2"></div>
+      <hr>
+      <div id="networkLegend" class="d-none">
+        <div class="small fw-bold mb-1">Legenda:</div>
+        <div class="d-flex flex-wrap gap-1 mb-2" style="font-size:0.75rem;">
+          <span style="background:#fde68a;padding:2px 8px;border-radius:10px;">👤 Osoba</span>
+          <span style="background:#bfdbfe;padding:2px 8px;border-radius:10px;">🏢 Firma</span>
+          <span style="background:#bbf7d0;padding:2px 8px;border-radius:10px;">💰 Kwota</span>
+          <span style="background:#e9d5ff;padding:2px 8px;border-radius:10px;">📄 Dokument</span>
+          <span style="background:#fed7aa;padding:2px 8px;border-radius:10px;">📌 Inne</span>
+        </div>
+        <div class="d-flex flex-wrap gap-1 mb-2" style="font-size:0.72rem;">
+          <span style="color:#dc2626;font-weight:700;">━━ przepływ finansowy</span>
+          <span style="color:#7c3aed;">━━ zatrudnienie</span>
+          <span style="color:#d97706;">━━ własność</span>
+          <span style="color:#0d9488;">━━ przetarg</span>
+          <span style="color:#1d4ed8;">━━ decyzja</span>
+          <span style="color:#94a3b8;">╌╌ powiązanie</span>
+        </div>
+        <div class="small text-muted">Przeciągnij węzły · Scroll = zoom · Hover = info</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-8">
+    <div class="search-card" style="padding:0;overflow:hidden;min-height:550px;position:relative;">
+      <div id="networkPlaceholder" class="d-flex align-items-center justify-content-center h-100"
+          style="min-height:550px;color:#adb5bd;flex-direction:column;gap:12px;">
+        <div style="font-size:3rem;">🕸</div>
+        <div>Wpisz zapytanie i kliknij "Buduj graf"</div>
+      </div>
+      <div id="networkLoader" class="d-none position-absolute top-50 start-50 translate-middle text-center">
+        <div class="spinner-border text-primary"></div>
+        <p class="mt-2 small text-muted">LLM ekstrahuje encje i relacje...</p>
+      </div>
+      <svg id="networkSvg" style="width:100%;height:550px;display:none;"></svg>
+      <div id="nodeTooltip" style="position:absolute;background:#1a1f36;color:#fff;padding:6px 12px;border-radius:6px;font-size:0.8rem;display:none;pointer-events:none;max-width:220px;"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- TAB: BAZY -->
+<div id="tabCollections" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="search-card">
+      <h2>Zużycie pamięci (szacunek)</h2>
+      <div id="storageGaugeWrap" class="mb-3">
+        <div class="d-flex justify-content-between small mb-1">
+          <span id="storageUsedLabel" class="fw-bold">Ładowanie...</span>
+          <span id="storageFreeLabel" class="text-muted"></span>
+        </div>
+        <div class="progress" style="height:18px;border-radius:9px;">
+          <div id="storageBar" class="progress-bar" style="width:0%;border-radius:9px;transition:width 0.6s;"
+               role="progressbar"></div>
+        </div>
+        <div class="d-flex justify-content-between mt-1" style="font-size:0.72rem;color:#6c757d;">
+          <span>0 MB</span>
+          <span id="storageLimitLabel">4 096 MB (Free tier)</span>
+        </div>
+      </div>
+      <div id="storageDetails" class="small text-muted"></div>
+    </div>
+
+    <div class="search-card mt-3">
+      <h2>Nowa kolekcja</h2>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Nazwa</label>
+        <input type="text" id="newColName" class="form-control form-control-sm" placeholder="np. akta_sprawy_2026">
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Model embeddingu</label>
+        <select id="newColModel" class="form-select form-select-sm" onchange="updateVecSize(this)">
+          <option value="768">nomic-embed-text (768 dim) — aktualny</option>
+          <option value="384">all-MiniLM-L6-v2 (384 dim)</option>
+          <option value="1536">OpenAI text-embedding-3-small (1536 dim)</option>
+          <option value="3072">OpenAI text-embedding-3-large (3072 dim)</option>
+          <option value="custom">Własny rozmiar...</option>
+        </select>
+      </div>
+      <div class="mb-2" id="customVecWrap" style="display:none;">
+        <input type="number" id="newColVecSize" class="form-control form-control-sm" value="768" min="1" max="65536" placeholder="Rozmiar wektora">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold mb-1">Metryka odległości</label>
+        <select id="newColDistance" class="form-select form-select-sm">
+          <option value="Cosine">Cosine (rekomendowana)</option>
+          <option value="Euclid">Euclid</option>
+          <option value="Dot">Dot product</option>
+        </select>
+      </div>
+      <div class="form-check mb-3">
+        <input class="form-check-input" type="checkbox" id="newColSwitch" checked>
+        <label class="form-check-label small" for="newColSwitch">Przełącz na nową kolekcję po utworzeniu</label>
+      </div>
+      <button class="btn btn-primary w-100 btn-sm" onclick="createCollection()">Utwórz kolekcję</button>
+      <div id="createColStatus" class="mt-2 small d-none"></div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="search-card">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 style="margin:0;">Kolekcje w klastrze</h2>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadStorageStats()">↺ Odśwież</button>
+      </div>
+      <div id="collectionsTable">
+        <div class="text-center py-4 text-muted small">Ładowanie...</div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- TAB: IMPORT -->
+<div id="tabImport" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="search-card">
+      <h2>Przeglądarka folderów</h2>
+      <div class="input-group input-group-sm mb-2">
+        <input type="text" id="browsePathInput" class="form-control font-monospace" value="/mnt" placeholder="/mnt/...">
+        <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
+      </div>
+      <div id="browseCrumb" class="small text-muted mb-2"></div>
+      <div id="browseList" style="max-height:55vh;overflow-y:auto;border:1px solid #e9ecef;border-radius:6px;"></div>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="search-card">
+      <h2>Import do Qdrant Cloud</h2>
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Wybrany folder:</label>
+        <div class="input-group">
+          <input type="text" id="importPathInput" class="form-control font-monospace" placeholder="Wybierz folder z przeglądarki lub wpisz ścieżkę..." value="/mnt/g/Mój dysk/NotebookLM">
+          <button class="btn btn-outline-secondary btn-sm" onclick="browseDir(document.getElementById('importPathInput').value)">Przeglądaj</button>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Typy plików:</label>
+        <div class="d-flex flex-wrap gap-2" id="extCheckboxes">
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="pdf" checked> PDF
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="docx" checked> DOCX
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="xlsx" checked> XLSX
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="csv" checked> CSV
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="md" checked> MD
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="json" checked> JSON
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check" value="txt"> TXT
+          </label>
+        </div>
+      </div>
+      <div class="d-flex gap-2 mb-3">
+        <button class="btn btn-success flex-grow-1" onclick="executeImport()" id="importBtn">Uruchom wektoryzację</button>
+        <button class="btn btn-outline-danger" onclick="confirmReindex()" id="reindexBtn" title="Wyczyść kolekcję i importuj od nowa z nowym chunkingiem (overlap 200)">
+          ↺ Pełny re-indeks
+        </button>
+      </div>
+      <div id="reindexStatus" class="alert alert-warning small d-none">
+        Czyszczenie kolekcji...
+      </div>
+
+      <div id="importProgressWrap" style="display:none;">
+        <div class="d-flex justify-content-between small mb-1">
+          <span id="importProgressLabel" class="fw-bold"></span>
+          <span id="importProgressPct" class="text-muted"></span>
+        </div>
+        <div class="progress mb-2" style="height:10px;">
+          <div id="importProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%"></div>
+        </div>
+        <div id="importLog" style="max-height:250px;overflow-y:auto;font-size:0.78rem;font-family:monospace;background:#1a1f36;color:#a0aec0;border-radius:6px;padding:10px;"></div>
+      </div>
+      <div id="importDone" class="alert alert-success mt-2 d-none small"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+let activeFileFilter = null;
+let allDocs = [];
+let maxChunks = 1;
+
+// ---- TABS ----
+let aiTabLoaded = false, colTabLoaded = false;
+function showTab(name) {
+    ['tabSearch','tabDocs','tabAi','tabNetwork','tabCollections','tabImport'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    });
+    const el = document.getElementById('tab' + name.charAt(0).toUpperCase() + name.slice(1));
+    if (el) el.style.display = '';
+    document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
+    const map = {search:0, docs:1, ai:2, network:3, collections:4, import:5};
+    const tabs = document.querySelectorAll('.nav-tabs .nav-link');
+    if (tabs[map[name]]) tabs[map[name]].classList.add('active');
+    if (name === 'docs' && allDocs.length === 0) loadDocs();
+    if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
+    if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); }
+}
+
+// ---- STATS ----
+function updateStats() {
+    fetch('/stats').then(r => r.json()).then(d => {
+        if (d.success) {
+            document.getElementById('statVectors').textContent = (d.vectors_count || 0).toLocaleString('pl');
+            document.getElementById('statStatus').textContent  = String(d.status).toUpperCase();
+        }
+    }).catch(() => {});
+}
+
+// ---- DOCS BROWSER ----
+function loadDocs() {
+    fetch('/documents').then(r => r.json()).then(d => {
+        if (!d.success) return;
+        allDocs = d.documents;
+        maxChunks = allDocs.length ? allDocs[0].chunks : 1;
+        document.getElementById('tabDocsCount').textContent = d.total;
+        renderDocTable(allDocs);
+    });
+}
+
+function extBadge(fname) {
+    const ext = fname.split('.').pop().toLowerCase();
+    const cls = {'pdf':'ext-pdf','docx':'ext-docx','doc':'ext-docx','xlsx':'ext-xlsx','xls':'ext-xlsx','json':'ext-json','md':'ext-md','txt':'ext-txt','csv':'ext-csv'}[ext] || 'ext-txt';
+    return `<span class="ext-badge ${cls}">${ext}</span>`;
+}
+
+function renderDocTable(docs) {
+    const tbody = document.getElementById('docTableBody');
+    document.getElementById('docCountLabel').textContent = `${docs.length} plików`;
+    if (!docs.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Brak wyników</td></tr>';
+        return;
+    }
+    tbody.innerHTML = docs.map((d, i) => {
+        const safe = d.file.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        return `<tr id="docrow-${i}">
+            <td style="text-align:center;">
+                <input type="checkbox" class="doc-check" value="${safe}" onchange="onDocCheck()">
+            </td>
+            <td class="text-muted">${i+1}</td>
+            <td style="max-width:0;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${d.file}">${d.file}</div></td>
+            <td>${extBadge(d.file)}</td>
+            <td>
+                <div style="font-size:0.78rem;font-weight:700;">${d.chunks}</div>
+                <div class="chunks-bar"><div class="chunks-bar-fill" style="width:${Math.round(d.chunks/maxChunks*100)}%"></div></div>
+            </td>
+            <td class="text-end">
+                <button class="doc-row-btn" onclick="searchByFile('${safe}')">Szukaj</button>
+                ${d.file.match(/\.xlsx?$/i) ? `<button class="doc-row-btn" style="color:#d97706;border-color:#fde68a;background:#fffbeb;" onclick="analyzeExcel('${safe}')">🔬 Forensyka</button>` : ''}
+            </td>
+        </tr>`;
+    }).join('');
+    onDocCheck();
+}
+
+function filterDocTable() {
+    const q = document.getElementById('docFilterInput').value.toLowerCase();
+    renderDocTable(allDocs.filter(d => d.file.toLowerCase().includes(q)));
+}
+
+function toggleSelectAll(cb) {
+    document.querySelectorAll('.doc-check').forEach(c => c.checked = cb.checked);
+    onDocCheck();
+}
+
+function onDocCheck() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    const bar = document.getElementById('deleteBar');
+    const cnt = document.getElementById('selectedCount');
+    const sa  = document.getElementById('selectAll');
+    const all = document.querySelectorAll('.doc-check');
+    if (checked.length > 0) {
+        bar.classList.remove('d-none');
+        cnt.textContent = `Zaznaczono: ${checked.length}`;
+    } else {
+        bar.classList.add('d-none');
+    }
+    sa.indeterminate = checked.length > 0 && checked.length < all.length;
+    sa.checked = all.length > 0 && checked.length === all.length;
+}
+
+function clearSelection() {
+    document.querySelectorAll('.doc-check').forEach(c => c.checked = false);
+    document.getElementById('selectAll').checked = false;
+    onDocCheck();
+}
+
+function deleteSelected() {
+    const checked = [...document.querySelectorAll('.doc-check:checked')];
+    if (!checked.length) return;
+    const files = checked.map(c => c.value);
+    const names = files.slice(0, 3).join(', ') + (files.length > 3 ? ` i ${files.length - 3} więcej` : '');
+    if (!confirm(`Usunąć ${files.length} plik(ów) z bazy Qdrant?\n\n${names}\n\nOperacja jest nieodwracalna.`)) return;
+
+    const bar = document.getElementById('deleteBar');
+    bar.innerHTML = '<span class="small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Usuwanie...</span>';
+
+    fetch('/documents/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({files})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) { alert('Błąd: ' + d.error); loadDocs(); return; }
+        // Usuń z lokalnej tablicy i przerenderuj
+        allDocs = allDocs.filter(doc => !files.includes(doc.file));
+        maxChunks = allDocs.length ? allDocs[0].chunks : 1;
+        document.getElementById('tabDocsCount').textContent = allDocs.length;
+        renderDocTable(allDocs);
+        updateStats();
+        // Przywróć pasek
+        bar.innerHTML = `<span class="small text-success fw-bold">✅ Usunięto ${d.deleted_chunks} chunków z ${files.length} pliku(ów)</span>
+            <button class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('deleteBar').classList.add('d-none')">✕</button>`;
+        bar.classList.remove('d-none');
+    })
+    .catch(e => { alert('Błąd połączenia: ' + e); loadDocs(); });
+}
+
+function searchByFile(fname) {
+    activeFileFilter = fname;
+    document.getElementById('filterFileBadge').textContent = fname.length > 50 ? fname.slice(0,47)+'...' : fname;
+    document.getElementById('filterFileWrap').style.display = '';
+    document.getElementById('searchScope').textContent = fname.length > 40 ? fname.slice(0,37)+'...' : fname;
+    showTab('search');
+}
+
+function clearFileFilter() {
+    activeFileFilter = null;
+    document.getElementById('filterFileWrap').style.display = 'none';
+    document.getElementById('searchScope').textContent = 'wszystkie dokumenty';
+}
+
+// ---- SEARCH ----
+const MODE_DESCS = {
+    detective: '🔍 Szuka anomalii i niespójności między dokumentami. Oznacza: [ANOMALIA], [PODEJRZANE], [WYMAGA SPRAWDZENIA].',
+    legal:     '⚖️ Ocenia prawidłowość powołanych przepisów. Flaguje: [PRZEPIS NIEAKTUALNY], [NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE].',
+    inconsistency: '⚡ Porównuje dokumenty i wskazuje sprzeczne twierdzenia: Dokument A twierdzi X, Dokument B twierdzi Y.',
+    extract:   '📊 Wyciąga ustrukturyzowane dane (kwoty, daty, osoby, firmy, umowy) jako tabelę Markdown.'
+};
+
+document.getElementById('searchMode').addEventListener('change', function() {
+    const desc = document.getElementById('modeDesc');
+    if (MODE_DESCS[this.value]) {
+        desc.textContent = MODE_DESCS[this.value];
+        desc.classList.remove('d-none');
+    } else {
+        desc.classList.add('d-none');
+    }
+});
+
+function selectPrompt(text) {
+    document.getElementById('queryInput').value = text;
+    executeSearch();
+}
+
+function executeSearch() {
+    const query = document.getElementById('queryInput').value.trim();
+    if (!query) return;
+    const limit = parseInt(document.getElementById('resultLimit').value);
+    const mode  = document.getElementById('searchMode').value;
+
+    const loader = document.getElementById('loader');
+    const container = document.getElementById('resultsContainer');
+    const aiContainer = document.getElementById('aiResponseContainer');
+    const btn = document.getElementById('searchBtn');
+
+    loader.classList.remove('d-none');
+    container.innerHTML = '';
+    aiContainer.innerHTML = '';
+    btn.disabled = true;
+
+    fetch('/search/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query, limit, mode, file_filter: activeFileFilter})
+    })
+    .then(async response => {
+        const reader  = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '', resultsData = null, aiText = '';
+
+        const readChunk = async () => {
+            const {done, value} = await reader.read();
+            if (done) { btn.disabled = false; return; }
+            buffer += decoder.decode(value, {stream: true});
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop();
+
+            for (const block of parts) {
+                const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+                if (!dataLine) continue;
+                try {
+                    const ev = JSON.parse(dataLine.slice(6));
+                    if (ev.results !== undefined) {
+                        // Wyniki Qdrant dostępne — renderuj natychmiast
+                        resultsData = ev;
+                        loader.classList.add('d-none');
+                        const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
+                        aiContainer.innerHTML = `
+                            <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
+                                <div class="d-flex justify-content-between align-items-start mb-2">
+                                    <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
+                                    <div class="d-flex gap-2">
+                                        <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
+                                        <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                                    </div>
+                                </div>
+                                <div id="aiAnswerBody" style="font-size:0.95rem;line-height:1.7;font-weight:500;white-space:pre-wrap;"></div>
+                            </div>
+                            <div id="verifyContainer"></div>`;
+                        renderDocResults(ev.results, query, container);
+                    } else if (ev.token !== undefined) {
+                        aiText += ev.token;
+                        const body = document.getElementById('aiAnswerBody');
+                        if (body) body.innerHTML = formatAiText(aiText, mode);
+                    } else if (ev.done !== undefined) {
+                        // Finalizuj
+                        const box = document.getElementById('aiStreamBox');
+                        if (box) {
+                            const spinner = box.querySelector('.spinner-border');
+                            if (spinner) spinner.remove();
+                        }
+                        if (resultsData) {
+                            window._lastSearchData = {query, mode_label: resultsData.mode_label,
+                                results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
+                            if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
+                                runVerification(query, aiText, resultsData.contexts);
+                        }
+                        btn.disabled = false; return;
+                    } else if (ev.error) {
+                        loader.classList.add('d-none');
+                        container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                        btn.disabled = false; return;
+                    }
+                } catch(e) {}
+            }
+            await readChunk();
+        };
+        await readChunk();
+    })
+    .catch(err => {
+        loader.classList.add('d-none');
+        btn.disabled = false;
+        container.innerHTML = `<div class="alert alert-danger">Błąd: ${err}</div>`;
+    });
+    return;
+
+    // === stary kod (niedostępny) ===
+    fetch('/search_old', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+    .then(r => r.json())
+    .then(data => {
+        loader.classList.add('d-none');
+        btn.disabled = false;
+        if (!data.success) {
+            container.innerHTML = `<div class="alert alert-danger">Błąd: ${data.error}</div>`;
+            return;
+        }
+
+        const modeColors = {
+            detective: '#b45309', legal: '#1d4ed8',
+            inconsistency: '#7c3aed', extract: '#065f46', normal: '#4f46e5'
+        };
+        const modeColor = modeColors[data.mode] || '#4f46e5';
+        const isExtract = data.mode === 'extract';
+
+        // Zapisz dane do eksportu
+        window._lastSearchData = {query, results: data.results, ai_answer: data.ai_answer, mode_label: data.mode_label};
+
+        aiContainer.innerHTML = `
+            <div class="ai-box" style="border-left-color:${modeColor};">
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                    <h5 style="color:${modeColor};margin:0;">${data.mode_label || 'Analiza LLM'}</h5>
+                    <div class="d-flex gap-2">
+                        <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm"
+                            style="font-size:0.75rem;padding:2px 10px;" title="Pobierz raport Word">
+                            📄 Pobierz DOCX
+                        </button>
+                        <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');"
+                            class="btn btn-outline-primary btn-sm"
+                            style="font-size:0.75rem;padding:2px 10px;" title="Wizualizuj sieć powiązań">
+                            🕸 Sieć powiązań
+                        </button>
+                    </div>
+                </div>
+                <div style="font-size:0.95rem;line-height:1.7;font-weight:500;">
+                    ${isExtract ? renderMarkdownTable(data.ai_answer) : data.ai_answer.replace(/\n/g,'<br>').replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|SPRZECZNOŚĆ)\]/g, '<span class="badge" style="background:#fee2e2;color:#b91c1c;font-size:0.78rem;margin:0 2px;">$1</span>')}
+                </div>
+            </div>
+            <div id="verifyContainer"></div>`;
+
+        // Weryfikacja — uruchamia się asynchronicznie po wyświetleniu odpowiedzi
+        if (document.getElementById('verifyToggle').checked && data.contexts && data.contexts.length) {
+            runVerification(query, data.ai_answer, data.contexts);
+        }
+
+        if (!data.results.length) {
+            container.innerHTML = `<div class="alert alert-warning">Brak dokumentów źródłowych spełniających kryteria semantyczne.</div>`;
+            return;
+        }
+        container.innerHTML = data.results.map((item, idx) => {
+            const hasPath = item.win_path && item.win_path.length > 3;
+            const pathHtml = hasPath
+                ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
+                    📂 <span style="font-family:monospace;">${item.win_path}</span>
+                    <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
+                        style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
+                   </div>`
+                : '';
+            return `
+            <div class="result-card">
+                <div class="result-header" onclick="toggleResult(${idx})">
+                    <span class="result-fname">📄 ${item.file}</span>
+                    <span class="result-meta">
+                        <span class="badge bg-secondary">${(parseFloat(item.score)*100).toFixed(1)}%</span>
+                        <span class="chevron" id="chev${idx}">▼</span>
+                    </span>
+                </div>
+                <div class="result-preview" id="prev${idx}">${item.text.replace(/<[^>]*>/g,'').slice(0,200)}</div>
+                <div class="result-body" id="body${idx}">${item.text}</div>
+                ${pathHtml}
+            </div>`;
+        }).join('');
+    })
+    .catch(err => {
+        loader.classList.add('d-none');
+        btn.disabled = false;
+        container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${err}</div>`;
+    });
+}
+
+// ---- WERYFIKACJA (Krytyk) ----
+function runVerification(query, answer, contexts) {
+    const vc = document.getElementById('verifyContainer');
+    if (!vc) return;
+    vc.innerHTML = `
+        <div class="verify-box loading">
+            <div class="d-flex align-items-center gap-2">
+                <div class="spinner-border spinner-border-sm text-secondary"></div>
+                <strong style="font-size:0.9rem;">Krytyk weryfikuje odpowiedź...</strong>
+                <span class="small text-muted">(drugi przebieg LLM — ~30-60 sek)</span>
+            </div>
+        </div>`;
+
+    fetch('/verify', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query, answer, contexts})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) {
+            vc.innerHTML = `<div class="verify-box warn"><strong>Błąd weryfikacji:</strong> ${d.error}</div>`;
+            return;
+        }
+        const v = d.verdict || '';
+        const cls = v.includes('HALUCYNACJE') ? 'bad' : v.includes('CZĘŚCIOWO') ? 'warn' : 'ok';
+        const icon = cls === 'ok' ? '✅' : cls === 'warn' ? '⚠️' : '🚨';
+        vc.innerHTML = `
+            <div class="verify-box ${cls}">
+                <div class="d-flex align-items-start justify-content-between mb-2">
+                    <div>
+                        <strong style="font-size:0.95rem;">${icon} Werdykt Krytyka: ${v}</strong>
+                        ${d.justification ? `<div class="small text-muted mt-1">${d.justification}</div>` : ''}
+                    </div>
+                    <div class="verify-stats ms-3" style="flex-shrink:0;">
+                        <span class="vs-ok">✓ ${d.confirmed}</span>
+                        <span class="vs-warn">⚠ ${d.partial}</span>
+                        <span class="vs-bad">✗ ${d.hallucinations}</span>
+                    </div>
+                </div>
+                <details>
+                    <summary class="small" style="cursor:pointer;color:#6c757d;">Szczegóły weryfikacji</summary>
+                    <pre class="verify-claim mt-2">${d.raw}</pre>
+                </details>
+            </div>`;
+    })
+    .catch(e => {
+        vc.innerHTML = `<div class="verify-box warn">Błąd połączenia z LLM: ${e}</div>`;
+    });
+}
+
+function formatAiText(text, mode) {
+    const isExtract = mode === 'extract';
+    if (isExtract) return renderMarkdownTable(text);
+    return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/\n/g,'<br>')
+        .replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|SPRZECZNOŚĆ)\]/g,
+            '<span class="badge" style="background:#fee2e2;color:#b91c1c;font-size:0.78rem;margin:0 2px;">$1</span>');
+}
+
+function renderDocResults(results, query, container) {
+    if (!results.length) {
+        container.innerHTML = `<div class="alert alert-warning">Brak dokumentów źródłowych.</div>`;
+        return;
+    }
+    container.innerHTML = results.map((item, idx) => {
+        const hasPath = item.win_path && item.win_path.length > 3;
+        const pathHtml = hasPath
+            ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
+                📂 <span style="font-family:monospace;">${item.win_path}</span>
+                <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
+                    style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
+               </div>` : '';
+        return `<div class="result-card">
+            <div class="result-header" onclick="toggleResult(${idx})">
+                <span class="result-fname">📄 ${item.file}</span>
+                <span class="result-meta">
+                    <span class="badge bg-secondary">${(parseFloat(item.score)*100).toFixed(1)}%</span>
+                    <span class="chevron" id="chev${idx}">▼</span>
+                </span>
+            </div>
+            <div class="result-preview" id="prev${idx}">${item.text.replace(/<[^>]*>/g,'').slice(0,200)}</div>
+            <div class="result-body" id="body${idx}">${item.text}</div>
+            ${pathHtml}
+        </div>`;
+    }).join('');
+}
+
+function renderMarkdownTable(text) {
+    // Prosta konwersja tabeli Markdown → HTML
+    const lines = text.split('\n').filter(l => l.trim());
+    let html = '<div style="overflow-x:auto;"><table class="table table-sm table-bordered" style="font-size:0.82rem;">';
+    let inTable = false;
+    for (const line of lines) {
+        if (!line.includes('|')) { html += `<p>${line}</p>`; continue; }
+        const cells = line.split('|').filter((_, i, a) => i > 0 && i < a.length - 1);
+        if (line.match(/^\s*\|[-| ]+\|\s*$/)) continue; // separator
+        const tag = !inTable ? 'th' : 'td';
+        if (!inTable) { html += '<thead><tr>'; inTable = true; }
+        else html += '<tr>';
+        html += cells.map(c => `<${tag} style="white-space:nowrap;">${c.trim()}</${tag}>`).join('');
+        html += tag === 'th' ? '</tr></thead><tbody>' : '</tr>';
+    }
+    if (inTable) html += '</tbody>';
+    html += '</table></div>';
+    return html;
+}
+
+function openFile(wslPath) {
+    fetch('/file/open', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path: wslPath})
+    }).then(r => r.json()).then(d => {
+        if (!d.success) alert('Nie można otworzyć: ' + d.error);
+    });
+}
+
+function toggleResult(idx) {
+    const body = document.getElementById('body'+idx);
+    const prev = document.getElementById('prev'+idx);
+    const chev = document.getElementById('chev'+idx);
+    const open = body.classList.toggle('show');
+    prev.style.display = open ? 'none' : '';
+    chev.classList.toggle('open', open);
+}
+
+// ---- FOLDER BROWSER ----
+function browseDir(path) {
+    if (!path) path = '/mnt';
+    fetch('/browse?path=' + encodeURIComponent(path))
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) return;
+        document.getElementById('browsePathInput').value = d.current;
+        const crumb = document.getElementById('browseCrumb');
+        crumb.innerHTML = d.parent
+            ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
+            : `<span>${d.current}</span>`;
+        const list = document.getElementById('browseList');
+        if (!d.entries.length) {
+            list.innerHTML = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
+            return;
+        }
+        list.innerHTML = d.entries.map(e => {
+            if (e.type === 'dir') {
+                return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
+                    <span style="color:#f59e0b;">📁</span>
+                    <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                    <button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
+                        onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>
+                </div>`;
+            } else {
+                const ext = e.name.split('.').pop().toLowerCase();
+                const cls = {'pdf':'ext-pdf','docx':'ext-docx','xlsx':'ext-xlsx','json':'ext-json','md':'ext-md','csv':'ext-csv'}[ext]||'ext-txt';
+                return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.7;">
+                    <span style="font-size:0.7rem;color:#64748b;">📄</span>
+                    <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                    <span class="ext-badge ${cls}">${ext}</span>
+                </div>`;
+            }
+        }).join('');
+    });
+}
+
+function selectImportFolder(path) {
+    document.getElementById('importPathInput').value = path;
+}
+
+// ---- IMPORT SSE ----
+function executeImport() {
+    const folderPath = document.getElementById('importPathInput').value.trim();
+    if (!folderPath) return;
+    const exts = [...document.querySelectorAll('.ext-check:checked')].map(el => el.value);
+    if (!exts.length) { alert('Wybierz co najmniej jeden typ pliku.'); return; }
+
+    const btn = document.getElementById('importBtn');
+    const wrap = document.getElementById('importProgressWrap');
+    const bar  = document.getElementById('importProgressBar');
+    const lbl  = document.getElementById('importProgressLabel');
+    const pct  = document.getElementById('importProgressPct');
+    const log  = document.getElementById('importLog');
+    const done = document.getElementById('importDone');
+
+    btn.disabled = true;
+    wrap.style.display = '';
+    done.classList.add('d-none');
+    log.innerHTML = '';
+    bar.style.width = '0%';
+    lbl.textContent = 'Inicjalizacja...';
+    pct.textContent = '';
+
+    const params = new URLSearchParams({folder: folderPath});
+    exts.forEach(e => params.append('ext', e));
+    const es = new EventSource('/import/stream?' + params.toString());
+
+    es.addEventListener('start', e => {
+        const d = JSON.parse(e.data);
+        lbl.textContent = `Przetwarzanie 0 / ${d.total} plików`;
+        log.innerHTML += `<div style="color:#63b3ed;">Znaleziono ${d.total} plików do importu...</div>`;
+    });
+
+    es.addEventListener('file', e => {
+        const d = JSON.parse(e.data);
+        const p = Math.round(d.i / d.total * 100);
+        bar.style.width = p + '%';
+        lbl.textContent = `${d.i} / ${d.total}: ${d.file.length > 40 ? d.file.slice(0,37)+'...' : d.file}`;
+        pct.textContent = p + '%';
+        const color = d.new > 0 ? '#68d391' : '#a0aec0';
+        log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${d.file} — ${d.new} nowych / ${d.chunks} chunków</div>`;
+        log.scrollTop = log.scrollHeight;
+    });
+
+    es.addEventListener('skip', e => {
+        const d = JSON.parse(e.data);
+        log.innerHTML += `<div style="color:#fc8181;">[${d.i}/${d.total}] POMINIĘTO: ${d.file} (${d.reason})</div>`;
+        log.scrollTop = log.scrollHeight;
+    });
+
+    es.addEventListener('done', e => {
+        const d = JSON.parse(e.data);
+        es.close();
+        btn.disabled = false;
+        bar.style.width = '100%';
+        bar.classList.remove('progress-bar-animated');
+        lbl.textContent = 'Zakończono';
+        pct.textContent = '100%';
+        log.innerHTML += `<div style="color:#f6e05e;font-weight:bold;margin-top:6px;">✅ ${d.msg}</div>`;
+        done.classList.remove('d-none');
+        done.innerHTML = `✅ ${d.msg}`;
+        updateStats();
+        allDocs = [];
+    });
+
+    es.addEventListener('error', e => {
+        try {
+            const d = JSON.parse(e.data);
+            log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg}</div>`;
+        } catch(_) {}
+        es.close();
+        btn.disabled = false;
+    });
+
+    es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) return;
+        es.close();
+        btn.disabled = false;
+        log.innerHTML += `<div style="color:#fc8181;">❌ Połączenie SSE przerwane.</div>`;
+    };
+}
+
+// ---- DYNAMICZNE SUGESTIE ----
+function loadSuggestions(force) {
+    const sideContainer = document.getElementById('suggestionsContainer');
+    const tabContainer  = document.getElementById('aiTabSuggestionsContainer');
+    const btns = [document.getElementById('suggestRefreshBtn'), document.getElementById('suggestRefreshBtn2')];
+    const loader = `<div class="text-center py-3">
+        <div class="spinner-border spinner-border-sm" style="color:#4f46e5;" role="status"></div>
+        <span class="ms-2 small text-muted">${force ? 'Generowanie nowych sugestii przez Llama3...' : 'Ładowanie sugestii...'}</span>
+    </div>`;
+    if (sideContainer) sideContainer.innerHTML = loader;
+    if (tabContainer)  tabContainer.innerHTML  = loader;
+    btns.forEach(b => { if (b) b.disabled = true; });
+
+    fetch('/suggestions?force=' + (force ? '1' : '0'))
+    .then(r => r.json())
+    .then(d => {
+        btns.forEach(b => { if (b) b.disabled = false; });
+        if (!d.success || !d.suggestions || !d.suggestions.length) {
+            const msg = '<div class="small text-muted px-1 py-2">Brak sugestii — sprawdź czy Ollama działa.</div>';
+            if (sideContainer) sideContainer.innerHTML = msg;
+            if (tabContainer)  tabContainer.innerHTML  = msg;
+            return;
+        }
+        // Boczny panel — kompaktowe przyciski
+        if (sideContainer) {
+            sideContainer.innerHTML = d.suggestions.map(s =>
+                `<button class="prompt-btn" style="border-color:#e0e0ff;background:#fafafe;"
+                    onclick="selectPrompt('${s.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${s}</button>`
+            ).join('') + (d.cached ? '<div class="small text-muted px-1 mt-1" style="font-size:0.7rem;">z cache · kliknij ↺ aby odświeżyć</div>' : '');
+        }
+        // Zakładka AI z bazy — większe karty
+        if (tabContainer) {
+            tabContainer.innerHTML = `<div class="row g-3">` +
+            d.suggestions.map((s, i) =>
+                `<div class="col-md-6">
+                    <div class="card border-0 shadow-sm h-100" style="border-left:4px solid #4f46e5 !important;cursor:pointer;"
+                        onclick="selectPrompt('${s.replace(/'/g,"\\'").replace(/"/g,'&quot;')}'); showTab('search');">
+                        <div class="card-body py-3 px-3">
+                            <div class="d-flex gap-2 align-items-start">
+                                <span style="color:#4f46e5;font-weight:800;font-size:1.1rem;">${i+1}</span>
+                                <span style="font-size:0.9rem;line-height:1.5;">${s}</span>
+                            </div>
+                        </div>
+                        <div class="card-footer bg-transparent border-0 pt-0 pb-2 px-3">
+                            <span style="font-size:0.72rem;color:#4f46e5;">→ kliknij aby wyszukać</span>
+                        </div>
+                    </div>
+                </div>`
+            ).join('') + `</div>` +
+            (d.cached ? '<p class="text-muted small mt-3">Wyniki z cache (30 min) · kliknij "Generuj nowe" aby odświeżyć</p>' :
+                        '<p class="text-muted small mt-3">Wygenerowano z losowej próbki dokumentów z bazy Qdrant Cloud</p>');
+        }
+    })
+    .catch(() => {
+        btns.forEach(b => { if (b) b.disabled = false; });
+        const msg = '<div class="small text-danger px-1 py-2">Błąd połączenia z LLM.</div>';
+        if (sideContainer) sideContainer.innerHTML = msg;
+        if (tabContainer)  tabContainer.innerHTML  = msg;
+    });
+}
+
+// ---- ANALIZA FORENSYCZNA EXCEL ----
+function analyzeExcel(fname) {
+    const doc = allDocs.find(d => d.file === fname);
+    const wslPath = doc && doc.full_path ? doc.full_path : '';
+
+    // Otwórz modal
+    let modal = document.getElementById('excelModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'excelModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;overflow-y:auto;padding:20px;';
+        modal.innerHTML = `
+            <div style="max-width:900px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;">
+                <div style="background:#1a1f36;color:#fff;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;">
+                    <strong>🔬 Forensyka Excel: <span id="excelModalTitle"></span></strong>
+                    <button onclick="document.getElementById('excelModal').remove()"
+                        style="background:none;border:none;color:#fff;font-size:1.4rem;cursor:pointer;">✕</button>
+                </div>
+                <div id="excelModalBody" style="padding:20px;"></div>
+            </div>`;
+        document.body.appendChild(modal);
+    }
+
+    document.getElementById('excelModalTitle').textContent = fname;
+    document.getElementById('excelModalBody').innerHTML = `
+        <div class="text-center py-4">
+            <div class="spinner-border text-warning"></div>
+            <p class="mt-2 text-muted">Analizuję formuły, porównuję wartości, szukam anomalii...</p>
+        </div>`;
+
+    fetch('/analyze/excel', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({file: fname, wsl_path: wslPath})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) {
+            document.getElementById('excelModalBody').innerHTML =
+                `<div class="alert alert-danger">❌ ${d.error}</div>`;
+            return;
+        }
+        const s = d.summary;
+        const sevColors = {critical:'#dc2626', high:'#d97706', warning:'#6c757d'};
+        const sevBg     = {critical:'#fee2e2', high:'#fef3c7', warning:'#f8f9fa'};
+        const sevIcon   = {critical:'🚨', high:'⚠️', warning:'ℹ️'};
+
+        const hiddenTotal = (s.hidden_rows||0) + (s.hidden_cols||0);
+        let html = `
+            <div class="row g-2 mb-4">
+                <div class="col"><div class="text-center p-3 rounded" style="background:#f0f9ff;">
+                    <div style="font-size:1.4rem;font-weight:800;color:#0d6efd;">${s.total_formulas}</div>
+                    <div style="font-size:0.72rem;color:#6c757d;">Formuły</div>
+                </div></div>
+                <div class="col"><div class="text-center p-3 rounded" style="background:${s.errors>0?'#fee2e2':'#f0fdf4'};">
+                    <div style="font-size:1.4rem;font-weight:800;color:${s.errors>0?'#dc2626':'#16a34a'};">${s.errors}</div>
+                    <div style="font-size:0.72rem;color:#6c757d;">Błędy rachunkowe</div>
+                </div></div>
+                <div class="col"><div class="text-center p-3 rounded" style="background:${s.goal_seek>0?'#fef3c7':'#f0fdf4'};">
+                    <div style="font-size:1.4rem;font-weight:800;color:${s.goal_seek>0?'#d97706':'#16a34a'};">${s.goal_seek}</div>
+                    <div style="font-size:0.72rem;color:#6c757d;">Goal Seek</div>
+                </div></div>
+                <div class="col"><div class="text-center p-3 rounded" style="background:${s.overrides>0?'#fee2e2':'#f0fdf4'};">
+                    <div style="font-size:1.4rem;font-weight:800;color:${s.overrides>0?'#dc2626':'#16a34a'};">${s.overrides}</div>
+                    <div style="font-size:0.72rem;color:#6c757d;">Nadpisania</div>
+                </div></div>
+                <div class="col"><div class="text-center p-3 rounded" style="background:${hiddenTotal>0?'#fef3c7':'#f0fdf4'};">
+                    <div style="font-size:1.4rem;font-weight:800;color:${hiddenTotal>0?'#d97706':'#16a34a'};">${hiddenTotal}</div>
+                    <div style="font-size:0.72rem;color:#6c757d;">Ukryte</div>
+                </div></div>
+            </div>`;
+
+        if (d.llm_comment) {
+            html += `<div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:14px 16px;margin-bottom:20px;">
+                <strong style="color:#4f46e5;">Ocena biegłego (LLM):</strong>
+                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.llm_comment.replace(/\n/g,'<br>')}</div>
+            </div>`;
+        }
+
+        if (!d.findings.length) {
+            html += `<div class="alert alert-success">✅ Nie wykryto anomalii w formułach.</div>`;
+        } else {
+            html += `<h6 style="font-weight:700;margin-bottom:10px;">Znaleziska (${d.findings.length}):</h6>`;
+            html += d.findings.map(f => `
+                <div style="background:${sevBg[f.severity]};border-left:4px solid ${sevColors[f.severity]};
+                    border-radius:6px;padding:12px 16px;margin-bottom:8px;">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <span style="font-weight:700;color:${sevColors[f.severity]};">${sevIcon[f.severity]} ${f.issue}</span>
+                            <span class="badge ms-2" style="background:${sevColors[f.severity]};font-size:0.65rem;">${f.severity.toUpperCase()}</span>
+                        </div>
+                        <span style="font-size:0.78rem;color:#6c757d;flex-shrink:0;">${f.sheet}!${f.cell}</span>
+                    </div>
+                    <div style="font-size:0.8rem;margin-top:4px;color:#374151;">${f.detail}</div>
+                    <div style="font-family:monospace;font-size:0.78rem;margin-top:4px;color:#6c757d;">
+                        Formuła: ${f.formula}
+                        ${f.calculated !== undefined && f.calculated !== null ? ` | Powinno być: <strong>${f.calculated}</strong>` : ''}
+                        ${f.diff !== undefined ? ` | Różnica: <strong style="color:${sevColors[f.severity]};">${f.diff}</strong>` : ''}
+                    </div>
+                </div>`).join('');
+        }
+
+        document.getElementById('excelModalBody').innerHTML = html;
+    })
+    .catch(e => {
+        document.getElementById('excelModalBody').innerHTML =
+            `<div class="alert alert-danger">Błąd połączenia: ${e}</div>`;
+    });
+}
+
+// ---- EXPORT DOCX ----
+function exportDocx() {
+    const d = window._lastSearchData;
+    if (!d) { alert('Najpierw wykonaj wyszukiwanie.'); return; }
+    fetch('/export/docx', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(d)
+    })
+    .then(r => {
+        if (!r.ok) return r.json().then(e => { throw new Error(e.error); });
+        return r.blob();
+    })
+    .then(blob => {
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `raport_${new Date().toISOString().slice(0,16).replace('T','_').replace(':','')}.docx`;
+        a.click();
+        URL.revokeObjectURL(url);
+    })
+    .catch(e => alert('Błąd eksportu: ' + e.message));
+}
+
+// ---- SIEĆ POWIĄZAŃ ----
+function openNetworkForQuery(q) {
+    document.getElementById('networkQuery').value = q;
+    buildNetwork();
+}
+
+function buildNetwork() {
+    const query = document.getElementById('networkQuery').value.trim();
+    const limit = parseInt(document.getElementById('networkLimit').value);
+    if (!query) return;
+
+    document.getElementById('networkPlaceholder').classList.add('d-none');
+    document.getElementById('networkSvg').style.display = 'none';
+    document.getElementById('networkLoader').classList.remove('d-none');
+    document.getElementById('networkStats').textContent = '';
+    document.getElementById('networkLegend').classList.add('d-none');
+    document.getElementById('networkBtn').disabled = true;
+
+    fetch('/network', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query, limit})
+    })
+    .then(r => r.json())
+    .then(d => {
+        document.getElementById('networkLoader').classList.add('d-none');
+        document.getElementById('networkBtn').disabled = false;
+        if (!d.success) {
+            document.getElementById('networkPlaceholder').classList.remove('d-none');
+            document.getElementById('networkPlaceholder').innerHTML =
+                `<div style="color:#dc2626;">❌ ${d.error}</div>`;
+            return;
+        }
+        if (!d.nodes.length) {
+            document.getElementById('networkPlaceholder').classList.remove('d-none');
+            document.getElementById('networkPlaceholder').innerHTML =
+                '<div>LLM nie znalazł encji w dokumentach. Spróbuj bardziej szczegółowego zapytania.</div>';
+            return;
+        }
+        document.getElementById('networkStats').textContent =
+            `${d.nodes.length} węzłów · ${d.edges.length} relacji · z ${d.sources} dokumentów`;
+        document.getElementById('networkLegend').classList.remove('d-none');
+        renderNetwork(d.nodes, d.edges);
+    })
+    .catch(e => {
+        document.getElementById('networkLoader').classList.add('d-none');
+        document.getElementById('networkBtn').disabled = false;
+        document.getElementById('networkPlaceholder').classList.remove('d-none');
+        document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${e}</div>`;
+    });
+}
+
+function renderNetwork(nodes, edges) {
+    const svg  = document.getElementById('networkSvg');
+    svg.style.display = '';
+    const W = svg.clientWidth || 700;
+    const H = 550;
+
+    // Wyczyść poprzedni graf
+    d3.select('#networkSvg').selectAll('*').remove();
+
+    const colors = {
+        osoba:    '#fde68a', firma: '#bfdbfe', kwota: '#bbf7d0',
+        dokument: '#e9d5ff', inne: '#fed7aa'
+    };
+    const edgeColors = (label) => {
+        if (!label) return '#94a3b8';
+        const l = label.toLowerCase();
+        if (l.includes('zapłacił') || l.includes('przelał') || l.includes('faktura') || l.includes('zł'))
+            return '#dc2626'; // przepływy finansowe — czerwony
+        if (l.includes('prezes') || l.includes('dyrektor') || l.includes('pracownik'))
+            return '#7c3aed'; // zatrudnienie — fioletowy
+        if (l.includes('właściciel') || l.includes('udziałowiec') || l.includes('wspólnik'))
+            return '#d97706'; // własność — pomarańczowy
+        if (l.includes('przetarg') || l.includes('ofertę') || l.includes('wygrał'))
+            return '#0d9488'; // przetarg — zielony
+        if (l.includes('podpisał') || l.includes('zatwierdził') || l.includes('uchwalił'))
+            return '#1d4ed8'; // decyzja — niebieski
+        return '#94a3b8';
+    };
+
+    const svgEl = d3.select('#networkSvg')
+        .attr('viewBox', `0 0 ${W} ${H}`)
+        .call(d3.zoom().scaleExtent([0.3, 4]).on('zoom', e =>
+            g.attr('transform', e.transform)));
+
+    const g = svgEl.append('g');
+
+    // Markery strzałek
+    svgEl.append('defs').append('marker')
+        .attr('id','arrow').attr('viewBox','0 -5 10 10')
+        .attr('refX',18).attr('refY',0)
+        .attr('markerWidth',6).attr('markerHeight',6)
+        .attr('orient','auto')
+        .append('path').attr('d','M0,-5L10,0L0,5').attr('fill','#94a3b8');
+
+    const sim = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(edges).id(d => d.id).distance(90))
+        .force('charge', d3.forceManyBody().strength(-200))
+        .force('center', d3.forceCenter(W/2, H/2))
+        .force('collision', d3.forceCollide(38));
+
+    const link = g.append('g').selectAll('line')
+        .data(edges).join('line')
+        .attr('stroke', d => edgeColors(d.label))
+        .attr('stroke-width', d => {
+            const l = (d.label||'').toLowerCase();
+            return (l.includes('zł') || l.includes('zapłacił') || l.includes('przelał')) ? 3 : 1.5;
+        })
+        .attr('stroke-dasharray', d => {
+            const l = (d.label||'').toLowerCase();
+            return l.includes('znajomy') || l.includes('rodzina') ? '5,4' : null;
+        })
+        .attr('marker-end','url(#arrow)');
+
+    const edgeLabel = g.append('g').selectAll('text')
+        .data(edges).join('text')
+        .text(d => d.label)
+        .attr('font-size', 9)
+        .attr('fill', d => edgeColors(d.label))
+        .attr('font-weight', d => {
+            const l = (d.label||'').toLowerCase();
+            return (l.includes('zł') || l.includes('zapłacił')) ? '700' : '400';
+        })
+        .attr('text-anchor','middle');
+
+    const node = g.append('g').selectAll('g')
+        .data(nodes).join('g')
+        .call(d3.drag()
+            .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+            .on('drag',  (e, d) => { d.fx=e.x; d.fy=e.y; })
+            .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }))
+        .on('mouseover', (e, d) => {
+            const tt = document.getElementById('nodeTooltip');
+            tt.innerHTML = `<strong>${d.label}</strong><br><span style="opacity:0.7">${d.type}</span>`;
+            tt.style.display = 'block';
+            tt.style.left = (e.offsetX + 12) + 'px';
+            tt.style.top  = (e.offsetY - 10) + 'px';
+        })
+        .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
+
+    node.append('circle')
+        .attr('r', d => d.type === 'kwota' ? 22 : 28)
+        .attr('fill', d => colors[d.type] || colors.inne)
+        .attr('stroke','#fff').attr('stroke-width',2)
+        .style('filter','drop-shadow(0 2px 4px rgba(0,0,0,0.15))');
+
+    node.append('text')
+        .text(d => d.label.length > 14 ? d.label.slice(0,13)+'…' : d.label)
+        .attr('text-anchor','middle').attr('dy','0.35em')
+        .attr('font-size', 10).attr('font-weight','600').attr('fill','#1a1f36');
+
+    sim.on('tick', () => {
+        link
+            .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        edgeLabel
+            .attr('x', d => (d.source.x + d.target.x)/2)
+            .attr('y', d => (d.source.y + d.target.y)/2 - 5);
+        node.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+}
+
+// ---- ZAKŁADKA BAZY ----
+function loadStorageStats() {
+    colTabLoaded = true;
+    fetch('/stats/storage').then(r => r.json()).then(d => {
+        if (!d.success) return;
+
+        // Gauge
+        const pct = Math.min(d.used_pct, 100);
+        const bar = document.getElementById('storageBar');
+        bar.style.width = pct + '%';
+        bar.className = 'progress-bar ' + (pct > 80 ? 'bg-danger' : pct > 50 ? 'bg-warning' : 'bg-success');
+        document.getElementById('storageUsedLabel').textContent =
+            `Użyte: ${d.used_mb.toFixed(1)} MB (${d.used_pct}%)`;
+        document.getElementById('storageFreeLabel').textContent =
+            `Wolne: ${(d.free_disk_mb - d.used_mb).toFixed(0)} MB`;
+        document.getElementById('storageDetails').innerHTML =
+            `Punkty łącznie: <strong>${d.total_points.toLocaleString('pl')}</strong> · ` +
+            `Kolekcje: <strong>${d.collections.length} / ${d.max_collections}</strong> · ` +
+            `<span class="text-muted">*szacunek na podstawie liczby wektorów</span>`;
+
+        // Tabela kolekcji
+        const ct = document.getElementById('collectionsTable');
+        ct.innerHTML = `<table class="table table-sm table-hover mb-0">
+            <thead><tr>
+                <th>Nazwa</th><th>Punkty</th><th>Wektor</th><th>Metryka</th><th>Est. MB</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody>
+            ${d.collections.map(c => `
+                <tr style="${c.active ? 'background:#e8f0fe;' : ''}">
+                    <td class="fw-bold">${c.name} ${c.active ? '<span class="badge bg-primary" style="font-size:0.65rem;">aktywna</span>' : ''}</td>
+                    <td>${c.points.toLocaleString('pl')}</td>
+                    <td>${c.vector_size}</td>
+                    <td>${c.distance.replace('Distance.','')}</td>
+                    <td>${c.est_mb}</td>
+                    <td><span class="badge ${c.status.includes('green') ? 'bg-success' : 'bg-warning'}">${c.status.replace('CollectionStatus.','')}</span></td>
+                    <td class="text-end">
+                        ${!c.active ? `<button class="btn btn-sm btn-outline-primary me-1" style="font-size:0.72rem;padding:1px 8px;"
+                            onclick="switchCollection('${c.name}')">Przełącz</button>` : ''}
+                        ${!c.active ? `<button class="btn btn-sm btn-outline-danger" style="font-size:0.72rem;padding:1px 8px;"
+                            onclick="deleteColConfirm('${c.name}')">Usuń</button>` : ''}
+                    </td>
+                </tr>`).join('')}
+            </tbody></table>`;
+    }).catch(() => {});
+}
+
+function updateVecSize(sel) {
+    document.getElementById('customVecWrap').style.display = sel.value === 'custom' ? '' : 'none';
+}
+
+function createCollection() {
+    const name  = document.getElementById('newColName').value.trim();
+    const model = document.getElementById('newColModel').value;
+    const vsize = model === 'custom'
+        ? parseInt(document.getElementById('newColVecSize').value)
+        : parseInt(model);
+    const dist  = document.getElementById('newColDistance').value;
+    const sw    = document.getElementById('newColSwitch').checked;
+    const st    = document.getElementById('createColStatus');
+
+    if (!name) { st.className='alert alert-danger small mt-2'; st.textContent='Podaj nazwę kolekcji.'; st.classList.remove('d-none'); return; }
+
+    st.className='alert alert-warning small mt-2';
+    st.textContent='Tworzenie...';
+    st.classList.remove('d-none');
+
+    fetch('/collections/create', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name, vector_size: vsize, distance: dist, switch_to: sw})
+    }).then(r=>r.json()).then(d => {
+        if (!d.success) {
+            st.className='alert alert-danger small mt-2';
+            st.textContent='❌ ' + d.error;
+        } else {
+            st.className='alert alert-success small mt-2';
+            st.textContent=`✅ Kolekcja "${d.name}" utworzona.${d.switched ? ' Przełączono.' : ''}`;
+            document.getElementById('newColName').value = '';
+            colTabLoaded = false;
+            loadStorageStats();
+            if (d.switched) updateActiveLabel(d.active);
+        }
+    });
+}
+
+function switchCollection(name) {
+    fetch('/collections/switch', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name})})
+    .then(r=>r.json()).then(d => {
+        if (!d.success) { alert('Błąd: ' + d.error); return; }
+        updateActiveLabel(d.active_collection);
+        loadStorageStats();
+        allDocs = [];
+    });
+}
+
+function deleteColConfirm(name) {
+    if (!confirm(`Usunąć kolekcję "${name}" i WSZYSTKIE jej dane?\n\nOperacja nieodwracalna.`)) return;
+    fetch('/collections/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name})})
+    .then(r=>r.json()).then(d => {
+        if (!d.success) alert('Błąd: ' + d.error);
+        else loadStorageStats();
+    });
+}
+
+function updateActiveLabel(colName) {
+    // Aktualizuj topbar jeśli pokazuje kolekcję
+    const el = document.getElementById('statActiveCol');
+    if (el) el.textContent = colName;
+}
+
+// ---- SKANOWANIE SZUMU ----
+let detectedNoise = [];
+
+function scanNoise() {
+    const btn = document.getElementById('scanNoiseBtn');
+    const panel = document.getElementById('noiseScanPanel');
+    const list  = document.getElementById('noiseList');
+    btn.disabled = true;
+    btn.textContent = '⏳ Skanowanie...';
+    panel.classList.remove('d-none');
+    list.innerHTML = '<span class="text-muted">Analizowanie nazw plików...</span>';
+
+    fetch('/documents/scan-noise')
+    .then(r => r.json())
+    .then(d => {
+        btn.disabled = false;
+        btn.textContent = '🔍 Skanuj szum';
+        if (!d.success) { list.innerHTML = `<span class="text-danger">${d.error}</span>`; return; }
+        detectedNoise = d.noise;
+        if (!d.noise.length) {
+            list.innerHTML = '<span class="text-success fw-bold">✅ Brak wykrytych śmieci w bazie.</span>';
+            return;
+        }
+        list.innerHTML = `<div class="mb-2 text-muted">Wykryto <strong>${d.noise.length} pliku(ów)</strong> · <strong>${d.total_chunks} chunków</strong> do usunięcia:</div>` +
+            d.noise.map(n => `
+                <label class="d-flex align-items-center gap-2 py-1 border-bottom" style="cursor:pointer;">
+                    <input type="checkbox" class="noise-check" value="${n.file.replace(/"/g,'&quot;')}" checked>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${n.file}">${n.file}</span>
+                    <span class="badge bg-secondary">${n.chunks} ch.</span>
+                    <span class="text-muted" style="font-size:0.72rem;flex-shrink:0;">${n.reason}</span>
+                </label>`
+            ).join('');
+    })
+    .catch(e => {
+        btn.disabled = false;
+        btn.textContent = '🔍 Skanuj szum';
+        list.innerHTML = `<span class="text-danger">Błąd: ${e}</span>`;
+    });
+}
+
+function deleteNoise() {
+    const checked = [...document.querySelectorAll('.noise-check:checked')].map(c => c.value);
+    if (!checked.length) return;
+    if (!confirm(`Usunąć ${checked.length} plik(ów)-śmieci z bazy?\n\nOperacja nieodwracalna.`)) return;
+
+    const list = document.getElementById('noiseList');
+    list.innerHTML = '<span class="text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Usuwanie...</span>';
+
+    fetch('/documents/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({files: checked})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) { alert('Błąd: ' + d.error); return; }
+        list.innerHTML = `<span class="text-success fw-bold">✅ Usunięto ${d.deleted_chunks} chunków z ${checked.length} pliku(ów).</span>`;
+        allDocs = allDocs.filter(doc => !checked.includes(doc.file));
+        maxChunks = allDocs.length ? allDocs[0].chunks : 1;
+        document.getElementById('tabDocsCount').textContent = allDocs.length;
+        renderDocTable(allDocs);
+        updateStats();
+    })
+    .catch(e => alert('Błąd: ' + e));
+}
+
+function closeNoiseScan() {
+    document.getElementById('noiseScanPanel').classList.add('d-none');
+    detectedNoise = [];
+}
+
+// ---- RE-INDEKS ----
+function confirmReindex() {
+    const folder = document.getElementById('importPathInput').value.trim();
+    if (!folder) { alert('Wpisz najpierw ścieżkę do folderu.'); return; }
+    if (!confirm(`UWAGA: Wyczyści całą kolekcję Qdrant (wszystkie chunki) i zaimportuje ponownie z nakładką 200 znaków.\n\nFolder: ${folder}\n\nKontynuować?`)) return;
+
+    const status = document.getElementById('reindexStatus');
+    const btn = document.getElementById('reindexBtn');
+    const importBtn = document.getElementById('importBtn');
+    btn.disabled = true;
+    importBtn.disabled = true;
+    status.classList.remove('d-none');
+    status.className = 'alert alert-warning small';
+    status.textContent = 'Czyszczenie kolekcji...';
+
+    fetch('/collection/clear', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) {
+            status.className = 'alert alert-danger small';
+            status.textContent = '❌ Błąd czyszczenia: ' + d.error;
+            btn.disabled = false; importBtn.disabled = false;
+            return;
+        }
+        status.textContent = `✅ Usunięto ${d.deleted} chunków. Uruchamiam import z nakładką...`;
+        setTimeout(() => { executeImport(); btn.disabled = false; }, 500);
+    })
+    .catch(e => {
+        status.className = 'alert alert-danger small';
+        status.textContent = '❌ ' + e;
+        btn.disabled = false; importBtn.disabled = false;
+    });
+}
+
+window.onload = function() { updateStats(); loadSuggestions(false); };
+</script>
+</body>
+</html>
