@@ -1,6 +1,6 @@
 # AI Analiza Dokumentów
 
-Lokalny system RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszukiwania dokumentów. Działa w pełni offline — dane nigdy nie opuszczają Twojego komputera.
+System RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszukiwania dokumentów.
 
 ## Na czym polega?
 
@@ -11,7 +11,7 @@ Ty piszesz pytanie
         ↓
 System szuka semantycznie w bazie wektorów (Qdrant Cloud)
         ↓
-Lokalny LLM (Llama3) analizuje znalezione fragmenty
+LLM (Llama3) analizuje znalezione fragmenty
         ↓
 Dostajesz konkretną odpowiedź z cytatami źródłowymi
 ```
@@ -53,8 +53,8 @@ Dostajesz konkretną odpowiedź z cytatami źródłowymi
 |---|---|
 | Backend | Python 3.12 + Flask / Gunicorn |
 | Baza wektorowa | Qdrant Cloud (darmowy plan wystarczy) |
-| Embeddingi | nomic-embed-text 137M (768 dim, lokalnie) |
-| LLM | Llama3 8B Q4 (lokalnie via Ollama) |
+| Embeddingi | nomic-embed-text 137M (768 dim) |
+| LLM | Llama3 8B Q4 (via Ollama) |
 | Frontend | Bootstrap 5 + D3.js + vanilla JS |
 | Chunking | 1000 znaków, nakładka 200, granice zdań |
 
@@ -94,13 +94,11 @@ Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy lo
 
 ---
 
-*Działa w pełni lokalnie — żadne dokumenty nie są wysyłane do zewnętrznych serwerów AI.*
-
 ---
 
 # AI Document Analysis (English)
 
-A local RAG system for intelligent document search and analysis. Runs fully offline — your data never leaves your machine.
+A RAG system for intelligent document search and analysis.
 
 Upload your documents (PDF, Word, Excel, CSV, JSON, Markdown) and ask questions in natural language. Instead of manually searching hundreds of files — the system finds relevant passages and synthesizes an answer.
 
