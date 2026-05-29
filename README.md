@@ -1,86 +1,109 @@
-# MZK RAG — Inteligentny System Śledczy
+# AI Analiza Dokumentów
 
-System RAG (Retrieval-Augmented Generation) do analizy dokumentacji śledczej z wykorzystaniem lokalnego LLM (Ollama) i wektorowej bazy danych Qdrant Cloud.
+Lokalny system RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszukiwania dokumentów. Działa w pełni offline — dane nigdy nie opuszczają Twojego komputera.
 
-## Funkcje
+## Na czym polega?
 
-### Wyszukiwanie
-- **5 trybów analizy**: Standardowy, Detektyw (anomalie), Prawny (przepisy), Niespójności, Ekstrakcja danych
-- **Weryfikacja 2× LLM** — Generator odpowiada, Krytyk weryfikuje każde twierdzenie względem źródeł
-- **Filtrowanie po pliku** — wyszukiwanie ograniczone do wybranego dokumentu
-- **Ścieżka źródłowa** — każdy wynik pokazuje Windows path + przycisk "Otwórz"
+Wgrywasz swoje dokumenty (PDF, Word, Excel, CSV, JSON, Markdown) i możesz zadawać im pytania w języku naturalnym. Zamiast ręcznego przeszukiwania setek plików — system sam znajduje odpowiednie fragmenty i syntetyzuje odpowiedź.
 
-### Baza wiedzy
-- Import dokumentów: PDF, DOCX, XLSX (wszystkie arkusze + formuły), CSV, MD, JSON
-- Chunking z nakładką 200 znaków — zachowanie kontekstu na granicy chunków
-- Dedulikacja po treści (MD5 chunka) — ponowny import nie duplikuje danych
-- Progress w czasie rzeczywistym (SSE) — podgląd pliku po pliku
-- Przeglądarka folderów WSL
+```
+Ty piszesz pytanie
+        ↓
+System szuka semantycznie w bazie wektorów (Qdrant Cloud)
+        ↓
+Lokalny LLM (Llama3) analizuje znalezione fragmenty
+        ↓
+Dostajesz konkretną odpowiedź z cytatami źródłowymi
+```
+
+## Możliwości
+
+### Wyszukiwanie i analiza
+- **5 trybów analizy** — standardowy, detektyw (anomalie), prawny (przepisy), niespójności, ekstrakcja danych
+- **Weryfikacja 2× LLM** — pierwszy model odpowiada, drugi sprawdza czy nie zmyślił (Generator + Krytyk)
+- **Streaming** — odpowiedź pojawia się słowo po słowie, wyniki widoczne od razu
+- **Filtrowanie** — szukaj w całej bazie lub tylko w wybranym pliku
+
+### Importowanie dokumentów
+- Obsługuje: PDF, DOCX, XLSX/XLS (wszystkie arkusze + formuły), CSV, JSON, MD, TXT
+- Pasek postępu w czasie rzeczywistym — widać każdy plik
+- Deduplikacja po treści — ten sam tekst nie wchodzi dwa razy
+- Chunking z nakładką 200 znaków — zachowanie kontekstu na granicach
+
+### Forensyka Excel
+- Wykrywa **ślady Goal Seek** (ekstremalnie precyzyjna liczba = ktoś cofał obliczenia)
+- Weryfikuje czy formuły zgadzają się z zapisanymi wartościami
+- Wykrywa **ukryte wiersze i kolumny**
+- Komentarz LLM co anomalia może oznaczać
 
 ### Zarządzanie bazą
-- Przeglądarka dokumentów z checkboxami — zaznacz i usuń wybrane pliki
-- Automatyczne wykrywanie szumu (licencje, logi, tokeny URL)
-- Czyszczenie kolekcji + pełny re-indeks jednym kliknięciem
-- Zarządzanie wieloma kolekcjami Qdrant (tworzenie, przełączanie, usuwanie)
-- Statystyki zużycia pamięci (szacunek na podstawie liczby wektorów)
+- Przeglądarka dokumentów z możliwością usuwania (checkbox + bulk delete)
+- Automatyczne wykrywanie śmieci (licencje, logi, zaszyfrowane nazwy)
+- Wiele kolekcji — tworzenie, przełączanie, statystyki zużycia
+- Otwarcie pliku źródłowego jednym kliknięciem (Windows Explorer)
 
-### AI z bazy
-- Dynamiczne sugestie pytań generowane przez Llama3 z losowej próbki dokumentów
-- Cache 30 minut, odświeżanie on-demand
-
-## Wymagania
-
-- Python 3.10+
-- [Ollama](https://ollama.ai/) z modelami: `llama3`, `nomic-embed-text`
-- Konto [Qdrant Cloud](https://cloud.qdrant.io/) (plan Free wystarczy)
-- WSL2 (Windows Subsystem for Linux) — opcjonalnie, dla integracji z Windows
-
-## Instalacja
-
-```bash
-git clone https://github.com/marcin-gallos/mzk-rag.git
-cd mzk-rag
-pip install -r requirements.txt
-cp .env.example .env
-# Uzupełnij .env swoimi danymi Qdrant Cloud
-nano .env
-python app.py
-```
-
-Aplikacja dostępna pod: `http://localhost:5000`
-
-## Konfiguracja (.env)
-
-```env
-QDRANT_URL=https://YOUR-CLUSTER.cloud.qdrant.io
-QDRANT_KEY=your_qdrant_api_key
-ACTIVE_COLLECTION=mzk_documents
-OLLAMA_URL=http://127.0.0.1:11434
-```
-
-## Automatyczny start (WSL2 + Windows)
-
-Serwis systemd (`/etc/systemd/system/mzk_web.service`) uruchamia aplikację automatycznie przy starcie WSL2.  
-Skrypt VBS w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy logowaniu do Windowsa.
-
-## Architektura
-
-```
-Przeglądarka → Flask (WSL2) → Qdrant Cloud (wektory)
-                    ↕
-              Ollama (Windows)
-              ├── nomic-embed-text  (embeddingi)
-              └── llama3            (synteza + weryfikacja)
-```
+### Wizualizacja
+- **Sieć powiązań** (D3.js) — LLM wyciąga osoby, firmy, kwoty i rysuje graf relacji
+- Kolory krawędzi: czerwony = przepływ finansowy, fioletowy = zatrudnienie, zielony = przetarg
+- **Export do DOCX** — raport z odpowiedzią LLM i fragmentami źródłowymi gotowy do wydruku
 
 ## Stos technologiczny
 
 | Komponent | Technologia |
 |---|---|
-| Backend | Python / Flask |
-| Wektorowa baza | Qdrant Cloud |
-| Embeddingi | nomic-embed-text (768 dim, lokalnie) |
-| LLM | Llama3 8B (lokalnie via Ollama) |
-| Frontend | Bootstrap 5, vanilla JS |
-| Chunking | Overlap 200 znaków, granice zdań |
-| Dedup | MD5 treści chunka |
+| Backend | Python 3.12 + Flask / Gunicorn |
+| Baza wektorowa | Qdrant Cloud (darmowy plan wystarczy) |
+| Embeddingi | nomic-embed-text 137M (768 dim, lokalnie) |
+| LLM | Llama3 8B Q4 (lokalnie via Ollama) |
+| Frontend | Bootstrap 5 + D3.js + vanilla JS |
+| Chunking | 1000 znaków, nakładka 200, granice zdań |
+
+## Wymagania
+
+- Python 3.10+
+- [Ollama](https://ollama.ai/) z modelami: `llama3`, `nomic-embed-text`
+- Konto [Qdrant Cloud](https://cloud.qdrant.io/) (plan Free: 1 GB RAM, 4 GB dysk)
+- Windows + WSL2 (lub Linux bezpośrednio)
+
+## Instalacja
+
+```bash
+git clone https://github.com/dragon15555000/AI_analiza_dokumentow.git
+cd AI_analiza_dokumentow
+pip install -r requirements.txt
+cp .env.example .env
+nano .env          # wpisz swoje dane Qdrant Cloud
+python app.py
+```
+
+Otwórz: `http://localhost:5000`
+
+## Konfiguracja (.env)
+
+```env
+QDRANT_URL=https://twoj-klaster.cloud.qdrant.io
+QDRANT_KEY=twoj_klucz_api
+ACTIVE_COLLECTION=dokumenty
+OLLAMA_URL=http://127.0.0.1:11434
+```
+
+## Automatyczny start (WSL2 + Windows)
+
+Serwis systemd uruchamia aplikację automatycznie przy starcie WSL2.
+Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy logowaniu.
+
+---
+
+*Działa w pełni lokalnie — żadne dokumenty nie są wysyłane do zewnętrznych serwerów AI.*
+
+---
+
+# AI Document Analysis (English)
+
+A local RAG system for intelligent document search and analysis. Runs fully offline — your data never leaves your machine.
+
+Upload your documents (PDF, Word, Excel, CSV, JSON, Markdown) and ask questions in natural language. Instead of manually searching hundreds of files — the system finds relevant passages and synthesizes an answer.
+
+**Key features:** semantic search, 5 analysis modes, dual-LLM verification, Excel forensics (Goal Seek detection, hidden rows, formula verification), network graph visualization, DOCX export, multi-collection management.
+
+**Stack:** Python/Flask · Qdrant Cloud · Llama3 (Ollama) · nomic-embed-text · Bootstrap 5 · D3.js
