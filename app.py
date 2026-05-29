@@ -34,7 +34,7 @@ app = Flask(__name__)
 
 QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
-ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "mzk_documents")
+ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
 # ---- Cache embeddingów (SHA256 → wektor, plik JSON) ----
@@ -132,7 +132,7 @@ SEARCH_MODES = {
             "Jesteś prawnikiem specjalizującym się w prawie zamówień publicznych i spółkach komunalnych. "
             "Identyfikuj każde odwołanie do ustaw, rozporządzeń i przepisów w dokumentach. "
             "Dla każdego przepisu oceń: (1) czy jest aktualny na dzień dokumentu, "
-            "(2) czy rzeczywiście dotyczy MZK / transportu publicznego / spółek komunalnych w Polsce, "
+            "(2) czy rzeczywiście dotyczy tej organizacji / branży i kontekstu sprawy, "
             "(3) czy jest zastosowany prawidłowo w kontekście. "
             "Flaguj błędy: [PRZEPIS NIEAKTUALNY], [PRZEPIS NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE], [PRZEPIS NIEZGODNY]. "
             "Odpowiadaj wyłącznie po polsku."
@@ -1201,7 +1201,7 @@ def export_docx():
 
         # Stopka
         doc.add_paragraph('─' * 60)
-        doc.add_paragraph('Wygenerowano przez MZK RAG System | Llama3 + Qdrant Cloud').runs[0].font.size = Pt(8)
+        doc.add_paragraph('Wygenerowano przez AI Analiza Dokumentów | Llama3 + Qdrant Cloud').runs[0].font.size = Pt(8)
 
         buf = io.BytesIO()
         doc.save(buf)
