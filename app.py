@@ -1232,32 +1232,34 @@ def build_network():
         context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in contexts])
 
         system = (
-            "Jesteś ekspertem śledczym ds. wykrywania korupcji i powiązań finansowych. "
-            "Z dokumentów wyciągasz SIEĆ POWIĄZAŃ składającą się z węzłów i krawędzi. "
+            "Jesteś ekspertem śledczym ds. wykrywania powiązań i nadużyć. "
+            "Z dokumentów wyciągasz SIEĆ POWIĄZAŃ z dowodarni — każda relacja musi mieć źródło. "
             "\n\nTYPY WĘZŁÓW:"
-            "\n- osoba: imię i nazwisko (np. 'Jan Kowalski')"
-            "\n- firma: nazwa firmy lub instytucji (np. 'REFUNDA Sp. z o.o.', 'MZK Gorzów')"
-            "\n- kwota: kwota pieniężna z kontekstem (np. '92 247 144 zł rekompensata')"
-            "\n- dokument: umowa, uchwała, przetarg, raport (np. 'Umowa nr 12/2023')"
-            "\n- inne: daty, adresy, inne ważne encje"
-            "\n\nTYPY RELACJI (label krawędzi) — bądź precyzyjny:"
-            "\n- przepływ finansowy: 'zapłacił Xzł', 'przelał Xzł', 'faktura Xzł'"
+            "\n- osoba: imię i nazwisko"
+            "\n- firma: nazwa firmy lub instytucji"
+            "\n- kwota: kwota pieniężna z kontekstem (np. '92 247 144 zł')"
+            "\n- dokument: umowa, uchwała, przetarg, faktura"
+            "\n- inne: data, adres, numer, inna ważna encja"
+            "\n\nTYPY RELACJI — bądź precyzyjny w label:"
+            "\n- przepływ finansowy: 'zapłacił Xzł', 'faktura Xzł'"
             "\n- zatrudnienie: 'prezes', 'dyrektor', 'pracownik'"
-            "\n- własność/udziały: 'właściciel', 'udziałowiec', 'wspólnik'"
+            "\n- własność: 'właściciel', 'udziałowiec', 'wspólnik'"
             "\n- kontrakt: 'podpisał umowę', 'zlecił', 'wykonawca'"
-            "\n- decyzja: 'zatwierdził', 'podpisał', 'uchwalił', 'anulował'"
-            "\n- powiązanie osobiste: 'znajomy', 'rodzina', 'współpracownik'"
-            "\n- przetarg: 'wygrał przetarg', 'złożył ofertę', 'wykluczony'"
-            "\n\nZwróć WYŁĄCZNIE poprawny JSON (bez komentarzy, bez markdown):\n"
-            '{"nodes":[{"id":"unikalny_id","type":"osoba|firma|kwota|dokument|inne","label":"wyswietlana nazwa"}],'
-            '"edges":[{"source":"id_zrodla","target":"id_celu","label":"typ relacji"}]}'
-            "\n\nWAŻNE: id musi być unikalny i taki sam w nodes i edges. Bez polskich znaków w id."
+            "\n- decyzja: 'zatwierdził', 'podpisał', 'uchwalił'"
+            "\n- przetarg: 'wygrał przetarg', 'złożył ofertę'"
+            "\n\nKAŻDA krawędź MUSI zawierać:"
+            "\n- doc: nazwa pliku źródłowego (np. 'umowa_2023.docx')"
+            "\n- evidence: cytat lub opis z dokumentu max 120 znaków"
+            "\n\nZwróć WYŁĄCZNIE poprawny JSON:\n"
+            '{"nodes":[{"id":"id_bez_spacji","type":"osoba|firma|kwota|dokument|inne","label":"nazwa"}],'
+            '"edges":[{"source":"id_A","target":"id_B","label":"relacja",'
+            '"doc":"plik.docx","evidence":"cytat z dokumentu potwierdzający relację"}]}'
+            "\n\nWAŻNE: id bez polskich znaków i spacji. Jeśli nie znasz doc/evidence — wpisz nazwę pliku z kontekstu."
         )
         prompt = (
-            f"DOKUMENTY ŚLEDCZE:\n{context_str}\n\n"
+            f"DOKUMENTY:\n{context_str}\n\n"
             f"ZAPYTANIE: {query}\n\n"
-            "Wyciągnij kompletną sieć powiązań: osoby, firmy, kwoty, przepływy finansowe, decyzje.\n"
-            "Skup się na: kto komu płacił, kto co podpisał, kto z kim jest powiązany.\n"
+            "Wyciągnij sieć powiązań. Dla każdej relacji podaj DOC (plik) i EVIDENCE (cytat).\n"
             "Zwróć JSON:"
         )
         payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
@@ -1298,9 +1300,11 @@ def build_network():
             if src and tgt and src in seen_nodes and tgt in seen_nodes and key not in seen_edges:
                 seen_edges.add(key)
                 clean_edges.append({
-                    "source": src,
-                    "target": tgt,
-                    "label": e.get("label","")[:30]
+                    "source":   src,
+                    "target":   tgt,
+                    "label":    e.get("label","")[:35],
+                    "doc":      e.get("doc","")[:80],
+                    "evidence": e.get("evidence","")[:150]
                 })
 
         return jsonify({
