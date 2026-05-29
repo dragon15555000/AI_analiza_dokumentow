@@ -103,6 +103,9 @@
         <a class="nav-link" href="#" onclick="showTab('network'); return false;">Sieć powiązań</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('sql'); return false;">SQL</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('collections'); return false;">Bazy</a>
     </li>
     <li class="nav-item">
@@ -436,6 +439,101 @@
 </div>
 </div>
 
+<!-- TAB: SQL -->
+<div id="tabSql" class="main-wrap" style="display:none;">
+<div class="row g-3">
+
+  <!-- Lewa kolumna: konfiguracja -->
+  <div class="col-lg-4">
+    <div class="search-card">
+      <h2>Połączenie MS SQL Server</h2>
+      <div class="row g-2 mb-2">
+        <div class="col-8">
+          <label class="form-label small fw-bold mb-1">Serwer</label>
+          <input type="text" id="sqlServer" class="form-control form-control-sm" value="127.0.0.1" placeholder="127.0.0.1 lub nazwa\instancja">
+        </div>
+        <div class="col-4">
+          <label class="form-label small fw-bold mb-1">Port</label>
+          <input type="number" id="sqlPort" class="form-control form-control-sm" value="1433">
+        </div>
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Baza danych</label>
+        <input type="text" id="sqlDatabase" class="form-control form-control-sm" placeholder="nazwa_bazy">
+      </div>
+      <div class="row g-2 mb-2">
+        <div class="col-6">
+          <label class="form-label small fw-bold mb-1">Użytkownik</label>
+          <input type="text" id="sqlUser" class="form-control form-control-sm" placeholder="sa">
+        </div>
+        <div class="col-6">
+          <label class="form-label small fw-bold mb-1">Hasło</label>
+          <input type="password" id="sqlPass" class="form-control form-control-sm">
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm w-100 mb-2" onclick="sqlConnect()" id="sqlConnectBtn">Połącz i pobierz tabele</button>
+      <div id="sqlConnectStatus" class="small d-none"></div>
+    </div>
+
+    <div class="search-card mt-3" id="sqlTablesCard" style="display:none;">
+      <h2 style="font-size:0.95rem;">Tabele w bazie</h2>
+      <input type="text" id="sqlTableFilter" class="form-control form-control-sm mb-2" placeholder="Filtruj tabele..." oninput="filterSqlTables()">
+      <div id="sqlTableList" style="max-height:300px;overflow-y:auto;font-size:0.82rem;"></div>
+    </div>
+  </div>
+
+  <!-- Prawa kolumna: zapytania -->
+  <div class="col-lg-8">
+    <div class="search-card">
+      <h2>Zapytaj bazę po polsku (Text-to-SQL)</h2>
+      <div class="input-group mb-2">
+        <input type="text" id="sqlQuestion" class="form-control"
+          placeholder="np. Ile spraw zostało zarejestrowanych w 2023 roku?"
+          onkeydown="if(event.key==='Enter') sqlAsk()">
+        <button class="btn btn-primary px-4" onclick="sqlAsk()" id="sqlAskBtn">Zapytaj</button>
+      </div>
+
+      <div class="mb-2 d-flex flex-wrap gap-1" id="sqlQuickBtns" style="display:none!important;">
+        <span class="small text-muted me-1">Szybkie:</span>
+      </div>
+
+      <div id="sqlLoader" class="text-center py-3 d-none">
+        <div class="spinner-border spinner-border-sm text-primary"></div>
+        <span class="ms-2 small text-muted">LLM generuje SQL, wykonuje zapytanie...</span>
+      </div>
+
+      <div id="sqlResult"></div>
+    </div>
+
+    <!-- Wektoryzacja -->
+    <div class="search-card mt-3" id="sqlVectorCard" style="display:none;">
+      <h2 style="font-size:0.95rem;">Wektoryzuj tabelę do Qdrant</h2>
+      <p class="small text-muted mb-2">Eksportuje wiersze tabeli jako chunki tekstowe — potem możesz pytać o nie w zakładce Wyszukiwanie.</p>
+      <div class="row g-2 align-items-end mb-2">
+        <div class="col">
+          <label class="form-label small fw-bold mb-1">Tabela</label>
+          <select id="sqlVecTable" class="form-select form-select-sm"></select>
+        </div>
+        <div class="col">
+          <label class="form-label small fw-bold mb-1">Kolumna tytułu (opcjonalna)</label>
+          <input type="text" id="sqlVecLabelCol" class="form-control form-control-sm" placeholder="np. NumerSprawy">
+        </div>
+        <div class="col-auto">
+          <button class="btn btn-success btn-sm" onclick="sqlVectorize()">Wektoryzuj</button>
+        </div>
+      </div>
+      <div id="sqlVecProgress" class="d-none">
+        <div class="progress mb-1" style="height:8px;">
+          <div id="sqlVecBar" class="progress-bar bg-success" style="width:0%;"></div>
+        </div>
+        <div id="sqlVecLog" style="font-size:0.78rem;color:#6c757d;font-family:monospace;"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
 <!-- TAB: BAZY -->
 <div id="tabCollections" class="main-wrap" style="display:none;">
 <div class="row g-3">
@@ -593,14 +691,14 @@ let maxChunks = 1;
 // ---- TABS ----
 let aiTabLoaded = false, colTabLoaded = false;
 function showTab(name) {
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabCollections','tabImport'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabSql','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
     const el = document.getElementById('tab' + name.charAt(0).toUpperCase() + name.slice(1));
     if (el) el.style.display = '';
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, collections:5, import:6};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, sql:5, collections:6, import:7};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
     if (name === 'docs' && allDocs.length === 0) loadDocs();
@@ -1949,6 +2047,202 @@ function confirmReindex() {
         status.className = 'alert alert-danger small';
         status.textContent = '❌ ' + e;
         btn.disabled = false; importBtn.disabled = false;
+    });
+}
+
+// ---- SQL ----
+let sqlConn = {};
+let sqlTables = [];
+let sqlSchema = '';
+
+function getSqlConn() {
+    return {
+        server:   document.getElementById('sqlServer').value.trim(),
+        port:     document.getElementById('sqlPort').value.trim(),
+        database: document.getElementById('sqlDatabase').value.trim(),
+        user:     document.getElementById('sqlUser').value.trim(),
+        password: document.getElementById('sqlPass').value
+    };
+}
+
+function sqlConnect() {
+    const btn = document.getElementById('sqlConnectBtn');
+    const st  = document.getElementById('sqlConnectStatus');
+    btn.disabled = true;
+    st.className = 'small alert alert-warning mt-2';
+    st.textContent = 'Łączenie...';
+    st.classList.remove('d-none');
+
+    sqlConn = getSqlConn();
+    fetch('/sql/test', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(sqlConn)
+    })
+    .then(r=>r.json())
+    .then(d => {
+        btn.disabled = false;
+        if (!d.success) {
+            st.className = 'small alert alert-danger mt-2';
+            st.innerHTML = `❌ ${d.error}`;
+            return;
+        }
+        st.className = 'small alert alert-success mt-2';
+        st.innerHTML = `✅ Połączono. SQL Server: ${d.version.slice(0,60)}...`;
+
+        sqlTables = d.tables;
+        document.getElementById('sqlTablesCard').style.display = '';
+        document.getElementById('sqlVectorCard').style.display = '';
+        renderSqlTableList(sqlTables);
+
+        // Wypełnij select wektoryzacji
+        const sel = document.getElementById('sqlVecTable');
+        sel.innerHTML = d.tables.map(t => `<option value="${t.name}">${t.name} (${t.type})</option>`).join('');
+    })
+    .catch(e => { btn.disabled=false; st.className='small alert alert-danger mt-2'; st.textContent='❌ '+e; });
+}
+
+function renderSqlTableList(tables) {
+    const q = (document.getElementById('sqlTableFilter')?.value||'').toLowerCase();
+    const filtered = tables.filter(t => t.name.toLowerCase().includes(q));
+    document.getElementById('sqlTableList').innerHTML = filtered.map(t => `
+        <div class="d-flex align-items-center justify-content-between py-1 border-bottom">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">
+                <span style="font-size:0.68rem;color:${t.type==='VIEW'?'#7c3aed':'#0d6efd'};font-weight:700;">${t.type==='VIEW'?'V':'T'}</span>
+                <span class="ms-1">${t.name}</span>
+            </span>
+            <div class="d-flex gap-1 flex-shrink-0 ms-1">
+                <button class="doc-row-btn" onclick="sqlLoadSchema('${t.name}')">Schemat</button>
+                <button class="doc-row-btn" style="color:#16a34a;" onclick="sqlQuickAsk('${t.name}')">Pytaj</button>
+            </div>
+        </div>`).join('');
+}
+function filterSqlTables() { renderSqlTableList(sqlTables); }
+
+function sqlLoadSchema(tableName) {
+    fetch('/sql/schema', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, table: tableName})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        if (!d.success) { alert('Błąd: ' + d.error); return; }
+        // Zbuduj opis schematu dla LLM
+        const colDesc = d.columns.map(c => `  ${c.name} (${c.type}${c.max_len?'('+c.max_len+')':''})`).join('\n');
+        sqlSchema += `\nTabela: ${tableName} (${d.row_count} wierszy)\nKolumny:\n${colDesc}\n`;
+        document.getElementById('sqlResult').innerHTML = `
+            <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-family:monospace;font-size:0.8rem;">
+                <strong>${tableName}</strong> — ${d.row_count.toLocaleString('pl')} wierszy<br>
+                ${d.columns.map(c=>`<span style="color:#0d6efd;">${c.name}</span> <span style="color:#6c757d;">${c.type}${c.max_len?'('+c.max_len+')':''}</span>`).join(' &nbsp;|&nbsp; ')}
+            </div>
+            <div class="small text-success mt-1">✅ Schemat załadowany — LLM zna teraz strukturę tej tabeli</div>`;
+    });
+}
+
+function sqlQuickAsk(tableName) {
+    sqlLoadSchema(tableName);
+    document.getElementById('sqlQuestion').value = `Pokaż przykładowe 10 rekordów z tabeli ${tableName}`;
+    setTimeout(sqlAsk, 800);
+}
+
+function sqlAsk() {
+    const question = document.getElementById('sqlQuestion').value.trim();
+    if (!question) return;
+    if (!sqlConn.server) { alert('Najpierw połącz się z bazą SQL.'); return; }
+
+    const loader = document.getElementById('sqlLoader');
+    const result = document.getElementById('sqlResult');
+    const btn    = document.getElementById('sqlAskBtn');
+    loader.classList.remove('d-none');
+    result.innerHTML = '';
+    btn.disabled = true;
+
+    fetch('/sql/ask', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, question, schema: sqlSchema})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        loader.classList.add('d-none');
+        btn.disabled = false;
+        if (!d.success) {
+            result.innerHTML = `
+                <div class="alert alert-danger small">${d.error}</div>
+                ${d.sql ? `<pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>` : ''}`;
+            return;
+        }
+        // Interpretacja LLM
+        result.innerHTML = `
+            <div style="background:#eef2ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <strong style="color:#4f46e5;font-size:0.88rem;">Interpretacja AI:</strong>
+                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.interpretation.replace(/\n/g,'<br>')}</div>
+            </div>
+            <details class="mb-2">
+                <summary class="small text-muted" style="cursor:pointer;">Wygenerowany SQL (${d.total} wierszy${d.truncated?' — obcięte do 500':''})</summary>
+                <pre style="font-size:0.75rem;background:#1a1f36;color:#a0aec0;padding:10px;border-radius:4px;margin-top:6px;overflow-x:auto;">${d.sql}</pre>
+            </details>
+            ${d.rows.length ? renderSqlTable(d.columns, d.rows) : '<div class="alert alert-warning small">Brak wyników.</div>'}`;
+    })
+    .catch(e => { loader.classList.add('d-none'); btn.disabled=false; result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+}
+
+function renderSqlTable(cols, rows) {
+    return `<div style="overflow-x:auto;max-height:350px;overflow-y:auto;">
+        <table class="table table-sm table-hover table-bordered mb-0" style="font-size:0.78rem;">
+            <thead style="position:sticky;top:0;background:#f8f9fa;">
+                <tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>
+            </thead>
+            <tbody>
+                ${rows.map(r=>`<tr>${cols.map(c=>`<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(r[c]||'').replace(/"/g,'&quot;')}">${r[c]||''}</td>`).join('')}</tr>`).join('')}
+            </tbody>
+        </table>
+    </div>`;
+}
+
+function sqlVectorize() {
+    const table    = document.getElementById('sqlVecTable').value;
+    const labelCol = document.getElementById('sqlVecLabelCol').value.trim();
+    if (!table) return;
+
+    const prog = document.getElementById('sqlVecProgress');
+    const bar  = document.getElementById('sqlVecBar');
+    const log  = document.getElementById('sqlVecLog');
+    prog.classList.remove('d-none');
+    bar.style.width = '0%';
+    log.textContent = 'Startowanie...';
+
+    const params = new URLSearchParams();
+    // Wyślij przez POST z fetch streaming
+    fetch('/sql/vectorize', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol})
+    })
+    .then(async response => {
+        const reader = response.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, {stream:true});
+            const parts = buf.split('\n\n'); buf = parts.pop();
+            for (const block of parts) {
+                const dl = block.split('\n').find(l=>l.startsWith('data: '));
+                if (!dl) continue;
+                try {
+                    const ev = JSON.parse(dl.slice(6));
+                    if (ev.done !== undefined) {
+                        bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
+                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        updateStats(); allDocs = [];
+                    } else if (ev.progress !== undefined) {
+                        bar.style.width = ev.pct + '%';
+                        log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
+                    } else if (ev.error) {
+                        log.innerHTML += `<br><span style="color:red;">❌ ${ev.error}</span>`;
+                    }
+                } catch(e) {}
+            }
+        }
     });
 }
 

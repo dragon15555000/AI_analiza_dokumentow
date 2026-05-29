@@ -1688,5 +1688,236 @@ def cache_stats():
     return jsonify({"entries": len(_embed_cache), "size_mb": size_mb})
 
 
+# ============================================================
+# MODUŁ SQL — MS SQL Server 2016
+# ============================================================
+
+def _get_sql_conn(cfg: dict):
+    """Tworzy połączenie z MS SQL Server przez pymssql."""
+    import pymssql
+    return pymssql.connect(
+        server   = cfg.get("server", "127.0.0.1"),
+        port     = int(cfg.get("port", 1433)),
+        database = cfg.get("database", ""),
+        user     = cfg.get("user", ""),
+        password = cfg.get("password", ""),
+        timeout  = 10,
+        charset  = "UTF-8"
+    )
+
+@app.route('/sql/test', methods=['POST'])
+def sql_test():
+    """Test połączenia z bazą SQL."""
+    cfg = request.get_json()
+    try:
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor()
+        cur.execute("SELECT @@VERSION")
+        version = cur.fetchone()[0]
+        # Lista tabel użytkownika
+        cur.execute("""
+            SELECT TABLE_NAME, TABLE_TYPE
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY TABLE_NAME
+        """)
+        tables = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"success": True, "version": version[:120], "tables": tables})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/sql/schema', methods=['POST'])
+def sql_schema():
+    """Pobiera schemat wybranej tabeli."""
+    data  = request.get_json()
+    cfg   = data.get("conn", {})
+    table = data.get("table", "")
+    try:
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor()
+        cur.execute(f"""
+            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+        """, (table,))
+        cols = [{"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
+                for r in cur.fetchall()]
+        cur.execute(f"SELECT COUNT(*) FROM [{table}]")
+        row_count = cur.fetchone()[0]
+        conn.close()
+        return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/sql/ask', methods=['POST'])
+def sql_ask():
+    """Text-to-SQL: pytanie po polsku → LLM generuje SQL → wykonaj → zwróć wyniki."""
+    data     = request.get_json()
+    cfg      = data.get("conn", {})
+    question = data.get("question", "").strip()
+    schema   = data.get("schema", "")   # opis tabel przesłany z frontendu
+
+    if not question:
+        return jsonify({"success": False, "error": "Brak pytania"})
+
+    try:
+        # 1. LLM generuje SQL
+        system_sql = (
+            "Jesteś ekspertem T-SQL (MS SQL Server 2016). "
+            "Na podstawie schematu bazy danych generujesz zapytania SQL. "
+            "ZASADY: używaj tylko SELECT (nigdy DELETE/UPDATE/DROP). "
+            "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
+            "Jeśli pytanie jest niejasne — zgadnij najbardziej sensowne zapytanie."
+        )
+        prompt_sql = (
+            f"SCHEMAT BAZY:\n{schema}\n\n"
+            f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
+            "Wygeneruj zapytanie T-SQL:"
+        )
+        payload = {"model": "llama3", "prompt": prompt_sql, "system": system_sql,
+                   "stream": False, "options": {"num_ctx": 8192}}
+        req = urllib.request.Request(
+            OLLAMA_URL + "/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+
+        # Usuń ewentualne markdown fences
+        sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+        sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+
+        # Zabezpieczenie — tylko SELECT
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        if first_word not in ("SELECT", "WITH"):
+            return jsonify({"success": False, "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
+                            "sql": sql_query})
+
+        # 2. Wykonaj SQL
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor(as_dict=True)
+        cur.execute(sql_query)
+        rows = cur.fetchmany(500)   # max 500 wierszy
+        cols = list(rows[0].keys()) if rows else []
+        # Konwertuj do serializowalnego formatu
+        result_rows = []
+        for row in rows:
+            result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+        conn.close()
+
+        # 3. LLM interpretuje wyniki
+        result_preview = "\n".join([", ".join([f"{k}={v}" for k, v in r.items()]) for r in result_rows[:10]])
+        prompt_interp = (
+            f"Pytanie użytkownika: {question}\n"
+            f"Wykonane zapytanie SQL: {sql_query}\n"
+            f"Liczba wyników: {len(result_rows)}\n"
+            f"Przykładowe wyniki:\n{result_preview}\n\n"
+            "Odpowiedz po polsku: co wynika z tych danych? Podaj konkretne liczby i wnioski."
+        )
+        payload2 = {"model": "llama3", "prompt": prompt_interp,
+                    "system": "Jesteś analitykiem danych. Interpretujesz wyniki SQL po polsku.",
+                    "stream": False, "options": {"num_ctx": 4096}}
+        req2 = urllib.request.Request(
+            OLLAMA_URL + "/api/generate",
+            data=json.dumps(payload2).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req2, timeout=120) as r2:
+            interpretation = json.loads(r2.read().decode("utf-8"))["response"]
+
+        return jsonify({
+            "success":    True,
+            "sql":        sql_query,
+            "columns":    cols,
+            "rows":       result_rows,
+            "total":      len(result_rows),
+            "truncated":  len(result_rows) == 500,
+            "interpretation": interpretation
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e),
+                        "sql": locals().get("sql_query", "")})
+
+@app.route('/sql/vectorize', methods=['POST'])
+def sql_vectorize():
+    """Wektoryzuje dane z tabeli SQL do Qdrant (SSE)."""
+    data  = request.get_json()
+    cfg   = data.get("conn", {})
+    table = data.get("table", "")
+    cols  = data.get("columns", [])  # kolumny do wektoryzacji
+    label_col = data.get("label_col", "")  # kolumna jako tytuł chunka
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+        try:
+            import pymssql
+            conn = _get_sql_conn(cfg)
+            cur  = conn.cursor(as_dict=True)
+
+            if cols:
+                col_list = ", ".join(f"[{c}]" for c in cols)
+            else:
+                # Pobierz wszystkie kolumny tekstowe/numeryczne
+                cur.execute(f"""
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_NAME=%s AND DATA_TYPE IN
+                    ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
+                    ORDER BY ORDINAL_POSITION
+                """, (table,))
+                cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
+                col_list = ", ".join(f"[{c}]" for c in cols)
+
+            cur.execute(f"SELECT COUNT(*) as cnt FROM [{table}]")
+            total = cur.fetchone()["cnt"]
+            yield sse("start", {"total": total, "table": table, "columns": cols})
+
+            cur.execute(f"SELECT {col_list} FROM [{table}]")
+            qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            done = 0
+
+            BATCH = 50
+            rows_buf = []
+            while True:
+                batch_rows = cur.fetchmany(BATCH)
+                if not batch_rows:
+                    break
+                for row in batch_rows:
+                    # Zbuduj tekst z wiersza
+                    label = str(row.get(label_col, "")) if label_col else ""
+                    parts = [f"{k}: {v}" for k, v in row.items() if v is not None and str(v).strip()]
+                    text  = (f"[{table}] {label}\n" if label else f"[{table}]\n") + " | ".join(parts)
+                    rows_buf.append(text)
+
+                # Batch embeddings
+                vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                points = []
+                for txt, vec in zip(rows_buf, vecs):
+                    cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
+                    points.append(PointStruct(
+                        id=cid, vector=vec,
+                        payload={"file": f"[SQL] {table}", "text": txt, "full_path": ""}
+                    ))
+                if points:
+                    qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                done += len(rows_buf)
+                rows_buf = []
+                yield sse("progress", {"done": done, "total": total,
+                                       "pct": round(done/total*100) if total else 0})
+
+            conn.close()
+            _docs_cache["data"] = None
+            yield sse("done", {"done": done, "total": total,
+                                "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
