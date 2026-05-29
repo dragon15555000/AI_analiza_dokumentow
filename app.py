@@ -37,14 +37,48 @@ QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "mzk_documents")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
+# ---- Cache embeddingów (SHA256 → wektor, plik JSON) ----
+_EMBED_CACHE_PATH = Path(__file__).parent / "embedding_cache.json"
+_embed_cache: dict = {}
+_embed_cache_dirty = 0
+
+def _load_embed_cache():
+    global _embed_cache
+    if _EMBED_CACHE_PATH.exists():
+        try:
+            _embed_cache = json.loads(_EMBED_CACHE_PATH.read_text())
+            print(f"Załadowano cache embeddingów: {len(_embed_cache)} wpisów")
+        except Exception:
+            _embed_cache = {}
+
+def _save_embed_cache():
+    try:
+        _EMBED_CACHE_PATH.write_text(json.dumps(_embed_cache))
+    except Exception as e:
+        print(f"⚠️ Błąd zapisu cache: {e}")
+
+_load_embed_cache()
+
 def get_embedding(text: str) -> list:
+    import hashlib as _hl
+    key = _hl.sha256(text[:1500].encode('utf-8', errors='replace')).hexdigest()
+    if key in _embed_cache:
+        return _embed_cache[key]
+
     url = OLLAMA_URL + "/api/embeddings"
     payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode("utf-8"))["embedding"]
+            vec = json.loads(r.read().decode("utf-8"))["embedding"]
+        _embed_cache[key] = vec
+        global _embed_cache_dirty
+        _embed_cache_dirty += 1
+        if _embed_cache_dirty >= 50:   # zapisuj co 50 nowych wpisów
+            _save_embed_cache()
+            _embed_cache_dirty = 0
+        return vec
     except Exception as e:
         print(f"⚠️ Ollama Embedding Error: {e}")
         return [0.0] * 768
@@ -187,6 +221,8 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
         confirmed = raw.count("✓")
         partial    = raw.count("⚠")
         hallucin   = raw.count("✗")
+        total = confirmed + partial + hallucin
+        confidence_pct = round(confirmed / total * 100) if total > 0 else None
 
         return {
             "success": True,
@@ -195,7 +231,8 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
             "justification": justification,
             "confirmed": confirmed,
             "partial": partial,
-            "hallucinations": hallucin
+            "hallucinations": hallucin,
+            "confidence_pct": confidence_pct
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1530,6 +1567,113 @@ def analyze_excel():
             result["llm_comment"] = f"(Błąd LLM: {e})"
 
     return jsonify(result)
+
+
+@app.route('/compare', methods=['POST'])
+def compare_documents():
+    """Porównanie dwóch konkretnych plików — pobiera wszystkie ich chunki i wysyła do LLM."""
+    data   = request.get_json()
+    file_a = data.get('file_a', '').strip()
+    file_b = data.get('file_b', '').strip()
+    focus  = data.get('focus', 'Porównaj te dokumenty — wskaż różnice, sprzeczności i podobieństwa.').strip()
+
+    if not file_a or not file_b:
+        return jsonify({"success": False, "error": "Podaj dwa pliki do porównania"})
+
+    try:
+        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        def get_chunks(fname, max_chunks=12):
+            qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
+            # Wektor zerowy = pobierz dowolne chunki (scroll z filtrem)
+            records, _ = client.scroll(
+                collection_name=ACTIVE_COLLECTION, limit=max_chunks,
+                query_filter=qfilter, with_payload=["text"], with_vectors=False
+            )
+            return [r.payload.get("text", "") for r in records]
+
+        chunks_a = get_chunks(file_a)
+        chunks_b = get_chunks(file_b)
+
+        if not chunks_a:
+            return jsonify({"success": False, "error": f"Brak danych dla pliku: {file_a}"})
+        if not chunks_b:
+            return jsonify({"success": False, "error": f"Brak danych dla pliku: {file_b}"})
+
+        text_a = "\n\n".join(chunks_a[:10])[:4000]
+        text_b = "\n\n".join(chunks_b[:10])[:4000]
+
+        system = (
+            "Jesteś analitykiem śledczym porównującym dokumenty. "
+            "Wskazujesz różnice, sprzeczności, brakujące informacje i podejrzane rozbieżności. "
+            "Odpowiadaj zawsze po polsku, konkretnie, z cytatami."
+        )
+        prompt = (
+            f"DOKUMENT A: {file_a}\n{text_a}\n\n"
+            f"---\n\n"
+            f"DOKUMENT B: {file_b}\n{text_b}\n\n"
+            f"ZADANIE: {focus}\n\n"
+            "Porównanie (wskaż konkretne różnice z cytatami):"
+        )
+        payload = {"model": "llama3", "prompt": prompt, "system": system,
+                   "stream": False, "options": {"num_ctx": 8192}}
+        req = urllib.request.Request(
+            OLLAMA_URL + "/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=300) as r:
+            answer = json.loads(r.read().decode("utf-8"))["response"]
+
+        return jsonify({
+            "success": True,
+            "file_a": file_a, "chunks_a": len(chunks_a),
+            "file_b": file_b, "chunks_b": len(chunks_b),
+            "comparison": answer
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/export/csv', methods=['POST'])
+def export_csv():
+    """Konwertuje tabelę Markdown z trybu extract → plik CSV."""
+    data     = request.get_json()
+    md_table = data.get('table', '')
+    if not md_table:
+        return jsonify({"success": False, "error": "Brak tabeli"}), 400
+    try:
+        import csv, io as _io
+        lines = [l.strip() for l in md_table.splitlines() if l.strip()]
+        rows  = []
+        for line in lines:
+            if re.match(r'^\s*\|[-| ]+\|\s*$', line):
+                continue  # separator
+            if line.startswith('|'):
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+                rows.append(cells)
+
+        buf = _io.StringIO()
+        writer = csv.writer(buf, quoting=csv.QUOTE_ALL)
+        for row in rows:
+            writer.writerow(row)
+
+        output = buf.getvalue().encode('utf-8-sig')  # BOM dla Excela
+        fname  = f"ekstrakcja_{time.strftime('%Y%m%d_%H%M')}.csv"
+        return send_file(
+            _io.BytesIO(output), as_attachment=True,
+            download_name=fname, mimetype='text/csv; charset=utf-8'
+        )
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/cache/stats', methods=['GET'])
+def cache_stats():
+    _save_embed_cache()
+    size_mb = round(_EMBED_CACHE_PATH.stat().st_size / 1_048_576, 2) if _EMBED_CACHE_PATH.exists() else 0
+    return jsonify({"entries": len(_embed_cache), "size_mb": size_mb})
 
 
 if __name__ == '__main__':

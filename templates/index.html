@@ -97,6 +97,9 @@
         <a class="nav-link" href="#" onclick="showTab('ai'); return false;">AI z bazy</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('compare'); return false;">Porównaj</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('network'); return false;">Sieć powiązań</a>
     </li>
     <li class="nav-item">
@@ -141,14 +144,18 @@
                 </div>
                 <div id="modeDesc" class="mt-2 small rounded px-3 py-2 d-none"
                     style="background:#f0f4ff;border-left:3px solid #4f46e5;color:#4f46e5;"></div>
-                <div class="mt-2 d-flex align-items-center gap-2">
+                <div class="mt-2 d-flex flex-wrap align-items-center gap-3">
                     <div class="form-check form-switch mb-0">
                         <input class="form-check-input" type="checkbox" id="verifyToggle">
-                        <label class="form-check-label small fw-semibold" for="verifyToggle"
-                            style="cursor:pointer;">Weryfikacja (2× LLM)</label>
+                        <label class="form-check-label small fw-semibold" for="verifyToggle" style="cursor:pointer;">Weryfikacja (2× LLM)</label>
                     </div>
-                    <span class="small text-muted">— Krytyk sprawdza czy Generator nie zmyślił</span>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="chatToggle">
+                        <label class="form-check-label small fw-semibold" for="chatToggle" style="cursor:pointer;">Tryb rozmowy</label>
+                    </div>
+                    <button class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;" onclick="toggleHistory()">📋 Historia</button>
                 </div>
+                <div id="historyPanel" class="d-none mt-2" style="background:#f8f9fa;border-radius:6px;padding:10px;max-height:180px;overflow-y:auto;"></div>
             </div>
 
             <div id="loader" class="text-center py-4 d-none">
@@ -289,6 +296,51 @@
             </div>
         </div>
     </div>
+</div>
+
+<!-- TAB: PORÓWNAJ -->
+<div id="tabCompare" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="search-card">
+      <h2>Porównanie dokumentów</h2>
+      <p class="small text-muted">LLM dostaje pełną treść obu plików i wskazuje różnice, sprzeczności i rozbieżności.</p>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Dokument A</label>
+        <input type="text" id="compareFileA" class="form-control form-control-sm" placeholder="Nazwa pliku A...">
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Dokument B</label>
+        <input type="text" id="compareFileB" class="form-control form-control-sm" placeholder="Nazwa pliku B...">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold mb-1">Czego szukasz?</label>
+        <select class="form-select form-select-sm" id="compareFocus">
+          <option value="Porównaj te dokumenty — wskaż różnice, sprzeczności i podobieństwa.">Ogólne porównanie</option>
+          <option value="Znajdź sprzeczności w kwotach, datach i liczbach między tymi dokumentami.">Sprzeczności liczbowe</option>
+          <option value="Porównaj zapisy prawne i klauzule umowne. Wskaż różnice w warunkach.">Klauzule umowne</option>
+          <option value="Sprawdź czy dokument B jest zgodny z dokument A lub go modyfikuje. Wskaż co zostało zmienione.">Zgodność / aneks</option>
+          <option value="Znajdź dane które są w dokumencie A ale brakuje ich w dokumencie B i odwrotnie.">Brakujące dane</option>
+        </select>
+      </div>
+      <button class="btn btn-primary w-100" onclick="compareDocuments()" id="compareBtn">Porównaj</button>
+      <div id="compareStatus" class="mt-2 small text-muted d-none"></div>
+    </div>
+    <div class="search-card mt-3" style="background:#f8f9ff;border:1px solid #e0e0ff;">
+      <h2 style="font-size:0.95rem;color:#4f46e5;">Szybki wybór z bazy</h2>
+      <input type="text" id="compareSearch" class="form-control form-control-sm mb-2" placeholder="Filtruj pliki..." oninput="filterCompareList()">
+      <div id="compareFileList" style="max-height:200px;overflow-y:auto;font-size:0.8rem;"></div>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="search-card" style="min-height:400px;" id="compareResult">
+      <div class="text-center py-5 text-muted">
+        <div style="font-size:2.5rem;">⚖️</div>
+        <div class="mt-2">Wybierz dwa pliki i kliknij Porównaj</div>
+      </div>
+    </div>
+  </div>
+</div>
 </div>
 
 <!-- TAB: SIEĆ POWIĄZAŃ -->
@@ -507,19 +559,20 @@ let maxChunks = 1;
 // ---- TABS ----
 let aiTabLoaded = false, colTabLoaded = false;
 function showTab(name) {
-    ['tabSearch','tabDocs','tabAi','tabNetwork','tabCollections','tabImport'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
     const el = document.getElementById('tab' + name.charAt(0).toUpperCase() + name.slice(1));
     if (el) el.style.display = '';
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
-    const map = {search:0, docs:1, ai:2, network:3, collections:4, import:5};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, collections:5, import:6};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); }
+    if (name === 'compare') renderCompareFileList();
 }
 
 // ---- STATS ----
@@ -698,7 +751,7 @@ function executeSearch() {
     fetch('/search/stream', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, limit, mode, file_filter: activeFileFilter})
+        body: JSON.stringify({query: query + getChatContext(), limit, mode, file_filter: activeFileFilter})
     })
     .then(async response => {
         const reader  = response.body.getReader();
@@ -728,6 +781,7 @@ function executeSearch() {
                                     <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
                                     <div class="d-flex gap-2">
                                         <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
+                        ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
                                         <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
                                     </div>
                                 </div>
@@ -740,17 +794,18 @@ function executeSearch() {
                         const body = document.getElementById('aiAnswerBody');
                         if (body) body.innerHTML = formatAiText(aiText, mode);
                     } else if (ev.done !== undefined) {
-                        // Finalizuj
                         const box = document.getElementById('aiStreamBox');
-                        if (box) {
-                            const spinner = box.querySelector('.spinner-border');
-                            if (spinner) spinner.remove();
-                        }
+                        if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
                         if (resultsData) {
                             window._lastSearchData = {query, mode_label: resultsData.mode_label,
                                 results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
                             if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
                                 runVerification(query, aiText, resultsData.contexts);
+                            // Zapisz do historii
+                            saveToHistory(query, aiText, resultsData.mode);
+                            // Dodaj do pamięci czatu
+                            chatHistory.push({q: query, a: aiText});
+                            if (chatHistory.length > 5) chatHistory.shift();
                         }
                         btn.disabled = false; return;
                     } else if (ev.error) {
@@ -852,6 +907,131 @@ function executeSearch() {
         btn.disabled = false;
         container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${err}</div>`;
     });
+}
+
+// ---- HISTORIA ZAPYTAŃ ----
+const HISTORY_KEY = 'mzk_rag_history';
+function getHistory() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]'); } catch{ return []; } }
+function saveToHistory(query, answer, mode) {
+    const h = getHistory();
+    h.unshift({ query, answer: answer.slice(0,300), mode, ts: new Date().toLocaleString('pl') });
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0,20)));
+    renderHistoryPanel();
+}
+function renderHistoryPanel() {
+    const panel = document.getElementById('historyPanel');
+    if (!panel || panel.classList.contains('d-none')) return;
+    const h = getHistory();
+    if (!h.length) { panel.innerHTML = '<div class="text-muted small">Brak historii.</div>'; return; }
+    panel.innerHTML = h.map((item, i) => `
+        <div class="d-flex align-items-start gap-2 mb-1 pb-1 border-bottom" style="font-size:0.78rem;">
+            <div class="flex-grow-1" style="min-width:0;">
+                <div class="text-muted" style="font-size:0.68rem;">${item.ts} · ${item.mode||'normal'}</div>
+                <a href="#" onclick="reuseHistory(${i});return false;" class="text-truncate d-block fw-semibold">${item.query}</a>
+            </div>
+            <button onclick="deleteHistory(${i})" style="background:none;border:none;color:#adb5bd;padding:0;font-size:0.85rem;">✕</button>
+        </div>`).join('');
+}
+function toggleHistory() {
+    const p = document.getElementById('historyPanel');
+    p.classList.toggle('d-none');
+    if (!p.classList.contains('d-none')) renderHistoryPanel();
+}
+function reuseHistory(i) {
+    const item = getHistory()[i];
+    if (!item) return;
+    document.getElementById('queryInput').value = item.query;
+    document.getElementById('historyPanel').classList.add('d-none');
+    executeSearch();
+}
+function deleteHistory(i) {
+    const h = getHistory(); h.splice(i,1);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
+    renderHistoryPanel();
+}
+
+// ---- TRYB ROZMOWY (chat z pamięcią) ----
+let chatHistory = [];  // [{q, a}] ostatnie 3 pary
+function getChatContext() {
+    if (!document.getElementById('chatToggle').checked || !chatHistory.length) return '';
+    return '\n\nKONTEKST POPRZEDNICH PYTAŃ:\n' +
+        chatHistory.slice(-3).map(p => `Pytanie: ${p.q}\nOdpowiedź: ${p.a.slice(0,400)}`).join('\n---\n');
+}
+
+// ---- CSV EXPORT ----
+function exportCsv() {
+    const d = window._lastSearchData;
+    if (!d || !d.ai_answer) { alert('Najpierw wykonaj wyszukiwanie w trybie Ekstrakcja danych.'); return; }
+    fetch('/export/csv', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({table: d.ai_answer})
+    })
+    .then(r => { if(!r.ok) return r.json().then(e=>{throw new Error(e.error)}); return r.blob(); })
+    .then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `ekstrakcja_${new Date().toISOString().slice(0,16).replace(/[T:]/g,'_')}.csv`;
+        a.click();
+    })
+    .catch(e => alert('Błąd: '+e.message));
+}
+
+// ---- PORÓWNANIE DOKUMENTÓW ----
+function renderCompareFileList() {
+    if (allDocs.length === 0) { fetch('/documents').then(r=>r.json()).then(d=>{ allDocs=d.documents||[]; maxChunks=allDocs[0]?.chunks||1; renderCompareFileList(); }); return; }
+    const list = document.getElementById('compareFileList');
+    if (!list) return;
+    const q = (document.getElementById('compareSearch')?.value||'').toLowerCase();
+    const filtered = allDocs.filter(d => d.file.toLowerCase().includes(q)).slice(0,50);
+    list.innerHTML = filtered.map(d => `
+        <div class="d-flex justify-content-between align-items-center py-1 border-bottom">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${d.file}">${d.file}</span>
+            <div class="d-flex gap-1 flex-shrink-0 ms-1">
+                <button class="doc-row-btn" onclick="setCompareFile('A','${d.file.replace(/'/g,"\\'")}')">A</button>
+                <button class="doc-row-btn" onclick="setCompareFile('B','${d.file.replace(/'/g,"\\'")}')">B</button>
+            </div>
+        </div>`).join('');
+}
+function filterCompareList() { renderCompareFileList(); }
+function setCompareFile(ab, fname) {
+    document.getElementById(`compareFile${ab}`).value = fname;
+}
+function compareDocuments() {
+    const fa = document.getElementById('compareFileA').value.trim();
+    const fb = document.getElementById('compareFileB').value.trim();
+    const focus = document.getElementById('compareFocus').value;
+    if (!fa || !fb) { alert('Wybierz dwa pliki.'); return; }
+    if (fa === fb) { alert('Wybierz dwa różne pliki.'); return; }
+
+    const btn = document.getElementById('compareBtn');
+    const res = document.getElementById('compareResult');
+    const st  = document.getElementById('compareStatus');
+    btn.disabled = true;
+    st.classList.remove('d-none'); st.textContent = 'LLM czyta oba dokumenty...';
+    res.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary"></div><p class="mt-2 small text-muted">Porównywanie dokumentów przez LLM (~30-60 sek)...</p></div>`;
+
+    fetch('/compare', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({file_a: fa, file_b: fb, focus})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        btn.disabled = false; st.classList.add('d-none');
+        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${d.error}</div>`; return; }
+        res.innerHTML = `
+            <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+                <div class="d-flex gap-3 small">
+                    <span>📄 <strong>${d.file_a}</strong> (${d.chunks_a} chunków)</span>
+                    <span style="color:#4f46e5;">⚖️</span>
+                    <span>📄 <strong>${d.file_b}</strong> (${d.chunks_b} chunków)</span>
+                </div>
+            </div>
+            <div style="font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">${d.comparison.replace(/\n/g,'<br>')}</div>
+            <div class="mt-3 d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
+            </div>`;
+    })
+    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
@@ -1242,6 +1422,19 @@ function analyzeExcel(fname) {
             html += `<div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:14px 16px;margin-bottom:20px;">
                 <strong style="color:#4f46e5;">Ocena biegłego (LLM):</strong>
                 <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.llm_comment.replace(/\n/g,'<br>')}</div>
+            </div>`;
+        // pasek pewności
+        if (d.confidence_pct !== null && d.confidence_pct !== undefined) {
+            const cpct = d.confidence_pct;
+            const cc = cpct >= 70 ? '#16a34a' : cpct >= 40 ? '#d97706' : '#dc2626';
+            html += `<div class="mb-3">
+                <div class="d-flex justify-content-between small mb-1">
+                    <span class="fw-bold">Pewność odpowiedzi</span>
+                    <span style="color:${cc};font-weight:700;">${cpct}%</span>
+                </div>
+                <div class="progress" style="height:8px;border-radius:4px;">
+                    <div class="progress-bar" style="width:${cpct}%;background:${cc};border-radius:4px;"></div>
+                </div>
             </div>`;
         }
 
