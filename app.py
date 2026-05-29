@@ -520,7 +520,7 @@ def get_stats():
         info = client.get_collection(collection_name=ACTIVE_COLLECTION)
         return jsonify({
             "success": True,
-            "vectors_count": info.vectors_count,
+            "vectors_count": getattr(info, 'vectors_count', None) or info.points_count,
             "points_count": info.points_count,
             "status": info.status,
             "active_collection": ACTIVE_COLLECTION
@@ -604,7 +604,7 @@ def create_collection():
 
         if switch:
             ACTIVE_COLLECTION = name
-            _suggestions_cache["data"] = None
+            _suggestions_cache["data"] = None; _docs_cache["data"] = None
 
         return jsonify({"success": True, "name": name, "switched": switch, "active": ACTIVE_COLLECTION})
     except Exception as e:
@@ -622,7 +622,7 @@ def switch_collection():
         if not client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' nie istnieje"})
         ACTIVE_COLLECTION = name
-        _suggestions_cache["data"] = None
+        _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "active_collection": ACTIVE_COLLECTION})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -777,7 +777,7 @@ def clear_collection():
             ACTIVE_COLLECTION,
             vectors_config=VectorParams(size=768, distance=Distance.COSINE)
         )
-        _suggestions_cache["data"] = None
+        _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "deleted": count_before})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -1091,23 +1091,30 @@ def delete_documents():
         for i in range(0, len(ids_to_delete), 100):
             client.delete(collection_name=ACTIVE_COLLECTION,
                           points_selector=ids_to_delete[i:i+100])
-        _suggestions_cache["data"] = None
+        _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "deleted_chunks": len(ids_to_delete)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+_docs_cache = {"data": None, "ts": 0}
+DOCS_CACHE_TTL = 300  # 5 minut
+
 @app.route('/documents', methods=['GET'])
 def get_documents():
+    force = request.args.get('force', '0') == '1'
+    now = time.time()
+    if not force and _docs_cache["data"] and (now - _docs_cache["ts"]) < DOCS_CACHE_TTL:
+        return jsonify({"success": True, "documents": _docs_cache["data"],
+                        "total": len(_docs_cache["data"]), "cached": True})
     try:
         client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
         file_chunks = {}
-        file_paths  = {}   # fname → full_path (pierwsza znaleziona)
+        file_paths  = {}
         offset = None
         while True:
             records, offset = client.scroll(
                 collection_name=ACTIVE_COLLECTION,
-                limit=250,
-                offset=offset,
+                limit=250, offset=offset,
                 with_payload=["file", "full_path"],
                 with_vectors=False
             )
@@ -1124,7 +1131,9 @@ def get_documents():
              for f, c in file_chunks.items()],
             key=lambda x: -x["chunks"]
         )
-        return jsonify({"success": True, "documents": docs, "total": len(docs)})
+        _docs_cache["data"] = docs
+        _docs_cache["ts"]   = now
+        return jsonify({"success": True, "documents": docs, "total": len(docs), "cached": False})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -1677,4 +1686,4 @@ def cache_stats():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, threaded=True)

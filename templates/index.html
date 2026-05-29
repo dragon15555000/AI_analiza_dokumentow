@@ -1423,6 +1423,7 @@ function analyzeExcel(fname) {
                 <strong style="color:#4f46e5;">Ocena biegłego (LLM):</strong>
                 <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.llm_comment.replace(/\n/g,'<br>')}</div>
             </div>`;
+        }
         // pasek pewności
         if (d.confidence_pct !== null && d.confidence_pct !== undefined) {
             const cpct = d.confidence_pct;
@@ -1872,7 +1873,11 @@ function confirmReindex() {
     });
 }
 
-window.onload = function() { updateStats(); loadSuggestions(false); };
+window.onload = function() {
+    updateStats();
+    // Sugestie ładuj z opóźnieniem — nie blokuj strony przy starcie
+    setTimeout(() => loadSuggestions(false), 2000);
+};
 </script>
 </body>
 </html>
