@@ -1232,35 +1232,34 @@ def build_network():
         context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in contexts])
 
         system = (
-            "Jesteś ekspertem śledczym ds. wykrywania powiązań i nadużyć. "
-            "Z dokumentów wyciągasz SIEĆ POWIĄZAŃ z dowodarni — każda relacja musi mieć źródło. "
-            "\n\nTYPY WĘZŁÓW:"
-            "\n- osoba: imię i nazwisko"
-            "\n- firma: nazwa firmy lub instytucji"
-            "\n- kwota: kwota pieniężna z kontekstem (np. '92 247 144 zł')"
-            "\n- dokument: umowa, uchwała, przetarg, faktura"
-            "\n- inne: data, adres, numer, inna ważna encja"
-            "\n\nTYPY RELACJI — bądź precyzyjny w label:"
-            "\n- przepływ finansowy: 'zapłacił Xzł', 'faktura Xzł'"
-            "\n- zatrudnienie: 'prezes', 'dyrektor', 'pracownik'"
-            "\n- własność: 'właściciel', 'udziałowiec', 'wspólnik'"
-            "\n- kontrakt: 'podpisał umowę', 'zlecił', 'wykonawca'"
-            "\n- decyzja: 'zatwierdził', 'podpisał', 'uchwalił'"
-            "\n- przetarg: 'wygrał przetarg', 'złożył ofertę'"
-            "\n\nKAŻDA krawędź MUSI zawierać:"
-            "\n- doc: nazwa pliku źródłowego (np. 'umowa_2023.docx')"
-            "\n- evidence: cytat lub opis z dokumentu max 120 znaków"
-            "\n\nZwróć WYŁĄCZNIE poprawny JSON:\n"
-            '{"nodes":[{"id":"id_bez_spacji","type":"osoba|firma|kwota|dokument|inne","label":"nazwa"}],'
-            '"edges":[{"source":"id_A","target":"id_B","label":"relacja",'
-            '"doc":"plik.docx","evidence":"cytat z dokumentu potwierdzający relację"}]}'
-            "\n\nWAŻNE: id bez polskich znaków i spacji. Jeśli nie znasz doc/evidence — wpisz nazwę pliku z kontekstu."
+            "Jesteś ekspertem śledczym. Wyciągasz sieć powiązań z dokumentów. "
+            "ZASADA BEZWZGLĘDNA: używasz WYŁĄCZNIE prawdziwych wartości z dokumentów. "
+            "NIGDY nie piszesz: 'nazwa', 'firma', 'osoba', 'kwota', 'X', 'id_A', 'plik.docx' — "
+            "to są PRZYKŁADY schematu, nie wartości do wstawienia. "
+            "Każdy węzeł label to PRAWDZIWA nazwa z tekstu (np. 'Jan Kowalski', 'ABC Sp. z o.o.', '50 000 zł'). "
+            "\n\nFORMAT JSON (wypełnij prawdziwymi danymi):\n"
+            '{"nodes":['
+            '{"id":"jan_kowalski","type":"osoba","label":"Jan Kowalski"},'
+            '{"id":"abc_spolka","type":"firma","label":"ABC Sp. z o.o."},'
+            '{"id":"kwota_50k","type":"kwota","label":"50 000 zł za usługę IT"}'
+            '],'
+            '"edges":['
+            '{"source":"jan_kowalski","target":"abc_spolka","label":"prezes zarządu",'
+            '"doc":"umowa_nr5_2023.docx","evidence":"Jan Kowalski podpisał jako prezes w dniu 12.03.2023"},'
+            '{"source":"abc_spolka","target":"kwota_50k","label":"faktura FV/2023/05",'
+            '"doc":"faktury_2023.xlsx","evidence":"ABC wystawiło fakturę na 50 000 zł za usługi IT"}'
+            ']}'
+            "\n\nTypy węzłów: osoba, firma, kwota, dokument, inne"
+            "\nTypy relacji w label: prezes/dyrektor, podpisał umowę, zapłacił Xzł, właściciel, "
+            "wygrał przetarg, zlecił, zatwierdził, aneks nr X, wykonawca"
+            "\nid: małe litery, bez spacji, bez polskich znaków (snake_case)"
         )
         prompt = (
-            f"DOKUMENTY:\n{context_str}\n\n"
-            f"ZAPYTANIE: {query}\n\n"
-            "Wyciągnij sieć powiązań. Dla każdej relacji podaj DOC (plik) i EVIDENCE (cytat).\n"
-            "Zwróć JSON:"
+            f"DOKUMENTY DO ANALIZY:\n{context_str}\n\n"
+            f"ZADANIE: {query}\n\n"
+            "Wyciągnij sieć powiązań używając PRAWDZIWYCH nazw, kwot i danych z powyższych dokumentów.\n"
+            "NIE używaj placeholderów. Każdy label = prawdziwa wartość z tekstu.\n"
+            "JSON:"
         )
         payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
