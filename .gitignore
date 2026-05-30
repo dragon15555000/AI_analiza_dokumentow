@@ -28,3 +28,6 @@ logs/
 .idea/
 *.swp
 .sql_config.json
+
+# Embedding cache — SQLite (nie commituj)
+embedding_cache.db
