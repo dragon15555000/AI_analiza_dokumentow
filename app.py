@@ -814,6 +814,168 @@ def file_open():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/hybrid/stream', methods=['POST'])
+def hybrid_stream():
+    """Wyszukiwanie hybrydowe: RAG + SQL równolegle — SSE."""
+    data       = request.get_json()
+    query_text = data.get('query', '').strip()
+    conn_cfg   = data.get('conn', {})
+    schema_str = data.get('schema', '')
+    limit      = min(int(data.get('limit', 5)), 20)
+    mode       = data.get('mode', 'normal')
+    file_filter= data.get('file_filter', None)
+
+    if not query_text:
+        return jsonify({"success": False, "error": "Zapytanie puste"}), 400
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+
+        try:
+            # 1. RAG — Qdrant query
+            client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            vector = get_embedding(query_text)
+
+            if file_filter:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
+                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
+                                          limit=limit, query_filter=qfilter)
+            else:
+                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
+
+            rag_contexts = []
+            rag_results = []
+            for point in res.points:
+                p = point.payload
+                rag_contexts.append({"file": p.get("file",""), "text": p.get("text","")})
+                rag_results.append({
+                    "file": p.get("file","Nieznany"),
+                    "score": f"{point.score:.4f}",
+                    "text": highlight_backend(p.get("text",""), query_text),
+                    "full_path": p.get("full_path",""),
+                    "win_path": wsl_to_win(p.get("full_path",""))
+                })
+
+            yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
+
+            # 2. SQL — jeśli konfiguracja dostępna
+            sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
+            sql_query = ""
+
+            if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
+                try:
+                    system_sql = (
+                        "Jesteś ekspertem T-SQL (MS SQL Server). "
+                        "Na podstawie schematu bazy generujesz zapytania SELECT. "
+                        "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+                    )
+                    prompt_sql = (
+                        f"SCHEMAT BAZY:\n{schema_str}\n\n"
+                        f"PYTANIE: {query_text}\n\n"
+                        "Wygeneruj SELECT:"
+                    )
+                    payload = {"model": "llama3", "prompt": prompt_sql, "system": system_sql,
+                               "stream": False, "options": {"num_ctx": 4096}}
+                    req = urllib.request.Request(
+                        OLLAMA_URL + "/api/generate",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}, method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+
+                    sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+                    sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+
+                    first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+                    if first_word not in ("SELECT", "WITH"):
+                        sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
+                    else:
+                        conn = _get_sql_conn(conn_cfg)
+                        cur  = conn.cursor(as_dict=True)
+                        cur.execute(sql_query)
+                        rows = cur.fetchmany(200)
+                        cols = list(rows[0].keys()) if rows else []
+
+                        result_rows = []
+                        for row in rows:
+                            result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+
+                        sql_data = {
+                            "success": True,
+                            "table": "wynik SQL",
+                            "columns": cols,
+                            "rows": result_rows,
+                            "sql": sql_query[:120],
+                            "total": len(result_rows)
+                        }
+                        conn.close()
+
+                except Exception as e:
+                    sql_data["error"] = str(e)[:100]
+
+            yield sse("sql_results", {"sql_results": sql_data})
+
+            # 3. LLM synteza — łączy RAG + SQL
+            if not rag_contexts:
+                yield sse("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
+                return
+
+            cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
+
+            # Buduj prompt syntezy
+            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in rag_contexts[:5]])
+            sql_preview = ""
+            if sql_data.get("success") and sql_data.get("rows"):
+                rows_str = "\n".join([
+                    " | ".join([f"{k}={v}" for k, v in zip(sql_data["columns"],
+                             [r.get(col, "") for col in sql_data["columns"]])])
+                    for r in sql_data["rows"][:10]
+                ])
+                sql_preview = f"\nDANE Z BAZY (tabela SQL):\n{rows_str}"
+
+            prompt = (
+                f"DOKUMENTY:\n{rag_preview}"
+                f"{sql_preview}\n\n"
+                f"PYTANIE: {query_text}\n\n"
+                f"{cfg['prompt_suffix']}\n"
+                "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski."
+            )
+            payload = {"model": "llama3", "prompt": prompt, "system": cfg["system"],
+                       "stream": True, "options": {"num_ctx": 8192}}
+
+            req = urllib.request.Request(
+                OLLAMA_URL + "/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            full_answer = ""
+            with urllib.request.urlopen(req, timeout=240) as r:
+                for line in r:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk_data = json.loads(line)
+                        token = chunk_data.get("response", "")
+                        if token:
+                            full_answer += token
+                            yield sse("token", {"token": token})
+                        if chunk_data.get("done"):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+
+            yield sse("done", {"ai_answer": full_answer})
+
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 @app.route('/search/stream', methods=['POST'])
 def search_stream():
     """Wyszukiwanie z streamingiem LLM — wyniki natychmiast, odpowiedź słowo po słowie."""
