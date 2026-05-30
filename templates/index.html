@@ -305,7 +305,8 @@
             <div id="deleteBar" class="d-none d-flex align-items-center gap-2 ms-auto flex-shrink-0">
                 <span class="small fw-bold text-danger" id="selectedCount"></span>
                 <button class="btn btn-danger btn-sm" onclick="deleteSelected()">🗑 Usuń zaznaczone</button>
-                <button class="btn btn-primary btn-sm" onclick="generateSelectedMetadataReport()">📋 Raport metadanych</button>
+                <button class="btn btn-primary btn-sm" onclick="generateSelectedMetadataReport()">📋 Raport (JSON)</button>
+                <button class="btn btn-info btn-sm" onclick="generateSelectedMetadataReportDocx()">📄 Raport (DOCX)</button>
                 <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">Odznacz</button>
             </div>
         </div>
@@ -1020,8 +1021,54 @@ function generateSelectedMetadataReport() {
     a.click();
     URL.revokeObjectURL(url);
 
-    // Opcjonalnie: schowaj pasek zaznaczenia
     document.getElementById('deleteBar').classList.add('d-none');
+}
+
+function generateSelectedMetadataReportDocx() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    if (!checked.length) {
+        alert('Nie zaznaczono żadnych plików.');
+        return;
+    }
+
+    const selectedFiles = [];
+    checked.forEach(chk => {
+        const fileName = chk.value;
+        const doc = allDocs.find(d => d.file === fileName);
+        if (doc) {
+            selectedFiles.push({
+                file: doc.file,
+                full_path: doc.full_path || '',
+                chunks: doc.chunks || 0,
+                metadata: doc.metadata || null
+            });
+        }
+    });
+
+    fetch('/export/metadata_report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: selectedFiles })
+    })
+    .then(response => {
+        if (!response.ok) throw new Error('Błąd generowania raportu');
+        return response.blob();
+    })
+    .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const date = new Date().toISOString().slice(0,10);
+        a.download = `raport_metadanych_${date}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        document.getElementById('deleteBar').classList.add('d-none');
+    })
+    .catch(err => {
+        alert('Błąd podczas generowania raportu DOCX: ' + err.message);
+    });
 }
 
 function clearSelection() {

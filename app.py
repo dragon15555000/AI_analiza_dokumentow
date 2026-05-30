@@ -1549,6 +1549,95 @@ def get_documents():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/export/metadata_report', methods=['POST'])
+def export_metadata_report_docx():
+    """Generuje raport DOCX z metadanymi wybranych dokumentów (dla śledczych)."""
+    data = request.get_json() or {}
+    selected = data.get('files', [])  # lista obiektów z file, full_path, metadata
+
+    if not selected:
+        return jsonify({"success": False, "error": "Brak wybranych plików"}), 400
+
+    try:
+        import docx as _docx
+        from docx.shared import Pt, RGBColor, Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+
+        doc = _docx.Document()
+
+        style = doc.styles['Normal']
+        style.font.name = 'Calibri'
+        style.font.size = Pt(11)
+
+        # Nagłówek
+        h = doc.add_heading('Raport Metadanych Wybranych Dokumentów', 0)
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        doc.add_paragraph(f'Wygenerowano: {time.strftime("%d.%m.%Y %H:%M")}')
+        doc.add_paragraph(f'Liczba plików: {len(selected)}')
+        doc.add_paragraph()
+
+        # Podsumowanie
+        doc.add_heading('Podsumowanie', level=1)
+        doc.add_paragraph('Poniżej znajdują się metadane systemowe oraz wbudowane dla wybranych dokumentów. '
+                          'Dane pochodzą z oryginalnych plików w momencie importu.')
+
+        # Dla każdego pliku
+        for idx, f in enumerate(selected, 1):
+            doc.add_heading(f'{idx}. {f.get("file", "Nieznany plik")}', level=1)
+
+            meta = f.get('metadata') or {}
+
+            # Metadane systemowe
+            doc.add_heading('Metadane systemowe', level=2)
+            table = doc.add_table(rows=1, cols=2)
+            table.style = 'Table Grid'
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Pole'
+            hdr_cells[1].text = 'Wartość'
+
+            for key in ['size_human', 'created', 'modified', 'accessed']:
+                if meta.get(key):
+                    row_cells = table.add_row().cells
+                    row_cells[0].text = key.replace('_', ' ').title()
+                    row_cells[1].text = str(meta[key])
+
+            # Metadane wbudowane
+            if meta.get('embedded'):
+                doc.add_heading('Metadane wbudowane w plik', level=2)
+                for fmt, emb in meta['embedded'].items():
+                    p = doc.add_paragraph()
+                    p.add_run(f'{fmt.upper()}: ').bold = True
+                    p.add_run(str(emb))
+
+            # Pełna ścieżka
+            if meta.get('full_path'):
+                p = doc.add_paragraph()
+                p.add_run('Pełna ścieżka: ').bold = True
+                p.add_run(meta['full_path'])
+
+            doc.add_paragraph()  # odstęp
+
+        # Stopka
+        doc.add_paragraph('─' * 70)
+        p = doc.add_paragraph()
+        run = p.add_run('Wygenerowano przez AI Analiza Dokumentów | Narzędzie wspomagające analizę śledczą')
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0x6c, 0x75, 0x7d)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+
+        fname = f'raport_metadanych_{time.strftime("%Y%m%d_%H%M")}.docx'
+        return send_file(buf, as_attachment=True, download_name=fname,
+                         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/export/docx', methods=['POST'])
 def export_docx():
     data        = request.get_json()
