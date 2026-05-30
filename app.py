@@ -45,6 +45,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ai_analiza")
 
+# === Walidacja wymaganych zmiennych środowiskowych ===
+required_env = ["QDRANT_URL", "QDRANT_KEY"]
+missing = [key for key in required_env if not os.environ.get(key)]
+if missing:
+    logger.critical(f"Brak wymaganych zmiennych środowiskowych: {missing}")
+    logger.critical("Upewnij się, że plik .env istnieje i zawiera poprawne wartości.")
+    raise RuntimeError(f"Brakujące zmienne środowiskowe: {missing}")
+
 QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
@@ -81,9 +89,9 @@ def _init_embed_cache():
         with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
             count = cursor.fetchone()[0]
-        print(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
+        logger.info(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
     except Exception as e:
-        print(f"⚠️ Błąd inicjalizacji cache: {e}")
+        logger.warning(f"Błąd inicjalizacji cache embeddingów: {e}")
 
 _init_embed_cache()
 
@@ -399,7 +407,7 @@ def _extract_xls(file_path: Path) -> str:
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
     except Exception as e:
-        print(f"⚠️ Błąd parsowania .xls {file_path.name}: {e}")
+        logger.warning(f"Błąd parsowania .xls {file_path.name}: {e}")
         return ""
 
 def _extract_excel(file_path: Path) -> str:
@@ -546,7 +554,7 @@ def extract_text(file_path: Path) -> str:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read()
     except Exception as e:
-        print(f"⚠️ Błąd parsowania pliku {file_path.name}: {e}")
+        logger.warning(f"Błąd parsowania pliku {file_path.name}: {e}")
     return ""
 
 @app.route('/')
