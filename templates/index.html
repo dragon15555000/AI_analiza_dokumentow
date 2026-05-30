@@ -773,16 +773,16 @@
       </div>
 
       <div id="importProgressWrap" style="display:none;">
-        <div class="d-flex justify-content-between small mb-1">
-          <span id="importProgressLabel" class="fw-bold"></span>
-          <span id="importProgressPct" class="text-muted"></span>
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <span id="importProgressLabel" class="fw-semibold text-success"></span>
+          <span id="importProgressPct" class="fw-bold text-success" style="font-size:0.9rem;"></span>
         </div>
-        <div class="progress mb-2" style="height:10px;">
-          <div id="importProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%"></div>
+        <div class="progress mb-3" style="height:12px; background:#e6f4ea; border-radius:6px;">
+          <div id="importProgressBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
         </div>
-        <div id="importLog" style="max-height:250px;overflow-y:auto;font-size:0.78rem;font-family:monospace;background:#1a1f36;color:#a0aec0;border-radius:6px;padding:10px;"></div>
+        <div id="importLog" style="max-height:220px;overflow-y:auto;font-size:0.75rem;font-family:monospace;background:#0f172a;color:#94a3b8;border-radius:8px;padding:10px 12px; line-height:1.4;"></div>
       </div>
-      <div id="importDone" class="alert alert-success mt-2 d-none small"></div>
+      <div id="importDone" class="alert alert-success mt-3 d-none small py-2"></div>
     </div>
   </div>
 </div>
