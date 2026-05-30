@@ -9,9 +9,12 @@ import hashlib
 import time
 import sqlite3
 import threading
+import subprocess
+import platform
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
+import logging
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -33,6 +36,14 @@ try: import openpyxl
 except ImportError: openpyxl = None
 
 app = Flask(__name__)
+
+# === Podstawowe logowanie ===
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("ai_analiza")
 
 QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
@@ -822,10 +833,9 @@ def import_folder():
     return jsonify({"success": False, "error": "Użyj /import/stream (SSE)"})
 
 def wsl_to_win(path: str) -> str:
-    """Konwertuje sciezke WSL /mnt/g/... na Windows G:\\..."""
+    """Konwertuje ścieżkę WSL /mnt/g/... na Windows G:\\..."""
     if not path:
         return ""
-    import re
     m = re.match(r'^/mnt/([a-zA-Z])/(.*)', path)
     if m:
         drive = m.group(1).upper()
@@ -833,20 +843,47 @@ def wsl_to_win(path: str) -> str:
         return f"{drive}:\\{rest}"
     return path
 
+
+def open_file_safely(win_path: str) -> bool:
+    """
+    Bezpiecznie otwiera plik za pomocą domyślnej aplikacji systemowej.
+    Unika shell injection (w przeciwieństwie do poprzedniego os.popen).
+    """
+    if not win_path:
+        return False
+
+    try:
+        if platform.system() == "Windows":
+            # Najbezpieczniejsza metoda na Windows
+            os.startfile(win_path)
+            logger.info(f"Otwarto plik: {win_path}")
+            return True
+        else:
+            # Fallback dla Linux/macOS (przydatne przy testach z WSL)
+            subprocess.run(["xdg-open", win_path], check=False)
+            logger.info(f"Otwarto plik (xdg-open): {win_path}")
+            return True
+    except Exception as e:
+        logger.warning(f"Nie udało się otworzyć pliku '{win_path}': {e}")
+        return False
+
 @app.route('/file/open', methods=['POST'])
 def file_open():
     data = request.get_json()
     wsl_path = data.get('path', '').strip()
     if not wsl_path:
         return jsonify({"success": False, "error": "Brak ścieżki"})
+
     win_path = wsl_to_win(wsl_path)
     if not win_path:
         return jsonify({"success": False, "error": "Nie można skonwertować ścieżki"})
-    try:
-        os.popen(f'cmd.exe /c start "" "{win_path}"')
+
+    success = open_file_safely(win_path)
+
+    if success:
         return jsonify({"success": True, "win_path": win_path})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    else:
+        return jsonify({"success": False, "error": "Nie udało się otworzyć pliku"})
 
 @app.route('/hybrid/stream', methods=['POST'])
 def hybrid_stream():
