@@ -36,6 +36,7 @@ QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
 # ---- Cache embeddingów (SHA256 → wektor, plik JSON) ----
 _EMBED_CACHE_PATH = Path(__file__).parent / "embedding_cache.json"
@@ -1381,6 +1382,7 @@ def build_network():
     data    = request.get_json()
     query   = data.get('query', '').strip()
     limit   = min(int(data.get('limit', 10)), 20)
+    raw = ""
 
     if not query:
         return jsonify({"success": False, "error": "Brak zapytania"})
@@ -1699,10 +1701,9 @@ def analyze_excel():
             if p.exists():
                 path = p
 
-    # 3. Szukaj po nazwie rekurencyjnie w /mnt/g i /mnt/c/Users
+    # 3. Szukaj po nazwie rekurencyjnie
     if not path and fname:
-        search_roots = ["/mnt/g", "/mnt/c/Users/Marcin/Documents", "/mnt/c/Users/Marcin/Desktop"]
-        for root in search_roots:
+        for root in SEARCH_ROOTS:
             rp = Path(root)
             if not rp.exists():
                 continue
@@ -1936,12 +1937,31 @@ def sql_test():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+def _validate_table_name(table_name: str) -> bool:
+    """Walidacja nazwy tabeli — zabezpieczenie przed SQL Injection."""
+    if not table_name or not isinstance(table_name, str):
+        return False
+    return bool(re.match(r'^[\w\-\.]+$', table_name))
+
+def _validate_column_names(col_names: list) -> bool:
+    """Walidacja listy nazw kolumn."""
+    if not col_names or not isinstance(col_names, list):
+        return True
+    for col in col_names:
+        if not isinstance(col, str) or not re.match(r'^[\w\-\.]+$', col.strip()):
+            return False
+    return True
+
 @app.route('/sql/schema', methods=['POST'])
 def sql_schema():
     """Pobiera schemat wybranej tabeli."""
     data  = request.get_json()
     cfg   = data.get("conn", {})
-    table = data.get("table", "")
+    table = data.get("table", "").strip()
+
+    if not _validate_table_name(table):
+        return jsonify({"success": False, "error": f"Niepoprawna nazwa tabeli: '{table}'"})
+
     try:
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor()
@@ -2094,35 +2114,17 @@ def sql_write():
 
         # Krok 2: jeśli nie potwierdzone — zwróć SQL do podglądu
         if not confirmed:
-            # Oszacuj wpływ dla UPDATE/DELETE
-            impact_info = ""
+            # UWAGA: Szacowanie wpływu dla UPDATE/DELETE zostało wyłączone ze względów bezpieczeństwa
+            # (WHERE clause pochodzące z LLM mogą zawierać SQL injection)
+            impact_warning = ""
             if first_word in ("UPDATE", "DELETE"):
-                try:
-                    conn_check = _get_sql_conn(cfg)
-                    cur_check  = conn_check.cursor()
-                    # Buduj COUNT query
-                    if first_word == "UPDATE":
-                        where_part = re.search(r'\bWHERE\b(.+?)(?:$)', sql_query, re.IGNORECASE | re.DOTALL)
-                        table_part = re.search(r'UPDATE\s+\[?(\w+)\]?', sql_query, re.IGNORECASE)
-                        if where_part and table_part:
-                            count_sql = f"SELECT COUNT(*) FROM [{table_part.group(1)}] WHERE {where_part.group(1)}"
-                            cur_check.execute(count_sql)
-                            cnt = cur_check.fetchone()[0]
-                            impact_info = f"Zmieni {cnt} wierszy"
-                    elif first_word == "DELETE":
-                        count_sql = sql_query.replace("DELETE", "SELECT COUNT(*)", 1)
-                        cur_check.execute(count_sql)
-                        cnt = cur_check.fetchone()[0]
-                        impact_info = f"Usunie {cnt} wierszy"
-                    conn_check.close()
-                except Exception:
-                    impact_info = "Nie udało się oszacować wpływu"
+                impact_warning = f"⚠️ {first_word} polecenie — sprawdź WHERE warunek przed potwierdzeniem!"
 
             return jsonify({
                 "success": True,
                 "preview": True,   # sygnał dla frontendu — pokaż przycisk Potwierdź
                 "sql": sql_query,
-                "impact": impact_info,
+                "impact": impact_warning,
                 "first_word": first_word
             })
 
@@ -2154,9 +2156,15 @@ def sql_vectorize():
     """Wektoryzuje dane z tabeli SQL do Qdrant (SSE)."""
     data  = request.get_json()
     cfg   = data.get("conn", {})
-    table = data.get("table", "")
+    table = data.get("table", "").strip()
     cols  = data.get("columns", [])  # kolumny do wektoryzacji
-    label_col = data.get("label_col", "")  # kolumna jako tytuł chunka
+    label_col = data.get("label_col", "").strip()  # kolumna jako tytuł chunka
+
+    if not _validate_table_name(table):
+        return Response(f"event: error\ndata: {json.dumps({'error': f'Niepoprawna nazwa tabeli: {table}'}, ensure_ascii=False)}\n\n")
+
+    if not _validate_column_names(cols):
+        return Response(f"event: error\ndata: {json.dumps({'error': 'Niepoprawne nazwy kolumn'}, ensure_ascii=False)}\n\n")
 
     def generate():
         def sse(event, d):
