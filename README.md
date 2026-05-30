@@ -78,6 +78,23 @@ python app.py
 
 Otwórz: `http://localhost:5000`
 
+### Opcjonalnie: OCR dla skanów PDF i obrazów
+
+Jeśli chcesz, żeby aplikacja potrafiła czytać **zeskanowane dokumenty** (PDF bez warstwy tekstowej, zdjęcia, zrzuty ekranu), musisz zainstalować silnik OCR:
+
+```bash
+# 1. Zainstaluj Tesseract + polski język + narzędzie do PDF
+sudo apt update
+sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils -y
+
+# 2. Zainstaluj pakiety Python
+pip install pytesseract pdf2image Pillow
+```
+
+Po instalacji aplikacja automatycznie użyje OCR dla plików, z których nie da się wyciągnąć tekstu normalnymi metodami (np. skany PDF, zdjęcia dokumentów).
+
+**Uwaga:** OCR jest wolniejszy, dlatego jest uruchamiany tylko jako fallback.
+
 ## Konfiguracja (.env)
 
 ```env
