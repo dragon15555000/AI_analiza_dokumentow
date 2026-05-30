@@ -421,6 +421,12 @@
       <div class="input-group mb-2">
         <input type="text" id="networkQuery" class="form-control" placeholder="Zapytanie do analizy..." onkeydown="if(event.key==='Enter') buildNetwork()">
         <button class="btn btn-primary" onclick="buildNetwork()" id="networkBtn">Buduj graf</button>
+        <div id="networkFilters" class="ms-2 d-flex gap-2 align-items-center" style="font-size:0.8rem;">
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="osoba" checked> Osoby</label>
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="firma" checked> Firmy</label>
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="kwota" checked> Kwoty</label>
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="dokument" checked> Dokumenty</label>
+        </div>
       </div>
       <div class="mb-2">
         <select class="form-select form-select-sm" id="networkLimit">
@@ -2080,9 +2086,25 @@ function renderNetwork(nodes, edges) {
     // Wyczyść poprzedni graf
     d3.select('#networkSvg').selectAll('*').remove();
 
+    // Oblicz siłę powiązań (degree) dla każdego węzła
+    const degree = {};
+    edges.forEach(e => {
+        degree[e.source.id || e.source] = (degree[e.source.id || e.source] || 0) + 1;
+        degree[e.target.id || e.target] = (degree[e.target.id || e.target] || 0) + 1;
+    });
+    nodes.forEach(n => {
+        n.degree = degree[n.id] || 1;
+    });
+
+    // Lepsza, bardziej czytelna paleta kolorów
     const colors = {
-        osoba:    '#fde68a', firma: '#bfdbfe', kwota: '#bbf7d0',
-        dokument: '#e9d5ff', inne: '#fed7aa'
+        osoba:    '#f59e0b',      // pomarańczowy – osoby
+        firma:    '#3b82f6',      // niebieski – firmy
+        kwota:    '#10b981',      // zielony – pieniądze
+        dokument: '#8b5cf6',      // fioletowy – dokumenty
+        przetarg: '#ec4899',      // różowy – przetargi
+        umowa:    '#14b8a6',      // turkusowy – umowy
+        inne:     '#64748b'       // szary
     };
     const edgeColors = (label) => {
         if (!label) return '#94a3b8';
@@ -2200,16 +2222,51 @@ function renderNetwork(nodes, edges) {
         })
         .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
 
-    node.append('circle')
-        .attr('r', d => d.type === 'kwota' ? 22 : 28)
-        .attr('fill', d => colors[d.type] || colors.inne)
-        .attr('stroke','#fff').attr('stroke-width',2)
-        .style('filter','drop-shadow(0 2px 4px rgba(0,0,0,0.15))');
+    // Różne kształty w zależności od typu węzła (lepsza czytelność)
+    node.each(function(d) {
+        const gNode = d3.select(this);
+        const color = colors[d.type] || colors.inne;
+        const r = 20 + Math.min((d.degree || 1) * 2, 14); // większy węzeł = więcej powiązań
+
+        if (d.type === 'osoba') {
+            gNode.append('circle')
+                .attr('r', r)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        } else if (d.type === 'firma') {
+            gNode.append('rect')
+                .attr('x', -r * 0.9)
+                .attr('y', -r * 0.9)
+                .attr('width', r * 1.8)
+                .attr('height', r * 1.8)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2)
+                .attr('rx', 5);
+        } else if (d.type === 'kwota') {
+            gNode.append('path')
+                .attr('d', `M 0,-${r} L ${r},${r} L -${r},${r} Z`)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        } else {
+            gNode.append('circle')
+                .attr('r', r * 0.9)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        }
+    });
 
     node.append('text')
-        .text(d => d.label.length > 14 ? d.label.slice(0,13)+'…' : d.label)
-        .attr('text-anchor','middle').attr('dy','0.35em')
-        .attr('font-size', 10).attr('font-weight','600').attr('fill','#1a1f36');
+        .text(d => d.label.length > 13 ? d.label.slice(0,12) + '…' : d.label)
+        .attr('text-anchor', 'middle')
+        .attr('dy', '0.35em')
+        .attr('font-size', 9)
+        .attr('font-weight', 700)
+        .attr('fill', '#1e2937')
+        .style('pointer-events', 'none');
 
     sim.on('tick', () => {
         link
