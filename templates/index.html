@@ -182,6 +182,7 @@
                 <div class="input-group input-group-lg mb-2">
                     <input type="text" id="queryInput" class="form-control" placeholder="Wybierz szablon lub wpisz pytanie..." onkeydown="if(event.key==='Enter') executeSearch()">
                     <button class="btn btn-primary px-4" onclick="executeSearch()" id="searchBtn">Analizuj</button>
+                    <button class="btn btn-danger px-3" id="searchStopBtn" style="display:none;">⏹ Stop</button>
                 </div>
                 <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
                     <select class="form-select form-select-sm" id="searchMode" style="max-width:220px;">
@@ -987,12 +988,32 @@ function executeSearch() {
     const aiContainer = document.getElementById('aiResponseContainer');
     const sqlResultsContainer = document.getElementById('sqlHybridResults');
     const btn = document.getElementById('searchBtn');
+    const stopBtn = document.getElementById('searchStopBtn');
 
     loader.classList.remove('d-none');
     container.innerHTML = '';
     aiContainer.innerHTML = '';
     if (sqlResultsContainer) sqlResultsContainer.classList.add('d-none');
     btn.disabled = true;
+    if (stopBtn) stopBtn.style.display = '';
+
+    const controller = new AbortController();
+
+    // Stop button
+    if (stopBtn) {
+        stopBtn.onclick = () => {
+            controller.abort();
+            if (stopBtn) stopBtn.style.display = 'none';
+            loader.classList.add('d-none');
+            const box = document.getElementById('aiStreamBox');
+            if (box) {
+                const sp = box.querySelector('.spinner-border');
+                if (sp) sp.remove();
+            }
+            container.innerHTML = `<div class="alert alert-warning">⏹ Wyszukiwanie anulowane przez użytkownika.</div>`;
+            btn.disabled = false;
+        };
+    }
 
     // Wybierz endpoint na podstawie połączenia SQL
     const hasSQL = sqlConn && sqlConn.server && sqlConn.database;
@@ -1007,7 +1028,8 @@ function executeSearch() {
     fetch(endpoint, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: controller.signal
     })
     .then(async response => {
         const reader  = response.body.getReader();
@@ -1063,6 +1085,7 @@ function executeSearch() {
                                 chatHistory.push({q: query, a: aiText});
                                 if (chatHistory.length > 5) chatHistory.shift();
                             }
+                            if (stopBtn) stopBtn.style.display = 'none';
                             btn.disabled = false; return;
                         } else if (ev.error) {
                             loader.classList.add('d-none');
@@ -1084,6 +1107,7 @@ function executeSearch() {
     })
     .catch(err => {
         loader.classList.add('d-none');
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         container.innerHTML = `<div class="alert alert-danger">Błąd: ${err}</div>`;
     });
