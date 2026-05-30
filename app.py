@@ -1693,15 +1693,21 @@ def cache_stats():
 # ============================================================
 
 def _get_sql_conn(cfg: dict):
-    """Tworzy połączenie z MS SQL Server przez pymssql."""
+    """Tworzy połączenie z MS SQL Server przez pymssql.
+    Format server '127.0.0.1:1433' omija weryfikację SSL (SQL Server 2025+)."""
     import pymssql
+    server = cfg.get("server", "127.0.0.1")
+    port   = str(cfg.get("port", 1433))
+    # Jeśli serwer nie zawiera portu — dołącz
+    if ":" not in server and "\\" not in server:
+        server = f"{server}:{port}"
+    db = cfg.get("database", "")
     return pymssql.connect(
-        server   = cfg.get("server", "127.0.0.1"),
-        port     = int(cfg.get("port", 1433)),
-        database = cfg.get("database", ""),
+        server   = server,
         user     = cfg.get("user", ""),
         password = cfg.get("password", ""),
-        timeout  = 10,
+        database = db if db else None,
+        timeout  = 15,
         charset  = "UTF-8"
     )
 
@@ -1762,8 +1768,9 @@ def sql_ask():
     if not question:
         return jsonify({"success": False, "error": "Brak pytania"})
 
+    sql_query = ""
+    cols = []
     try:
-        # 1. LLM generuje SQL
         system_sql = (
             "Jesteś ekspertem T-SQL (MS SQL Server 2016). "
             "Na podstawie schematu bazy danych generujesz zapytania SQL. "
@@ -1786,29 +1793,24 @@ def sql_ask():
         with urllib.request.urlopen(req, timeout=60) as r:
             sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
 
-        # Usuń ewentualne markdown fences
         sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
         sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
 
-        # Zabezpieczenie — tylko SELECT
         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
         if first_word not in ("SELECT", "WITH"):
             return jsonify({"success": False, "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
                             "sql": sql_query})
 
-        # 2. Wykonaj SQL
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor(as_dict=True)
         cur.execute(sql_query)
-        rows = cur.fetchmany(500)   # max 500 wierszy
+        rows = cur.fetchmany(500)
         cols = list(rows[0].keys()) if rows else []
-        # Konwertuj do serializowalnego formatu
         result_rows = []
         for row in rows:
             result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
         conn.close()
 
-        # 3. LLM interpretuje wyniki
         result_preview = "\n".join([", ".join([f"{k}={v}" for k, v in r.items()]) for r in result_rows[:10]])
         prompt_interp = (
             f"Pytanie użytkownika: {question}\n"
@@ -1839,7 +1841,110 @@ def sql_ask():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e),
-                        "sql": locals().get("sql_query", "")})
+                        "sql": sql_query})
+
+
+@app.route('/sql/write', methods=['POST'])
+def sql_write():
+    """Generuje i wykonuje zapytanie INSERT/UPDATE/DELETE po potwierdzeniu przez użytkownika."""
+    data      = request.get_json()
+    cfg       = data.get("conn", {})
+    question  = data.get("question", "").strip()
+    schema    = data.get("schema", "")
+    confirmed = data.get("confirmed", False)   # True = użytkownik potwierdził wykonanie
+    sql_query = data.get("sql", "")            # Przy potwierdzeniu — SQL z poprzedniego kroku
+
+    if not question and not sql_query:
+        return jsonify({"success": False, "error": "Brak pytania lub zapytania SQL"})
+
+    try:
+        # Krok 1: generuj SQL (tylko jeśli nie przyszło gotowe)
+        if not sql_query:
+            system_sql = (
+                "Jesteś ekspertem T-SQL (MS SQL Server). "
+                "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE, CREATE TABLE. "
+                "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
+                "Bądź precyzyjny — podaj konkretne wartości i warunki WHERE."
+            )
+            prompt_sql = (
+                f"SCHEMAT BAZY:\n{schema}\n\n"
+                f"ZADANIE: {question}\n\n"
+                "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
+            )
+            payload = {"model": "llama3", "prompt": prompt_sql, "system": system_sql,
+                       "stream": False, "options": {"num_ctx": 4096}}
+            req = urllib.request.Request(
+                OLLAMA_URL + "/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+            sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+            sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+
+        # Sprawdź typ polecenia
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        allowed_write = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "MERGE")
+        if first_word not in allowed_write and first_word not in ("SELECT", "WITH"):
+            return jsonify({"success": False, "error": f"Nieznane polecenie: {first_word}", "sql": sql_query})
+
+        # Krok 2: jeśli nie potwierdzone — zwróć SQL do podglądu
+        if not confirmed:
+            # Oszacuj wpływ dla UPDATE/DELETE
+            impact_info = ""
+            if first_word in ("UPDATE", "DELETE"):
+                try:
+                    conn_check = _get_sql_conn(cfg)
+                    cur_check  = conn_check.cursor()
+                    # Buduj COUNT query
+                    if first_word == "UPDATE":
+                        where_part = re.search(r'\bWHERE\b(.+?)(?:$)', sql_query, re.IGNORECASE | re.DOTALL)
+                        table_part = re.search(r'UPDATE\s+\[?(\w+)\]?', sql_query, re.IGNORECASE)
+                        if where_part and table_part:
+                            count_sql = f"SELECT COUNT(*) FROM [{table_part.group(1)}] WHERE {where_part.group(1)}"
+                            cur_check.execute(count_sql)
+                            cnt = cur_check.fetchone()[0]
+                            impact_info = f"Zmieni {cnt} wierszy"
+                    elif first_word == "DELETE":
+                        count_sql = sql_query.replace("DELETE", "SELECT COUNT(*)", 1)
+                        cur_check.execute(count_sql)
+                        cnt = cur_check.fetchone()[0]
+                        impact_info = f"Usunie {cnt} wierszy"
+                    conn_check.close()
+                except Exception:
+                    impact_info = "Nie udało się oszacować wpływu"
+
+            return jsonify({
+                "success": True,
+                "preview": True,   # sygnał dla frontendu — pokaż przycisk Potwierdź
+                "sql": sql_query,
+                "impact": impact_info,
+                "first_word": first_word
+            })
+
+        # Krok 3: wykonaj po potwierdzeniu
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor()
+        cur.execute(sql_query)
+        rows_affected = cur.rowcount
+        conn.commit()
+        conn.close()
+
+        # Log audytu
+        print(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
+
+        return jsonify({
+            "success":       True,
+            "executed":      True,
+            "sql":           sql_query,
+            "rows_affected": rows_affected,
+            "message":       f"Wykonano. Zmieniono/dodano {rows_affected} wierszy."
+        })
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "sql": locals().get("sql_query", "")})
+
 
 @app.route('/sql/vectorize', methods=['POST'])
 def sql_vectorize():
@@ -1858,22 +1963,22 @@ def sql_vectorize():
             conn = _get_sql_conn(cfg)
             cur  = conn.cursor(as_dict=True)
 
+            # Ustal kolumny — użyj osobnej zmiennej lokalnej żeby uniknąć konfliktu zakresu
             if cols:
-                col_list = ", ".join(f"[{c}]" for c in cols)
+                active_cols = list(cols)
             else:
-                # Pobierz wszystkie kolumny tekstowe/numeryczne
-                cur.execute(f"""
+                cur.execute("""
                     SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
                     WHERE TABLE_NAME=%s AND DATA_TYPE IN
                     ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
                     ORDER BY ORDINAL_POSITION
                 """, (table,))
-                cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
-                col_list = ", ".join(f"[{c}]" for c in cols)
+                active_cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
+            col_list = ", ".join(f"[{c}]" for c in active_cols)
 
             cur.execute(f"SELECT COUNT(*) as cnt FROM [{table}]")
             total = cur.fetchone()["cnt"]
-            yield sse("start", {"total": total, "table": table, "columns": cols})
+            yield sse("start", {"total": total, "table": table, "columns": active_cols})
 
             cur.execute(f"SELECT {col_list} FROM [{table}]")
             qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)

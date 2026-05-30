@@ -450,28 +450,32 @@
       <div class="row g-2 mb-2">
         <div class="col-8">
           <label class="form-label small fw-bold mb-1">Serwer</label>
-          <input type="text" id="sqlServer" class="form-control form-control-sm" value="127.0.0.1" placeholder="127.0.0.1 lub nazwa\instancja">
+          <input type="text" id="sqlServer" class="form-control form-control-sm" value="127.0.0.1" placeholder="127.0.0.1 lub nazwa\instancja" data-default="127.0.0.1">
         </div>
         <div class="col-4">
           <label class="form-label small fw-bold mb-1">Port</label>
-          <input type="number" id="sqlPort" class="form-control form-control-sm" value="1433">
+          <input type="number" id="sqlPort" class="form-control form-control-sm" value="1433" data-default="1433">
         </div>
       </div>
       <div class="mb-2">
         <label class="form-label small fw-bold mb-1">Baza danych</label>
-        <input type="text" id="sqlDatabase" class="form-control form-control-sm" placeholder="nazwa_bazy">
+        <input type="text" id="sqlDatabase" class="form-control form-control-sm" value="Prolider_MZK_SPOLKA" placeholder="nazwa_bazy">
       </div>
       <div class="row g-2 mb-2">
         <div class="col-6">
           <label class="form-label small fw-bold mb-1">Użytkownik</label>
-          <input type="text" id="sqlUser" class="form-control form-control-sm" placeholder="sa">
+          <input type="text" id="sqlUser" class="form-control form-control-sm" value="prolideradmin" placeholder="sa">
         </div>
         <div class="col-6">
           <label class="form-label small fw-bold mb-1">Hasło</label>
-          <input type="password" id="sqlPass" class="form-control form-control-sm">
+          <input type="password" id="sqlPass" class="form-control form-control-sm" value="pro#LiderSqlAdmin%1">
         </div>
       </div>
-      <button class="btn btn-primary btn-sm w-100 mb-2" onclick="sqlConnect()" id="sqlConnectBtn">Połącz i pobierz tabele</button>
+      <div class="d-flex gap-2 mb-2">
+        <button class="btn btn-primary btn-sm flex-grow-1" onclick="sqlConnect()" id="sqlConnectBtn">Połącz</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="sqlSaveConn()" title="Zapisz dane połączenia">💾</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="sqlClearConn()" title="Wyczyść zapisane">🗑</button>
+      </div>
       <div id="sqlConnectStatus" class="small d-none"></div>
     </div>
 
@@ -486,6 +490,17 @@
   <div class="col-lg-8">
     <div class="search-card">
       <h2>Zapytaj bazę po polsku (Text-to-SQL)</h2>
+      <div class="d-flex gap-2 mb-2 align-items-center">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="sqlWriteMode" onchange="toggleSqlWriteMode(this)">
+          <label class="form-check-label small fw-semibold text-danger" for="sqlWriteMode" style="cursor:pointer;">
+            Tryb zapisu (INSERT/UPDATE/DELETE)
+          </label>
+        </div>
+      </div>
+      <div id="sqlWriteWarning" class="d-none alert alert-warning small py-2 mb-2">
+        ⚠️ Tryb zapisu aktywny — AI może modyfikować dane w bazie. Każda operacja wymaga Twojego potwierdzenia.
+      </div>
       <div class="input-group mb-2">
         <input type="text" id="sqlQuestion" class="form-control"
           placeholder="np. Ile spraw zostało zarejestrowanych w 2023 roku?"
@@ -705,6 +720,7 @@ function showTab(name) {
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); }
     if (name === 'compare') renderCompareFileList();
+    if (name === 'sql') sqlLoadSavedConn();
 }
 
 // ---- STATS ----
@@ -2055,6 +2071,38 @@ let sqlConn = {};
 let sqlTables = [];
 let sqlSchema = '';
 
+const SQL_CONN_KEY = 'ai_sql_connection';
+
+function sqlLoadSavedConn() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(SQL_CONN_KEY) || '{}');
+        if (saved.server) {
+            document.getElementById('sqlServer').value   = saved.server || '127.0.0.1';
+            document.getElementById('sqlPort').value     = saved.port   || '1433';
+            document.getElementById('sqlDatabase').value = saved.database || '';
+            document.getElementById('sqlUser').value     = saved.user   || '';
+            document.getElementById('sqlPass').value     = saved.password || '';
+        }
+    } catch(e) {}
+}
+
+function sqlSaveConn() {
+    const cfg = getSqlConn();
+    localStorage.setItem(SQL_CONN_KEY, JSON.stringify(cfg));
+    const st = document.getElementById('sqlConnectStatus');
+    st.className = 'small alert alert-success mt-2';
+    st.textContent = '✅ Dane połączenia zapisane w przeglądarce.';
+    st.classList.remove('d-none');
+    setTimeout(() => st.classList.add('d-none'), 3000);
+}
+
+function sqlClearConn() {
+    localStorage.removeItem(SQL_CONN_KEY);
+    ['sqlServer','sqlPort','sqlDatabase','sqlUser'].forEach(id =>
+        document.getElementById(id).value = id==='sqlServer'?'127.0.0.1':id==='sqlPort'?'1433':'');
+    document.getElementById('sqlPass').value = '';
+}
+
 function getSqlConn() {
     return {
         server:   document.getElementById('sqlServer').value.trim(),
@@ -2144,8 +2192,18 @@ function sqlQuickAsk(tableName) {
     setTimeout(sqlAsk, 800);
 }
 
+function toggleSqlWriteMode(cb) {
+    document.getElementById('sqlWriteWarning').classList.toggle('d-none', !cb.checked);
+    document.getElementById('sqlQuestion').placeholder = cb.checked
+        ? 'np. Dodaj kontrahenta ABC Sp. z o.o. z NIP 123-456-78-90'
+        : 'np. Ile spraw zostało zarejestrowanych w 2023 roku?';
+    document.getElementById('sqlAskBtn').className = cb.checked
+        ? 'btn btn-danger px-4' : 'btn btn-primary px-4';
+}
+
 function sqlAsk() {
-    const question = document.getElementById('sqlQuestion').value.trim();
+    const question  = document.getElementById('sqlQuestion').value.trim();
+    const writeMode = document.getElementById('sqlWriteMode').checked;
     if (!question) return;
     if (!sqlConn.server) { alert('Najpierw połącz się z bazą SQL.'); return; }
 
@@ -2156,33 +2214,77 @@ function sqlAsk() {
     result.innerHTML = '';
     btn.disabled = true;
 
-    fetch('/sql/ask', {
+    const endpoint = writeMode ? '/sql/write' : '/sql/ask';
+    fetch(endpoint, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, question, schema: sqlSchema})
+        body: JSON.stringify({conn: sqlConn, question, schema: sqlSchema, confirmed: false})
     })
     .then(r=>r.json())
     .then(d => {
         loader.classList.add('d-none');
         btn.disabled = false;
         if (!d.success) {
-            result.innerHTML = `
-                <div class="alert alert-danger small">${d.error}</div>
-                ${d.sql ? `<pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>` : ''}`;
+            result.innerHTML = `<div class="alert alert-danger small">${d.error}</div>`
+                + (d.sql ? `<pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>` : '');
             return;
         }
-        // Interpretacja LLM
+
+        // Tryb zapisu — podgląd z przyciskiem potwierdzenia
+        if (d.preview) {
+            const impactColor = d.first_word === 'DELETE' ? '#dc2626' : '#d97706';
+            result.innerHTML = `
+                <div style="background:#fef3c7;border-left:4px solid #d97706;border-radius:6px;padding:14px 16px;margin-bottom:12px;">
+                    <strong style="color:#92400e;">⚠️ Podgląd operacji zapisu — potwierdź wykonanie</strong>
+                    ${d.impact ? `<div class="mt-1 small" style="color:${impactColor};font-weight:700;">${d.impact}</div>` : ''}
+                </div>
+                <pre style="font-size:0.82rem;background:#1a1f36;color:#a0aec0;padding:12px;border-radius:6px;overflow-x:auto;margin-bottom:12px;">${d.sql}</pre>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-danger" onclick="sqlConfirmWrite('${d.sql.replace(/'/g,"\\'").replace(/\n/g,' ')}')">
+                        ✅ Potwierdź — wykonaj
+                    </button>
+                    <button class="btn btn-outline-secondary" onclick="document.getElementById('sqlResult').innerHTML=''">
+                        ✕ Anuluj
+                    </button>
+                </div>`;
+            return;
+        }
+
+        // Tryb odczytu — interpretacja + tabela
         result.innerHTML = `
             <div style="background:#eef2ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
                 <strong style="color:#4f46e5;font-size:0.88rem;">Interpretacja AI:</strong>
                 <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.interpretation.replace(/\n/g,'<br>')}</div>
             </div>
             <details class="mb-2">
-                <summary class="small text-muted" style="cursor:pointer;">Wygenerowany SQL (${d.total} wierszy${d.truncated?' — obcięte do 500':''})</summary>
+                <summary class="small text-muted" style="cursor:pointer;">SQL (${d.total} wierszy${d.truncated?' — obcięte do 500':''})</summary>
                 <pre style="font-size:0.75rem;background:#1a1f36;color:#a0aec0;padding:10px;border-radius:4px;margin-top:6px;overflow-x:auto;">${d.sql}</pre>
             </details>
             ${d.rows.length ? renderSqlTable(d.columns, d.rows) : '<div class="alert alert-warning small">Brak wyników.</div>'}`;
     })
     .catch(e => { loader.classList.add('d-none'); btn.disabled=false; result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+}
+
+function sqlConfirmWrite(sql) {
+    const result = document.getElementById('sqlResult');
+    result.innerHTML = '<div class="text-center py-3"><div class="spinner-border text-danger"></div><span class="ms-2 small">Wykonywanie...</span></div>';
+
+    fetch('/sql/write', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, question:'', schema: sqlSchema, confirmed: true, sql})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        if (!d.success) {
+            result.innerHTML = `<div class="alert alert-danger">${d.error}</div>`;
+            return;
+        }
+        result.innerHTML = `
+            <div class="alert alert-success">
+                ✅ ${d.message}
+            </div>
+            <pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>`;
+    })
+    .catch(e => { result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
 }
 
 function renderSqlTable(cols, rows) {
