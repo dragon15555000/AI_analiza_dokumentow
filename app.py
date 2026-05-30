@@ -35,6 +35,10 @@ try: import pdfplumber
 except ImportError: pdfplumber = None
 try: import openpyxl
 except ImportError: openpyxl = None
+try: import pytesseract
+except ImportError: pytesseract = None
+try: from pdf2image import convert_from_path
+except ImportError: convert_from_path = None
 
 app = Flask(__name__)
 
@@ -555,9 +559,32 @@ def extract_text(file_path: Path) -> str:
                 return json.dumps(json.load(f), indent=2, ensure_ascii=False)
         elif ext == '.docx' and docx:
             return "\n".join([p.text for p in docx.Document(file_path).paragraphs])
-        elif ext == '.pdf' and pdfplumber:
-            with pdfplumber.open(file_path) as pdf:
-                return "\n".join([page.extract_text() or "" for page in pdf.pages])
+        
+        elif ext == '.pdf':
+            text = ""
+            # Próba 1: Zwykłe wyciągnięcie tekstu cyfrowego
+            if pdfplumber:
+                with pdfplumber.open(file_path) as pdf:
+                    text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+            
+            # Próba 2 (Fallback OCR): Jeżeli plik to skan (brak tekstu), uruchom Tesseract
+            if len(text.strip()) < 20 and pytesseract and convert_from_path:
+                logger.info(f"[OCR] Analiza wizualna pliku: {file_path.name}...")
+                try:
+                    # Rozbicie PDF na zdjęcia (domyślnie 200 DPI jest optymalne dla OCR)
+                    pages = convert_from_path(file_path, dpi=200)
+                    ocr_text = []
+                    for page_img in pages:
+                        # Tłumaczenie obrazka na polski tekst
+                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        ocr_text.append(page_text)
+                    text = "\n\n".join(ocr_text)
+                    logger.info(f"[OCR] Zakończono dla: {file_path.name} (Pobrano znaków: {len(text)})")
+                except Exception as ocr_err:
+                    logger.warning(f"Błąd OCR dla pliku {file_path.name}: {ocr_err}")
+            
+            return text
+
         elif ext in ['.xlsx', '.xls'] and openpyxl:
             return _extract_excel(file_path)
         elif ext == '.csv':
