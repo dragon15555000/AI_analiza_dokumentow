@@ -797,11 +797,13 @@ def clear_collection():
         client = get_qdrant_client()
         info = client.get_collection(ACTIVE_COLLECTION)
         count_before = info.points_count
+        # Pobierz aktualny wymiar wektora zanim usuniesz kolekcję
+        vsize = info.config.params.vectors.size if info.config.params.vectors else 768
         from qdrant_client.models import VectorParams, Distance
         client.delete_collection(ACTIVE_COLLECTION)
         client.create_collection(
             ACTIVE_COLLECTION,
-            vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            vectors_config=VectorParams(size=vsize, distance=Distance.COSINE)
         )
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "deleted": count_before})
@@ -909,7 +911,7 @@ def hybrid_stream():
                         data=json.dumps(payload).encode("utf-8"),
                         headers={"Content-Type": "application/json"}, method="POST"
                     )
-                    with urllib.request.urlopen(req, timeout=30) as r:
+                    with urllib.request.urlopen(req, timeout=90) as r:
                         sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
 
                     sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
@@ -1185,7 +1187,7 @@ def get_suggestions():
             url, data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST"
         )
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:
             raw = json.loads(r.read().decode("utf-8"))["response"]
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]
@@ -1268,7 +1270,7 @@ def delete_documents():
             )
         )
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
-        return jsonify({"success": True, "deleted_chunks": len(files_to_delete)})
+        return jsonify({"success": True, "files_count": len(files_to_delete)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
