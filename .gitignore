@@ -27,3 +27,4 @@ logs/
 .vscode/
 .idea/
 *.swp
+.sql_config.json

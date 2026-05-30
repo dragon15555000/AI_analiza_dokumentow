@@ -2074,33 +2074,57 @@ let sqlSchema = '';
 const SQL_CONN_KEY = 'ai_sql_connection';
 
 function sqlLoadSavedConn() {
-    try {
-        const saved = JSON.parse(localStorage.getItem(SQL_CONN_KEY) || '{}');
-        if (saved.server) {
-            document.getElementById('sqlServer').value   = saved.server || '127.0.0.1';
-            document.getElementById('sqlPort').value     = saved.port   || '1433';
-            document.getElementById('sqlDatabase').value = saved.database || '';
-            document.getElementById('sqlUser').value     = saved.user   || '';
-            document.getElementById('sqlPass').value     = saved.password || '';
-        }
-    } catch(e) {}
+    fetch('/sql/config')
+        .then(r => r.json())
+        .then(d => {
+            if (d.has_config && d.config) {
+                const cfg = d.config;
+                document.getElementById('sqlServer').value   = cfg.server   || '127.0.0.1';
+                document.getElementById('sqlPort').value     = cfg.port     || '1433';
+                document.getElementById('sqlDatabase').value = cfg.database || '';
+                document.getElementById('sqlUser').value     = cfg.user     || '';
+                document.getElementById('sqlPass').value     = cfg.password || '';
+            }
+        })
+        .catch(e => console.warn('Nie udało się załadować config:', e));
 }
 
 function sqlSaveConn() {
     const cfg = getSqlConn();
-    localStorage.setItem(SQL_CONN_KEY, JSON.stringify(cfg));
-    const st = document.getElementById('sqlConnectStatus');
-    st.className = 'small alert alert-success mt-2';
-    st.textContent = '✅ Dane połączenia zapisane w przeglądarce.';
-    st.classList.remove('d-none');
-    setTimeout(() => st.classList.add('d-none'), 3000);
+    fetch('/sql/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(cfg)
+    })
+    .then(r => r.json())
+    .then(d => {
+        const st = document.getElementById('sqlConnectStatus');
+        st.className = 'small alert alert-success mt-2';
+        st.textContent = '✅ Dane połączenia zapisane na serwerze.';
+        st.classList.remove('d-none');
+        setTimeout(() => st.classList.add('d-none'), 3000);
+    })
+    .catch(e => {
+        const st = document.getElementById('sqlConnectStatus');
+        st.className = 'small alert alert-danger mt-2';
+        st.textContent = '❌ Błąd: ' + e;
+        st.classList.remove('d-none');
+    });
 }
 
 function sqlClearConn() {
-    localStorage.removeItem(SQL_CONN_KEY);
-    ['sqlServer','sqlPort','sqlDatabase','sqlUser'].forEach(id =>
-        document.getElementById(id).value = id==='sqlServer'?'127.0.0.1':id==='sqlPort'?'1433':'');
-    document.getElementById('sqlPass').value = '';
+    if (confirm('Usunąć zapisane dane połączenia SQL Server?')) {
+        fetch('/sql/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({server: '', port: '', database: '', user: '', password: ''})
+        })
+        .then(() => {
+            ['sqlServer','sqlPort','sqlDatabase','sqlUser'].forEach(id =>
+                document.getElementById(id).value = id==='sqlServer'?'127.0.0.1':id==='sqlPort'?'1433':'');
+            document.getElementById('sqlPass').value = '';
+        });
+    }
 }
 
 function getSqlConn() {
@@ -2350,6 +2374,7 @@ function sqlVectorize() {
 
 window.onload = function() {
     updateStats();
+    sqlLoadSavedConn();
     // Sugestie ładuj z opóźnieniem — nie blokuj strony przy starcie
     setTimeout(() => loadSuggestions(false), 2000);
 };

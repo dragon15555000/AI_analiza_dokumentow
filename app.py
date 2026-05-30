@@ -1692,6 +1692,24 @@ def cache_stats():
 # MODUŁ SQL — MS SQL Server 2016
 # ============================================================
 
+SQL_CONFIG_PATH = Path(__file__).parent / ".sql_config.json"
+
+def _load_sql_config() -> dict:
+    """Załaduj zapisaną konfigurację SQL Server."""
+    if SQL_CONFIG_PATH.exists():
+        try:
+            return json.loads(SQL_CONFIG_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_sql_config(cfg: dict):
+    """Zapisz konfigurację SQL Server do pliku."""
+    try:
+        SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    except Exception as e:
+        print(f"⚠️ Błąd zapisu config: {e}")
+
 def _get_sql_conn(cfg: dict):
     """Tworzy połączenie z MS SQL Server przez pymssql.
     Format server '127.0.0.1:1433' omija weryfikację SSL (SQL Server 2025+)."""
@@ -1710,6 +1728,29 @@ def _get_sql_conn(cfg: dict):
         timeout  = 15,
         charset  = "UTF-8"
     )
+
+@app.route('/sql/config', methods=['GET', 'POST'])
+def sql_config():
+    """Zapisz/załaduj konfigurację SQL Server."""
+    if request.method == 'GET':
+        cfg = _load_sql_config()
+        return jsonify({
+            "success": True,
+            "config": cfg if cfg else None,
+            "has_config": bool(cfg)
+        })
+
+    # POST — zapisz nową config
+    data = request.get_json()
+    cfg = {
+        "server": data.get("server", "").strip(),
+        "port": int(data.get("port", 1433)),
+        "database": data.get("database", "").strip(),
+        "user": data.get("user", "").strip(),
+        "password": data.get("password", "")
+    }
+    _save_sql_config(cfg)
+    return jsonify({"success": True, "message": "Konfiguracja zapisana"})
 
 @app.route('/sql/test', methods=['POST'])
 def sql_test():
