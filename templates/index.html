@@ -748,6 +748,7 @@ function showTab(name) {
 
 // ---- STATS ----
 function updateStats() {
+    if (isHeavyVectorizing) return;  // wyłącz automatyczne odświeżanie podczas ciężkiej wektoryzacji
     fetch('/stats').then(r => r.json()).then(d => {
         if (d.success) {
             document.getElementById('statVectors').textContent = (d.vectors_count || 0).toLocaleString('pl');
@@ -2151,6 +2152,7 @@ function confirmReindex() {
 let sqlConn = {};
 let sqlTables = [];
 let sqlSchema = '';
+let isHeavyVectorizing = false;  // tymczasowa flaga podczas ciężkiej wektoryzacji
 
 const SQL_CONN_KEY = 'ai_sql_connection';
 
@@ -2477,6 +2479,8 @@ function sqlVectorizeAll() {
     status.textContent = '';
     pct_el.textContent = '';
 
+    isHeavyVectorizing = true;   // wyłącz automatyczne odświeżanie statystyk podczas ciężkiej operacji
+
     fetch('/sql/vectorize-all', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({conn: sqlConn})
@@ -2522,10 +2526,12 @@ function sqlVectorizeAll() {
                         btn.disabled = false;
                         status.textContent = '';
                         pct_el.textContent = '100%';
+                        isHeavyVectorizing = false;
                         updateStats(); allDocs = [];
                     } else if (ev.error !== undefined) {
                         log.innerHTML += `<br><span style="color:red;">❌ Błąd: ${ev.error}</span>`;
                         btn.disabled = false;
+                        isHeavyVectorizing = false;
                     }
                 } catch(e) {}
             }
@@ -2534,6 +2540,7 @@ function sqlVectorizeAll() {
     .catch(err => {
         log.innerHTML += `<br><span style="color:red;">❌ Błąd sieci: ${err}</span>`;
         btn.disabled = false;
+        isHeavyVectorizing = false;
     });
 }
 

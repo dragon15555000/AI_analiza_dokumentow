@@ -2445,8 +2445,12 @@ def sql_vectorize_all():
 
                     yield sse("table_done", {"table": table, "rows": table_done, "table_idx": table_idx})
 
+                    # Mała przerwa między tabelami (tymczasowe odciążenie serwera podczas Vectorize All)
+                    time.sleep(0.8)
+
                 except Exception as e:
                     yield sse("table_error", {"table": table, "error": str(e)})
+                    time.sleep(0.5)  # krótka przerwa nawet przy błędzie
 
             conn.close()
             _docs_cache["data"] = None
