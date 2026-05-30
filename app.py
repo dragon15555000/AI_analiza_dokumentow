@@ -1734,27 +1734,29 @@ def build_network():
         context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in contexts])
 
         system = (
-            "Jesteś ekspertem śledczym. Wyciągasz sieć powiązań z dokumentów. "
-            "ZASADA BEZWZGLĘDNA: używasz WYŁĄCZNIE prawdziwych wartości z dokumentów. "
-            "NIGDY nie piszesz: 'nazwa', 'firma', 'osoba', 'kwota', 'X', 'id_A', 'plik.docx' — "
-            "to są PRZYKŁADY schematu, nie wartości do wstawienia. "
-            "Każdy węzeł label to PRAWDZIWA nazwa z tekstu (np. 'Jan Kowalski', 'ABC Sp. z o.o.', '50 000 zł'). "
-            "\n\nFORMAT JSON (wypełnij prawdziwymi danymi):\n"
-            '{"nodes":['
-            '{"id":"jan_kowalski","type":"osoba","label":"Jan Kowalski"},'
-            '{"id":"abc_spolka","type":"firma","label":"ABC Sp. z o.o."},'
-            '{"id":"kwota_50k","type":"kwota","label":"50 000 zł za usługę IT"}'
-            '],'
-            '"edges":['
-            '{"source":"jan_kowalski","target":"abc_spolka","label":"prezes zarządu",'
-            '"doc":"umowa_nr5_2023.docx","evidence":"Jan Kowalski podpisał jako prezes w dniu 12.03.2023"},'
-            '{"source":"abc_spolka","target":"kwota_50k","label":"faktura FV/2023/05",'
-            '"doc":"faktury_2023.xlsx","evidence":"ABC wystawiło fakturę na 50 000 zł za usługi IT"}'
-            ']}'
-            "\n\nTypy węzłów: osoba, firma, kwota, dokument, inne"
-            "\nTypy relacji w label: prezes/dyrektor, podpisał umowę, zapłacił Xzł, właściciel, "
-            "wygrał przetarg, zlecił, zatwierdził, aneks nr X, wykonawca"
-            "\nid: małe litery, bez spacji, bez polskich znaków (snake_case)"
+            "Jesteś ekspertem analityki śledczej. Twoim zadaniem jest wyciągnięcie jak najbogatszej sieci powiązań z dokumentów.\n\n"
+            "ZASADY BEZWZGLĘDNE:\n"
+            "1. Używaj WYŁĄCZNIE prawdziwych nazw, kwot, dat i faktów z dokumentów.\n"
+            "2. NIGDY nie używaj placeholderów typu 'nazwa', 'firma', 'X', 'osoba A'.\n"
+            "3. Każdy label musi być rzeczywistą wartością z tekstu.\n\n"
+            "FORMAT JSON (zwracaj tylko poprawny JSON):\n"
+            '{\n'
+            '  "nodes": [ {"id": "jan_kowalski", "type": "osoba", "label": "Jan Kowalski"}, ... ],\n'
+            '  "edges": [ {"source": "jan_kowalski", "target": "abc_spolka", "label": "prezes zarządu", "doc": "umowa_2023.pdf", "evidence": "Podpisał umowę 12.03.2023", "date": "2023-03-12"}, ... ]\n'
+            '}\n\n'
+            "Typy węzłów (type): osoba, firma, kwota, dokument, przetarg, umowa, inne\n\n"
+            "Bogate typy relacji (label krawędzi) — używaj precyzyjnych:\n"
+            "- prezes / członek zarządu / dyrektor\n"
+            "- podpisał umowę / aneks\n"
+            "- zapłacił / wystawił fakturę / otrzymał płatność\n"
+            "- wygrał przetarg / złożył ofertę\n"
+            "- zlecił / wykonał usługę\n"
+            "- jest właścicielem / beneficjentem\n"
+            "- zatwierdził / skontrolował\n\n"
+            "W polu 'evidence' wstaw krótki, dosłowny cytat z dokumentu.\n"
+            "Jeśli w tekście pojawia się data (nawet przybliżona) — dodaj ją w polu 'date' w formacie YYYY-MM-DD lub YYYY-MM.\n"
+            "Staraj się wyciągać jak najwięcej dat, ról i numerów dokumentów.\n\n"
+            "id: snake_case, bez polskich znaków, max 40 znaków."
         )
         prompt = (
             f"DOKUMENTY DO ANALIZY:\n{context_str}\n\n"
