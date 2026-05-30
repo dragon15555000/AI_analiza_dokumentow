@@ -107,7 +107,7 @@ def get_embedding(text: str) -> list:
             if row:
                 return json.loads(row[0])
     except Exception as e:
-        print(f"⚠️ Błąd odczytu cache: {e}")
+        logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
     # 2. Jeśli nie ma w cache, odpytaj Ollamę
     url = OLLAMA_URL + "/api/embeddings"
@@ -124,11 +124,11 @@ def get_embedding(text: str) -> list:
                 conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
                              (key, json.dumps(vec)))
         except Exception as e:
-            print(f"⚠️ Błąd zapisu cache: {e}")
+            logger.warning(f"Błąd zapisu cache embeddingów: {e}")
 
         return vec
     except Exception as e:
-        print(f"⚠️ Ollama Embedding Error: {e}")
+        logger.error(f"Ollama Embedding Error: {e}")
         return [0.0] * 768
 
 def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
@@ -147,7 +147,7 @@ def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
                 idx, vec = fut.result()
                 results[idx] = vec
             except Exception as e:
-                print(f"⚠️ Batch embedding error: {e}")
+                logger.error(f"Batch embedding error: {e}")
                 results[futures[fut]] = [0.0] * 768
 
     return results
@@ -217,12 +217,17 @@ def generate_answer(query: str, contexts: list, mode: str = "normal") -> str:
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
     payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
+
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=240) as r:
             return json.loads(r.read().decode("utf-8"))["response"]
+    except urllib.error.URLError as e:
+        logger.error(f"LLM connection error (generate_answer): {e}")
+        return "Błąd połączenia z modelem językowym (Ollama)."
     except Exception as e:
+        logger.error(f"LLM error in generate_answer: {e}")
         return f"Błąd syntezy LLM: {e}"
 
 def verify_answer(answer: str, contexts: list, query: str) -> dict:
@@ -282,7 +287,11 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
             "hallucinations": hallucin,
             "confidence_pct": confidence_pct
         }
+    except urllib.error.URLError as e:
+        logger.error(f"LLM connection error (verify_answer): {e}")
+        return {"success": False, "error": "Błąd połączenia z weryfikatorem (Ollama)."}
     except Exception as e:
+        logger.error(f"LLM error in verify_answer: {e}")
         return {"success": False, "error": str(e)}
 
 @app.route('/verify', methods=['POST'])
@@ -1940,7 +1949,7 @@ def _save_sql_config(cfg: dict):
     try:
         SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
     except Exception as e:
-        print(f"⚠️ Błąd zapisu config: {e}")
+        logger.warning(f"Błąd zapisu config: {e}")
 
 def _get_sql_conn(cfg: dict):
     """Tworzy połączenie z MS SQL Server przez pymssql.
@@ -2206,7 +2215,7 @@ def sql_write():
         conn.close()
 
         # Log audytu
-        print(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
+        logger.debug(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
 
         return jsonify({
             "success":       True,
