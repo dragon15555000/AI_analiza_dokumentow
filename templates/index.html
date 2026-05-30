@@ -2437,7 +2437,11 @@ function sqlVectorize() {
                 if (!dl) continue;
                 try {
                     const ev = JSON.parse(dl.slice(6));
-                    if (ev.done !== undefined) {
+                    if (ev.start !== undefined) {
+                        // Obsługa startu wektoryzacji pojedynczej tabeli
+                        log.textContent = `Przygotowanie do wektoryzacji tabeli ${ev.table} (${ev.total} wierszy)...`;
+                        bar.style.width = '0%';
+                    } else if (ev.done !== undefined) {
                         bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
                         updateStats(); allDocs = [];
