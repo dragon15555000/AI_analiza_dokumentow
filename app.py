@@ -114,30 +114,42 @@ def get_embedding(text: str) -> list:
     except Exception as e:
         logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
-    # 2. Jeśli nie ma w cache, odpytaj Ollamę
+    # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
     url = OLLAMA_URL + "/api/embeddings"
     payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
-    try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            vec = json.loads(r.read().decode("utf-8"))["embedding"]
 
-        # 3. Zapisz nowy wektor natychmiast do bazy SQLite
+    for attempt in range(4):  # max 4 próby
         try:
-            with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
-                conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
-                             (key, json.dumps(vec)))
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=45) as r:
+                vec = json.loads(r.read().decode("utf-8"))["embedding"]
+
+            # 3. Zapisz nowy wektor natychmiast do bazy SQLite
+            try:
+                with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+                    conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
+                                 (key, json.dumps(vec)))
+            except Exception as e:
+                logger.warning(f"Błąd zapisu cache embeddingów: {e}")
+
+            return vec
+
         except Exception as e:
-            logger.warning(f"Błąd zapisu cache embeddingów: {e}")
+            if "Connection reset by peer" in str(e) or "104" in str(e):
+                wait = (2 ** attempt) * 0.4   # 0.4s, 0.8s, 1.6s, 3.2s
+                logger.warning(f"Ollama embedding reset (próba {attempt+1}/4) — czekam {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            else:
+                logger.error(f"Ollama Embedding Error: {e}")
+                return [0.0] * 768
 
-        return vec
-    except Exception as e:
-        logger.error(f"Ollama Embedding Error: {e}")
-        return [0.0] * 768
+    logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
+    return [0.0] * 768
 
-def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
-    """Batch embeddings — wysyła kilka tekstów równolegle, ~5x szybszy import."""
+def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
+    """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results = [None] * len(texts)
 
@@ -571,11 +583,9 @@ def extract_text(file_path: Path) -> str:
             if len(text.strip()) < 20 and pytesseract and convert_from_path:
                 logger.info(f"[OCR] Analiza wizualna pliku: {file_path.name}...")
                 try:
-                    # Rozbicie PDF na zdjęcia (domyślnie 200 DPI jest optymalne dla OCR)
                     pages = convert_from_path(file_path, dpi=200)
                     ocr_text = []
                     for page_img in pages:
-                        # Tłumaczenie obrazka na polski tekst
                         page_text = pytesseract.image_to_string(page_img, lang='pol')
                         ocr_text.append(page_text)
                     text = "\n\n".join(ocr_text)
@@ -584,6 +594,33 @@ def extract_text(file_path: Path) -> str:
                     logger.warning(f"Błąd OCR dla pliku {file_path.name}: {ocr_err}")
             
             return text
+
+        # Obsługa obrazów bezpośrednio (jpg, png, tiff itp.) przez OCR
+        elif ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'] and pytesseract:
+            if convert_from_path:
+                # pdf2image może obsłużyć niektóre obrazy, ale dla pewności używamy PIL jeśli dostępna
+                try:
+                    from PIL import Image
+                    img = Image.open(file_path)
+                    text = pytesseract.image_to_string(img, lang='pol')
+                    logger.info(f"[OCR] Przetworzono obraz: {file_path.name}")
+                    return text
+                except ImportError:
+                    pass  # fallback poniżej
+            # Fallback - spróbuj przez pdf2image jeśli PIL nie ma
+            if convert_from_path:
+                try:
+                    pages = convert_from_path(file_path, dpi=200)
+                    ocr_text = []
+                    for page_img in pages:
+                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        ocr_text.append(page_text)
+                    text = "\n\n".join(ocr_text)
+                    logger.info(f"[OCR] Przetworzono obraz przez pdf2image: {file_path.name}")
+                    return text
+                except Exception as ocr_err:
+                    logger.warning(f"Błąd OCR obrazu {file_path.name}: {ocr_err}")
+            return ""
 
         elif ext in ['.xlsx', '.xls'] and openpyxl:
             return _extract_excel(file_path)
