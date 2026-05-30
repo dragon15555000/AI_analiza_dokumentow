@@ -40,6 +40,15 @@ OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
+# ---- Qdrant Client (reuse connection) ----
+_qdrant_client = None
+
+def get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = get_qdrant_client()
+    return _qdrant_client
+
 # ---- Cache embeddingów (SQLite) ----
 _CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
 
@@ -527,7 +536,7 @@ def index():
 @app.route('/stats', methods=['GET'])
 def get_stats():
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         info = client.get_collection(collection_name=ACTIVE_COLLECTION)
         return jsonify({
             "success": True,
@@ -543,7 +552,7 @@ def get_stats():
 def stats_storage():
     global ACTIVE_COLLECTION
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         cols = client.get_collections().collections
         result = []
         total_vectors = 0
@@ -607,7 +616,7 @@ def create_collection():
         dist_map = {"Cosine": Distance.COSINE, "Euclid": Distance.EUCLID, "Dot": Distance.DOT}
         dist = dist_map.get(distance, Distance.COSINE)
 
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         if client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' już istnieje"})
 
@@ -629,7 +638,7 @@ def switch_collection():
     if not name:
         return jsonify({"success": False, "error": "Brak nazwy"})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         if not client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' nie istnieje"})
         ACTIVE_COLLECTION = name
@@ -648,7 +657,7 @@ def delete_collection():
     if name == ACTIVE_COLLECTION:
         return jsonify({"success": False, "error": "Nie można usunąć aktywnej kolekcji. Najpierw przełącz się na inną."})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         client.delete_collection(name)
         return jsonify({"success": True})
     except Exception as e:
@@ -704,7 +713,7 @@ def import_stream():
 
         yield sse("start", {"total": len(files)})
 
-        qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        qdrant = get_qdrant_client()
         imported = 0
         skipped = 0
         total_chunks = 0
@@ -779,7 +788,7 @@ def import_stream():
 @app.route('/collection/clear', methods=['POST'])
 def clear_collection():
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         info = client.get_collection(ACTIVE_COLLECTION)
         count_before = info.points_count
         from qdrant_client.models import VectorParams, Distance
@@ -845,7 +854,7 @@ def hybrid_stream():
 
         try:
             # 1. RAG — Qdrant query
-            client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            client = get_qdrant_client()
             vector = get_embedding(query_text)
 
             if file_filter:
@@ -1005,7 +1014,7 @@ def search_stream():
             return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
 
         try:
-            client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            client = get_qdrant_client()
             vector = get_embedding(query_text)
 
             if file_filter:
@@ -1085,7 +1094,7 @@ def search():
         mode = 'normal'
 
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         vector = get_embedding(query_text)
 
         if file_filter:
@@ -1135,7 +1144,7 @@ def get_suggestions():
     if not force and _suggestions_cache["data"] and (now - _suggestions_cache["ts"]) < SUGGESTIONS_TTL:
         return jsonify({"success": True, "suggestions": _suggestions_cache["data"], "cached": True})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         # Losowa próbka: pobierz ~300 chunków, wybierz 25 z różnych plików
         records, _ = client.scroll(
             collection_name=ACTIVE_COLLECTION,
@@ -1213,7 +1222,7 @@ def _is_noise(fname: str) -> str:
 @app.route('/documents/scan-noise', methods=['GET'])
 def scan_noise():
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         file_chunks = {}
         offset = None
         while True:
@@ -1246,7 +1255,7 @@ def delete_documents():
     if not files_to_delete:
         return jsonify({"success": False, "error": "Brak listy plików"})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         files_set = set(files_to_delete)
         ids_to_delete = []
         offset = None
@@ -1280,7 +1289,7 @@ def get_documents():
         return jsonify({"success": True, "documents": _docs_cache["data"],
                         "total": len(_docs_cache["data"]), "cached": True})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         file_chunks = {}
         file_paths  = {}
         offset = None
@@ -1398,7 +1407,7 @@ def build_network():
         return jsonify({"success": False, "error": "Brak zapytania"})
 
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         vector = get_embedding(query)
         res    = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
 
@@ -1766,7 +1775,7 @@ def compare_documents():
         return jsonify({"success": False, "error": "Podaj dwa pliki do porównania"})
 
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
         def get_chunks(fname, max_chunks=12):
@@ -2208,7 +2217,7 @@ def sql_vectorize():
             yield sse("start", {"total": total, "table": table, "columns": active_cols})
 
             cur.execute(f"SELECT {col_list} FROM [{table}]")
-            qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            qdrant = get_qdrant_client()
             done = 0
 
             BATCH = 50
@@ -2274,7 +2283,7 @@ def sql_vectorize_all():
             tables = [r["TABLE_NAME"] for r in cur.fetchall()]
             yield sse("start", {"total_tables": len(tables), "tables": tables})
 
-            qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            qdrant = get_qdrant_client()
             total_rows = 0
 
             for table_idx, table in enumerate(tables):
