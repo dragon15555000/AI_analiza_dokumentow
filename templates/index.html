@@ -596,8 +596,9 @@
           <label class="form-label small fw-semibold mb-1">Kolumna jako tytuł (opcjonalna)</label>
           <input type="text" id="sqlVecLabelCol" class="form-control form-control-sm" placeholder="np. NumerSprawy">
         </div>
-        <div class="col-auto">
+        <div class="col-auto d-flex gap-2">
           <button class="btn btn-success btn-sm px-3" onclick="sqlVectorize()">Wektoryzuj tabelę</button>
+          <button class="btn btn-danger btn-sm" id="sqlVecStopBtn" style="display:none;">⏹ Stop</button>
         </div>
       </div>
 
@@ -617,9 +618,12 @@
 
       <!-- Vectorize All -->
       <div>
-        <button class="btn btn-outline-warning btn-sm w-100 py-2" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
-          <strong>🗄 Wektoryzuj całą bazę danych</strong>
-        </button>
+        <div class="d-flex gap-2">
+          <button class="btn btn-outline-warning flex-grow-1 py-2" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
+            <strong>🗄 Wektoryzuj całą bazę danych</strong>
+          </button>
+          <button class="btn btn-danger" id="sqlVecAllStopBtn" style="display:none;">⏹ Stop</button>
+        </div>
         <small class="text-muted d-block mt-1" style="font-size:0.72rem;">(może trwać długo przy dużej bazie)</small>
       </div>
 
@@ -767,6 +771,7 @@
         <button class="btn btn-outline-danger" onclick="confirmReindex()" id="reindexBtn" title="Wyczyść kolekcję i importuj od nowa z nowym chunkingiem (overlap 200)">
           ↺ Pełny re-indeks
         </button>
+        <button class="btn btn-danger" id="importStopBtn" style="display:none;">⏹ Stop</button>
       </div>
       <div id="reindexStatus" class="alert alert-warning small d-none">
         Czyszczenie kolekcji...
@@ -1518,8 +1523,10 @@ function executeImport() {
     const pct  = document.getElementById('importProgressPct');
     const log  = document.getElementById('importLog');
     const done = document.getElementById('importDone');
+    const stopBtn = document.getElementById('importStopBtn');
 
     btn.disabled = true;
+    if (stopBtn) stopBtn.style.display = '';
     wrap.style.display = '';
     done.classList.add('d-none');
     log.innerHTML = '';
@@ -1530,6 +1537,18 @@ function executeImport() {
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
     const es = new EventSource('/import/stream?' + params.toString());
+
+    // Stop button handler
+    const stopHandler = () => {
+        es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
+        btn.disabled = false;
+        lbl.textContent = 'Anulowano przez użytkownika';
+        log.innerHTML += `<div style="color:#f59e0b;">⏹ Operacja anulowana.</div>`;
+    };
+    if (stopBtn) {
+        stopBtn.onclick = stopHandler;
+    }
 
     es.addEventListener('start', e => {
         const d = JSON.parse(e.data);
@@ -1557,6 +1576,7 @@ function executeImport() {
     es.addEventListener('done', e => {
         const d = JSON.parse(e.data);
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         bar.style.width = '100%';
         bar.classList.remove('progress-bar-animated');
@@ -1575,12 +1595,14 @@ function executeImport() {
             log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg}</div>`;
         } catch(_) {}
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
     });
 
     es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) return;
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         log.innerHTML += `<div style="color:#fc8181;">❌ Połączenie SSE przerwane.</div>`;
     };
@@ -2486,15 +2508,27 @@ function sqlVectorize() {
     const prog = document.getElementById('sqlVecProgress');
     const bar  = document.getElementById('sqlVecBar');
     const log  = document.getElementById('sqlVecLog');
+    const stopBtn = document.getElementById('sqlVecStopBtn');
+
     prog.classList.remove('d-none');
     bar.style.width = '0%';
     log.textContent = 'Startowanie...';
 
-    const params = new URLSearchParams();
-    // Wyślij przez POST z fetch streaming
+    const controller = new AbortController();
+
+    if (stopBtn) {
+        stopBtn.style.display = '';
+        stopBtn.onclick = () => {
+            controller.abort();
+            if (stopBtn) stopBtn.style.display = 'none';
+            log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja anulowana.</span>`;
+        };
+    }
+
     fetch('/sql/vectorize', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol})
+        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol}),
+        signal: controller.signal
     })
     .then(async response => {
         const reader = response.body.getReader();
@@ -2517,12 +2551,14 @@ function sqlVectorize() {
                     } else if (ev.done !== undefined) {
                         bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        if (stopBtn) stopBtn.style.display = 'none';
                         updateStats(); allDocs = [];
                     } else if (ev.progress !== undefined) {
                         bar.style.width = ev.pct + '%';
                         log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
                     } else if (ev.error) {
                         log.innerHTML += `<br><span style="color:red;">❌ ${ev.error}</span>`;
+                        if (stopBtn) stopBtn.style.display = 'none';
                     }
                 } catch(e) {}
             }
@@ -2552,7 +2588,21 @@ function sqlVectorizeAll() {
 
     isHeavyVectorizing = true;   // wyłącz automatyczne odświeżanie statystyk podczas ciężkiej operacji
 
+    const controller = new AbortController();
+    const allStopBtn = document.getElementById('sqlVecAllStopBtn');
+    if (allStopBtn) {
+        allStopBtn.style.display = '';
+        allStopBtn.onclick = () => {
+            controller.abort();
+            if (allStopBtn) allStopBtn.style.display = 'none';
+            log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja całej bazy anulowana.</span>`;
+            btn.disabled = false;
+            isHeavyVectorizing = false;
+        };
+    }
+
     fetch('/sql/vectorize-all', {
+        signal: controller.signal,
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({conn: sqlConn})
     })
@@ -2595,6 +2645,7 @@ function sqlVectorizeAll() {
                         bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
                         btn.disabled = false;
+                        if (allStopBtn) allStopBtn.style.display = 'none';
                         status.textContent = '';
                         pct_el.textContent = '100%';
                         isHeavyVectorizing = false;
@@ -2602,6 +2653,7 @@ function sqlVectorizeAll() {
                     } else if (ev.error !== undefined) {
                         log.innerHTML += `<br><span style="color:red;">❌ Błąd: ${ev.error}</span>`;
                         btn.disabled = false;
+                        if (allStopBtn) allStopBtn.style.display = 'none';
                         isHeavyVectorizing = false;
                     }
                 } catch(e) {}
