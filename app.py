@@ -8,6 +8,7 @@ import os
 import hashlib
 import time
 import sqlite3
+import threading
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
@@ -42,12 +43,14 @@ SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split
 
 # ---- Qdrant Client (reuse connection) ----
 _qdrant_client = None
+_qdrant_lock = threading.Lock()
 
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
-    return _qdrant_client
+    with _qdrant_lock:
+        if _qdrant_client is None:
+            _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY, timeout=30.0)
+        return _qdrant_client
 
 # ---- Cache (dokumenty i sugestie) ----
 _docs_cache = {"data": None, "ts": 0}
