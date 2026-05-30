@@ -2501,16 +2501,20 @@ function sqlVectorizeAll() {
                         totalTables = ev.total_tables;
                         log.innerHTML = `<strong>Tabele do zwektoryzowania:</strong> ${ev.tables.join(', ')}<br>`;
                     } else if (ev.table_start !== undefined) {
-                        status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${ev.table}`;
+                        const t = ev.table || 'unknown';
+                        status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${t}`;
                     } else if (ev.progress !== undefined) {
                         bar.style.width = ev.pct + '%';
                         pct_el.textContent = ev.pct + '%';
-                        status.textContent = `${ev.table}: ${ev.done}/${ev.total} wierszy`;
+                        const t = ev.table || 'unknown';
+                        status.textContent = `${t}: ${ev.done}/${ev.total} wierszy`;
                     } else if (ev.table_done !== undefined) {
                         tablesDone = ev.table_idx + 1;
-                        log.innerHTML += `✅ ${ev.table} (${ev.rows} wierszy)<br>`;
+                        const t = ev.table || 'unknown';
+                        log.innerHTML += `✅ ${t} (${ev.rows || 0} wierszy)<br>`;
                     } else if (ev.table_error !== undefined) {
-                        log.innerHTML += `❌ ${ev.table}: ${ev.error}<br>`;
+                        const t = ev.table || 'unknown';
+                        log.innerHTML += `❌ ${t}: ${ev.error}<br>`;
                     } else if (ev.done !== undefined) {
                         bar.style.width = '100%';
                         bar.classList.remove('progress-bar-animated');
