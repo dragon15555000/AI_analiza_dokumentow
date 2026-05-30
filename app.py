@@ -15,6 +15,7 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
 import logging
+import requests   # ← dodane dla lepszej obsługi rozłączeń klienta w streamach SSE
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -1034,27 +1035,32 @@ def hybrid_stream():
             payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
                        "stream": True, "options": {"num_ctx": 8192}}
 
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
+            # Używamy requests zamiast urllib — lepiej wykrywa rozłączenie klienta (przeglądarka)
             full_answer = ""
-            with urllib.request.urlopen(req, timeout=240) as r:
-                for line in r:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk_data = json.loads(line)
-                        token = chunk_data.get("response", "")
-                        if token:
-                            full_answer += token
-                            yield sse("token", {"token": token})
-                        if chunk_data.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                with requests.post(
+                    OLLAMA_URL + "/api/generate",
+                    json=payload,
+                    stream=True,
+                    timeout=240
+                ) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk_data = json.loads(line)
+                            token = chunk_data.get("response", "")
+                            if token:
+                                full_answer += token
+                                yield sse("token", {"token": token})
+                            if chunk_data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"LLM stream przerwany (klient rozłączony lub błąd): {e}")
+                yield sse("error", {"error": "Połączenie z modelem zostało przerwane."})
 
             yield sse("done", {"ai_answer": full_answer})
 
@@ -1120,27 +1126,32 @@ def search_stream():
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
             payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
 
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
+            # requests zamiast urllib — lepsza obsługa rozłączenia klienta
             full_answer = ""
-            with urllib.request.urlopen(req, timeout=240) as r:
-                for line in r:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk_data = json.loads(line)
-                        token = chunk_data.get("response", "")
-                        if token:
-                            full_answer += token
-                            yield sse("token", {"token": token})
-                        if chunk_data.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                with requests.post(
+                    OLLAMA_URL + "/api/generate",
+                    json=payload,
+                    stream=True,
+                    timeout=240
+                ) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk_data = json.loads(line)
+                            token = chunk_data.get("response", "")
+                            if token:
+                                full_answer += token
+                                yield sse("token", {"token": token})
+                            if chunk_data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"LLM stream przerwany w search_stream: {e}")
+                yield sse("error", {"error": "Połączenie z modelem zostało przerwane."})
 
             yield sse("done", {"ai_answer": full_answer})
 
@@ -2212,6 +2223,7 @@ def sql_write():
         cur.execute(sql_query)
         rows_affected = cur.rowcount
         conn.commit()
+        cur.close()   # ← fix: prevent cursor leak / resource leak in MS SQL
         conn.close()
 
         # Log audytu
