@@ -605,7 +605,7 @@ def stats_storage():
 
 @app.route('/collections/create', methods=['POST'])
 def create_collection():
-    global ACTIVE_COLLECTION
+    global ACTIVE_COLLECTION, _qdrant_client
     data = request.get_json()
     name     = data.get('name', '').strip().replace(' ', '_')
     vec_size = int(data.get('vector_size', 768))
@@ -630,6 +630,7 @@ def create_collection():
 
         if switch:
             ACTIVE_COLLECTION = name
+            _qdrant_client = None  # Reset połączenia po zmianie kolekcji
             _suggestions_cache["data"] = None; _docs_cache["data"] = None
 
         return jsonify({"success": True, "name": name, "switched": switch, "active": ACTIVE_COLLECTION})
@@ -638,7 +639,7 @@ def create_collection():
 
 @app.route('/collections/switch', methods=['POST'])
 def switch_collection():
-    global ACTIVE_COLLECTION
+    global ACTIVE_COLLECTION, _qdrant_client
     data = request.get_json()
     name = data.get('name', '').strip()
     if not name:
@@ -648,6 +649,7 @@ def switch_collection():
         if not client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' nie istnieje"})
         ACTIVE_COLLECTION = name
+        _qdrant_client = None  # Reset połączenia po zmianie kolekcji
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "active_collection": ACTIVE_COLLECTION})
     except Exception as e:
@@ -655,7 +657,7 @@ def switch_collection():
 
 @app.route('/collections/delete', methods=['POST'])
 def delete_collection():
-    global ACTIVE_COLLECTION
+    global ACTIVE_COLLECTION, _qdrant_client
     data = request.get_json()
     name = data.get('name', '').strip()
     if not name:
@@ -665,6 +667,7 @@ def delete_collection():
     try:
         client = get_qdrant_client()
         client.delete_collection(name)
+        _qdrant_client = None  # Reset połączenia po usunięciu kolekcji
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
