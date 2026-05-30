@@ -19,6 +19,12 @@
 
         /* Wyszukiwarka */
         .search-card { background: #fff; border-radius: 10px; padding: 20px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 16px; }
+        #sqlVecProgress, #sqlVecAllProgress {
+            background: #fafafa;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
         .search-card h2 { font-size: 1.15rem; font-weight: 700; color: #1a1f36; margin-bottom: 16px; }
         .filter-badge { cursor: pointer; display: inline-block; padding: 3px 10px; border-radius: 20px; background: #e8f0fe; color: #1a73e8; font-size: 0.78rem; font-weight: 600; margin: 2px; border: 1px solid #c5d8fc; transition: all 0.15s; }
         .filter-badge:hover { background: #1a73e8; color: #fff; }
@@ -578,42 +584,54 @@
 
     <!-- Wektoryzacja -->
     <div class="search-card mt-3" id="sqlVectorCard" style="display:none;">
-      <h2 style="font-size:0.95rem;">Wektoryzuj tabelę do Qdrant</h2>
-      <p class="small text-muted mb-2">Eksportuje wiersze tabeli jako chunki tekstowe — potem możesz pytać o nie w zakładce Wyszukiwanie.</p>
-      <div class="row g-2 align-items-end mb-2">
+      <h5 class="mb-1" style="font-weight:700;color:#166534;">🗄 Wektoryzacja tabel SQL</h5>
+      <p class="small text-muted mb-3">Przenieś dane z wybranych tabel do wektorowej bazy. Dzięki temu będziesz mógł zadawać pytania łączące dokumenty i dane z bazy.</p>
+
+      <div class="row g-2 align-items-end mb-3">
         <div class="col">
-          <label class="form-label small fw-bold mb-1">Tabela</label>
+          <label class="form-label small fw-semibold mb-1">Tabela</label>
           <select id="sqlVecTable" class="form-select form-select-sm"></select>
         </div>
         <div class="col">
-          <label class="form-label small fw-bold mb-1">Kolumna tytułu (opcjonalna)</label>
+          <label class="form-label small fw-semibold mb-1">Kolumna jako tytuł (opcjonalna)</label>
           <input type="text" id="sqlVecLabelCol" class="form-control form-control-sm" placeholder="np. NumerSprawy">
         </div>
         <div class="col-auto">
-          <button class="btn btn-success btn-sm" onclick="sqlVectorize()">Wektoryzuj</button>
+          <button class="btn btn-success btn-sm px-3" onclick="sqlVectorize()">Wektoryzuj tabelę</button>
         </div>
       </div>
-      <div id="sqlVecProgress" class="d-none">
-        <div class="progress mb-1" style="height:8px;">
-          <div id="sqlVecBar" class="progress-bar bg-success" style="width:0%;"></div>
+
+      <!-- Single table progress -->
+      <div id="sqlVecProgress" class="d-none mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <small class="fw-semibold text-success">Postęp wektoryzacji</small>
+          <small id="sqlVecPct" class="fw-bold text-success">0%</small>
         </div>
-        <div id="sqlVecLog" style="font-size:0.78rem;color:#6c757d;font-family:monospace;"></div>
+        <div class="progress" style="height:10px; background:#e6f4ea;">
+          <div id="sqlVecBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
+        </div>
+        <div id="sqlVecLog" class="mt-2 small text-muted" style="font-family:monospace; background:#f8f9fa; padding:6px 10px; border-radius:4px; max-height:90px; overflow-y:auto;"></div>
       </div>
-      <hr class="my-2" style="border:none;border-top:1px solid #ddd;">
-      <div class="mt-2">
-        <button class="btn btn-warning btn-sm w-100" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
-          🗄 Wektoryzuj całą bazę
+
+      <hr class="my-3" style="border-color:#e5e7eb;">
+
+      <!-- Vectorize All -->
+      <div>
+        <button class="btn btn-outline-warning btn-sm w-100 py-2" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
+          <strong>🗄 Wektoryzuj całą bazę danych</strong>
         </button>
+        <small class="text-muted d-block mt-1" style="font-size:0.72rem;">(może trwać długo przy dużej bazie)</small>
       </div>
-      <div id="sqlVecAllProgress" class="d-none mt-2">
+
+      <div id="sqlVecAllProgress" class="d-none mt-3">
         <div class="d-flex justify-content-between mb-1">
-          <small id="sqlVecAllStatus" class="text-muted"></small>
-          <small id="sqlVecAllPct" class="fw-bold"></small>
+          <small id="sqlVecAllStatus" class="text-muted fw-semibold"></small>
+          <small id="sqlVecAllPct" class="fw-bold text-warning"></small>
         </div>
-        <div class="progress mb-1" style="height:8px;">
-          <div id="sqlVecAllBar" class="progress-bar bg-warning progress-bar-striped progress-bar-animated" style="width:0%"></div>
+        <div class="progress" style="height:10px; background:#fef3c7;">
+          <div id="sqlVecAllBar" class="progress-bar bg-warning" style="width:0%; transition: width 0.3s;"></div>
         </div>
-        <div id="sqlVecAllLog" style="font-size:0.75rem;color:#6c757d;font-family:monospace;max-height:150px;overflow-y:auto;"></div>
+        <div id="sqlVecAllLog" class="mt-2 small" style="font-family:monospace; background:#fffbeb; padding:8px 10px; border-radius:6px; max-height:160px; overflow-y:auto; font-size:0.73rem;"></div>
       </div>
     </div>
   </div>
