@@ -46,8 +46,14 @@ _qdrant_client = None
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     if _qdrant_client is None:
-        _qdrant_client = get_qdrant_client()
+        _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
     return _qdrant_client
+
+# ---- Cache (dokumenty i sugestie) ----
+_docs_cache = {"data": None, "ts": 0}
+DOCS_CACHE_TTL = 300  # 5 minut
+_suggestions_cache = {"data": None, "ts": 0}
+SUGGESTIONS_TTL = 1800  # 30 minut
 
 # ---- Cache embeddingów (SQLite) ----
 _CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
@@ -55,10 +61,10 @@ _CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
 def _init_embed_cache():
     """Inicjalizuje tabelę w bazie SQLite, jeśli nie istnieje."""
     try:
-        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vector TEXT)")
         # Policz istniejące wpisy
-        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
             count = cursor.fetchone()[0]
         print(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
@@ -73,7 +79,7 @@ def get_embedding(text: str) -> list:
 
     # 1. Sprawdzaj, czy wektor jest w bazie
     try:
-        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
             cursor = conn.execute("SELECT vector FROM embeddings WHERE hash = ?", (key,))
             row = cursor.fetchone()
             if row:
@@ -92,7 +98,7 @@ def get_embedding(text: str) -> list:
 
         # 3. Zapisz nowy wektor natychmiast do bazy SQLite
         try:
-            with sqlite3.connect(_CACHE_DB_PATH) as conn:
+            with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
                 conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
                              (key, json.dumps(vec)))
         except Exception as e:
@@ -1134,9 +1140,6 @@ def search():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
-_suggestions_cache = {"data": None, "ts": 0}
-SUGGESTIONS_TTL = 1800  # 30 minut
-
 @app.route('/suggestions', methods=['GET'])
 def get_suggestions():
     force = request.args.get('force', '0') == '1'
@@ -1255,31 +1258,19 @@ def delete_documents():
     if not files_to_delete:
         return jsonify({"success": False, "error": "Brak listy plików"})
     try:
+        from qdrant_client.models import Filter, FieldCondition, MatchAny
         client = get_qdrant_client()
-        files_set = set(files_to_delete)
-        ids_to_delete = []
-        offset = None
-        while True:
-            records, offset = client.scroll(
-                collection_name=ACTIVE_COLLECTION, limit=250, offset=offset,
-                with_payload=["file"], with_vectors=False
+        # Skasuj wszystkie punkty gdzie payload.file znajduje się na liście do usunięcia
+        client.delete(
+            collection_name=ACTIVE_COLLECTION,
+            points_selector=Filter(
+                must=[FieldCondition(key="file", match=MatchAny(any=files_to_delete))]
             )
-            for r in records:
-                if r.payload.get("file") in files_set:
-                    ids_to_delete.append(r.id)
-            if offset is None:
-                break
-
-        for i in range(0, len(ids_to_delete), 100):
-            client.delete(collection_name=ACTIVE_COLLECTION,
-                          points_selector=ids_to_delete[i:i+100])
+        )
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
-        return jsonify({"success": True, "deleted_chunks": len(ids_to_delete)})
+        return jsonify({"success": True, "deleted_chunks": len(files_to_delete)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
-
-_docs_cache = {"data": None, "ts": 0}
-DOCS_CACHE_TTL = 300  # 5 minut
 
 @app.route('/documents', methods=['GET'])
 def get_documents():
@@ -1866,7 +1857,7 @@ def export_csv():
 @app.route('/cache/stats', methods=['GET'])
 def cache_stats():
     try:
-        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
             count = cursor.fetchone()[0]
     except Exception:
