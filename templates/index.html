@@ -992,66 +992,70 @@ function executeSearch() {
         let buffer = '', resultsData = null, aiText = '';
 
         const readChunk = async () => {
-            const {done, value} = await reader.read();
-            if (done) { btn.disabled = false; return; }
-            buffer += decoder.decode(value, {stream: true});
-            const parts = buffer.split('\n\n');
-            buffer = parts.pop();
+            try {
+                const {done, value} = await reader.read();
+                if (done) { btn.disabled = false; return; }
+                buffer += decoder.decode(value, {stream: true});
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop();
 
-            for (const block of parts) {
-                const dataLine = block.split('\n').find(l => l.startsWith('data: '));
-                if (!dataLine) continue;
-                try {
-                    const ev = JSON.parse(dataLine.slice(6));
-                    if (ev.results !== undefined) {
-                        // Wyniki RAG dostępne — renderuj natychmiast
-                        resultsData = ev;
-                        loader.classList.add('d-none');
-                        const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
-                        aiContainer.innerHTML = `
-                            <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
-                                <div class="d-flex justify-content-between align-items-start mb-2">
-                                    <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
-                                    <div class="d-flex gap-2">
-                                        <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
-                        ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
-                                        <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                for (const block of parts) {
+                    const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+                    if (!dataLine) continue;
+                    try {
+                        const ev = JSON.parse(dataLine.slice(6));
+                        if (ev.results !== undefined) {
+                            resultsData = ev;
+                            loader.classList.add('d-none');
+                            const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
+                            aiContainer.innerHTML = `
+                                <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
+                                        <div class="d-flex gap-2">
+                                            <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
+                            ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
+                                            <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                                        </div>
                                     </div>
+                                    <div id="aiAnswerBody" style="font-size:0.96rem;line-height:1.65;color:#1e2937;white-space:pre-wrap;"></div>
                                 </div>
-                                <div id="aiAnswerBody" style="font-size:0.96rem;line-height:1.65;color:#1e2937;white-space:pre-wrap;"></div>
-                            </div>
-                            <div id="verifyContainer"></div>`;
-                        renderDocResults(ev.results, query, container);
-                    } else if (ev.sql_results !== undefined) {
-                        // Wyniki SQL — renderuj tabelę
-                        renderSqlHybridTable(ev.sql_results);
-                    } else if (ev.token !== undefined) {
-                        aiText += ev.token;
-                        const body = document.getElementById('aiAnswerBody');
-                        if (body) body.innerHTML = formatAiText(aiText, mode);
-                    } else if (ev.done !== undefined) {
-                        const box = document.getElementById('aiStreamBox');
-                        if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
-                        if (resultsData) {
-                            window._lastSearchData = {query, mode_label: resultsData.mode_label,
-                                results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
-                            if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
-                                runVerification(query, aiText, resultsData.contexts);
-                            // Zapisz do historii
-                            saveToHistory(query, aiText, resultsData.mode);
-                            // Dodaj do pamięci czatu
-                            chatHistory.push({q: query, a: aiText});
-                            if (chatHistory.length > 5) chatHistory.shift();
+                                <div id="verifyContainer"></div>`;
+                            renderDocResults(ev.results, query, container);
+                        } else if (ev.sql_results !== undefined) {
+                            renderSqlHybridTable(ev.sql_results);
+                        } else if (ev.token !== undefined) {
+                            aiText += ev.token;
+                            const body = document.getElementById('aiAnswerBody');
+                            if (body) body.innerHTML = formatAiText(aiText, mode);
+                        } else if (ev.done !== undefined) {
+                            const box = document.getElementById('aiStreamBox');
+                            if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
+                            if (resultsData) {
+                                window._lastSearchData = {query, mode_label: resultsData.mode_label,
+                                    results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
+                                if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
+                                    runVerification(query, aiText, resultsData.contexts);
+                                saveToHistory(query, aiText, resultsData.mode);
+                                chatHistory.push({q: query, a: aiText});
+                                if (chatHistory.length > 5) chatHistory.shift();
+                            }
+                            btn.disabled = false; return;
+                        } else if (ev.error) {
+                            loader.classList.add('d-none');
+                            container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                            btn.disabled = false; return;
                         }
-                        btn.disabled = false; return;
-                    } else if (ev.error) {
-                        loader.classList.add('d-none');
-                        container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
-                        btn.disabled = false; return;
-                    }
-                } catch(e) {}
+                    } catch(e) {}
+                }
+                await readChunk();
+            } catch (err) {
+                // Lepsza obsługa zerwania połączenia podczas streamingu wyszukiwania
+                loader.classList.add('d-none');
+                container.innerHTML = `<div class="alert alert-warning">Połączenie przerwane podczas wyszukiwania. Spróbuj ponownie.</div>`;
+                btn.disabled = false;
+                console.warn("Search stream interrupted:", err);
             }
-            await readChunk();
         };
         await readChunk();
     })
