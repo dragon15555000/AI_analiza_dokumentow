@@ -550,6 +550,22 @@
         </div>
         <div id="sqlVecLog" style="font-size:0.78rem;color:#6c757d;font-family:monospace;"></div>
       </div>
+      <hr class="my-2" style="border:none;border-top:1px solid #ddd;">
+      <div class="mt-2">
+        <button class="btn btn-warning btn-sm w-100" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
+          🗄 Wektoryzuj całą bazę
+        </button>
+      </div>
+      <div id="sqlVecAllProgress" class="d-none mt-2">
+        <div class="d-flex justify-content-between mb-1">
+          <small id="sqlVecAllStatus" class="text-muted"></small>
+          <small id="sqlVecAllPct" class="fw-bold"></small>
+        </div>
+        <div class="progress mb-1" style="height:8px;">
+          <div id="sqlVecAllBar" class="progress-bar bg-warning progress-bar-striped progress-bar-animated" style="width:0%"></div>
+        </div>
+        <div id="sqlVecAllLog" style="font-size:0.75rem;color:#6c757d;font-family:monospace;max-height:150px;overflow-y:auto;"></div>
+      </div>
     </div>
   </div>
 
@@ -2434,6 +2450,82 @@ function sqlVectorize() {
                 } catch(e) {}
             }
         }
+    });
+}
+
+function sqlVectorizeAll() {
+    if (!sqlConn || !sqlConn.server) {
+        alert('Najpierw połącz się z bazą SQL');
+        return;
+    }
+
+    const btn   = document.getElementById('sqlVecAllBtn');
+    const prog  = document.getElementById('sqlVecAllProgress');
+    const bar   = document.getElementById('sqlVecAllBar');
+    const log   = document.getElementById('sqlVecAllLog');
+    const status = document.getElementById('sqlVecAllStatus');
+    const pct_el = document.getElementById('sqlVecAllPct');
+
+    btn.disabled = true;
+    prog.classList.remove('d-none');
+    bar.style.width = '0%';
+    log.innerHTML = '⏳ Pobieranie listy tabel...';
+    status.textContent = '';
+    pct_el.textContent = '';
+
+    fetch('/sql/vectorize-all', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn})
+    })
+    .then(async response => {
+        const reader = response.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        let totalTables = 0, totalRows = 0, tablesDone = 0;
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, {stream:true});
+            const parts = buf.split('\n\n'); buf = parts.pop();
+            for (const block of parts) {
+                const dl = block.split('\n').find(l=>l.startsWith('data: '));
+                if (!dl) continue;
+                try {
+                    const ev = JSON.parse(dl.slice(6));
+                    if (ev.start !== undefined) {
+                        totalTables = ev.total_tables;
+                        log.innerHTML = `<strong>Tabele do zwektoryzowania:</strong> ${ev.tables.join(', ')}<br>`;
+                    } else if (ev.table_start !== undefined) {
+                        status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${ev.table}`;
+                    } else if (ev.progress !== undefined) {
+                        bar.style.width = ev.pct + '%';
+                        pct_el.textContent = ev.pct + '%';
+                        status.textContent = `${ev.table}: ${ev.done}/${ev.total} wierszy`;
+                    } else if (ev.table_done !== undefined) {
+                        tablesDone = ev.table_idx + 1;
+                        log.innerHTML += `✅ ${ev.table} (${ev.rows} wierszy)<br>`;
+                    } else if (ev.table_error !== undefined) {
+                        log.innerHTML += `❌ ${ev.table}: ${ev.error}<br>`;
+                    } else if (ev.done !== undefined) {
+                        bar.style.width = '100%';
+                        bar.classList.remove('progress-bar-animated');
+                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        btn.disabled = false;
+                        status.textContent = '';
+                        pct_el.textContent = '100%';
+                        updateStats(); allDocs = [];
+                    } else if (ev.error !== undefined) {
+                        log.innerHTML += `<br><span style="color:red;">❌ Błąd: ${ev.error}</span>`;
+                        btn.disabled = false;
+                    }
+                } catch(e) {}
+            }
+        }
+    })
+    .catch(err => {
+        log.innerHTML += `<br><span style="color:red;">❌ Błąd sieci: ${err}</span>`;
+        btn.disabled = false;
     });
 }
 

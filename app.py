@@ -2227,5 +2227,108 @@ def sql_vectorize():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.route('/sql/vectorize-all', methods=['POST'])
+def sql_vectorize_all():
+    """Wektoryzuje wszystkie tabele SQL do Qdrant (SSE)."""
+    data = request.get_json()
+    cfg  = data.get("conn", {})
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+        try:
+            import pymssql
+            conn = _get_sql_conn(cfg)
+            cur  = conn.cursor(as_dict=True)
+
+            # Pobierz wszystkie tabele
+            cur.execute("""
+                SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY TABLE_NAME
+            """)
+            tables = [r["TABLE_NAME"] for r in cur.fetchall()]
+            yield sse("start", {"total_tables": len(tables), "tables": tables})
+
+            qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            total_rows = 0
+
+            for table_idx, table in enumerate(tables):
+                try:
+                    yield sse("table_start", {"table": table, "table_idx": table_idx, "total_tables": len(tables)})
+
+                    # Auto-detect kolumny tekstowe
+                    cur.execute("""
+                        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_NAME=%s AND DATA_TYPE IN
+                        ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
+                        ORDER BY ORDINAL_POSITION
+                    """, (table,))
+                    active_cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
+                    if not active_cols:
+                        yield sse("table_done", {"table": table, "rows": 0, "table_idx": table_idx})
+                        continue
+
+                    col_list = ", ".join(f"[{c}]" for c in active_cols)
+                    cur.execute(f"SELECT COUNT(*) as cnt FROM [{table}]")
+                    table_total = cur.fetchone()["cnt"]
+
+                    if table_total == 0:
+                        yield sse("table_done", {"table": table, "rows": 0, "table_idx": table_idx})
+                        continue
+
+                    cur.execute(f"SELECT {col_list} FROM [{table}]")
+                    table_done = 0
+
+                    BATCH = 50
+                    rows_buf = []
+                    while True:
+                        batch_rows = cur.fetchmany(BATCH)
+                        if not batch_rows:
+                            break
+                        for row in batch_rows:
+                            parts = [f"{k}: {v}" for k, v in row.items() if v is not None and str(v).strip()]
+                            text  = f"[{table}] " + " | ".join(parts)
+                            rows_buf.append(text)
+
+                        # Batch embeddings
+                        vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                        points = []
+                        for txt, vec in zip(rows_buf, vecs):
+                            cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
+                            points.append(PointStruct(
+                                id=cid, vector=vec,
+                                payload={"file": f"[SQL] {table}", "text": txt, "full_path": ""}
+                            ))
+                        if points:
+                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+
+                        table_done += len(rows_buf)
+                        total_rows += len(rows_buf)
+                        rows_buf = []
+                        pct = round(table_done/table_total*100) if table_total else 0
+                        yield sse("progress", {
+                            "table": table, "done": table_done, "total": table_total, "pct": pct,
+                            "tables_done": table_idx, "total_rows": total_rows
+                        })
+
+                    yield sse("table_done", {"table": table, "rows": table_done, "table_idx": table_idx})
+
+                except Exception as e:
+                    yield sse("table_error", {"table": table, "error": str(e)})
+
+            conn.close()
+            _docs_cache["data"] = None
+            yield sse("done", {
+                "total_rows": total_rows, "total_tables": len(tables),
+                "msg": f"Zwektoryzowano {total_rows} wierszy z {len(tables)} tabel"
+            })
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
