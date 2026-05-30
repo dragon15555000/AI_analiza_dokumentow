@@ -2217,14 +2217,20 @@ def sql_write():
                 "first_word": first_word
             })
 
-        # Krok 3: wykonaj po potwierdzeniu
-        conn = _get_sql_conn(cfg)
-        cur  = conn.cursor()
-        cur.execute(sql_query)
-        rows_affected = cur.rowcount
-        conn.commit()
-        cur.close()   # ← fix: prevent cursor leak / resource leak in MS SQL
-        conn.close()
+        # Krok 3: wykonaj po potwierdzeniu (z bezpiecznym zamykaniem zasobów)
+        conn = None
+        cur = None
+        try:
+            conn = _get_sql_conn(cfg)
+            cur = conn.cursor()
+            cur.execute(sql_query)
+            rows_affected = cur.rowcount
+            conn.commit()
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 
         # Log audytu
         logger.debug(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
