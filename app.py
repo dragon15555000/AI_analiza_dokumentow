@@ -12,6 +12,7 @@ import threading
 import subprocess
 import platform
 from pathlib import Path
+from collections import defaultdict
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
 import logging
@@ -855,26 +856,148 @@ def delete_collection():
 @app.route('/browse', methods=['GET'])
 def browse():
     raw = request.args.get('path', '/mnt').strip()
+    show_all = request.args.get('all', '0') == '1'   # ?all=1 → pokaż wszystkie pliki (nie tylko dokumenty)
     p = Path(raw)
+
     if not p.exists() or not p.is_dir():
         parent = p.parent
         if parent.exists() and parent.is_dir():
             p = parent
         else:
             p = Path('/mnt')
+
     try:
         entries = []
+        total_children = 0
+        permission_denied = 0
+
         for child in sorted(p.iterdir()):
+            total_children += 1
             try:
                 if child.is_dir():
                     entries.append({"name": child.name, "path": str(child), "type": "dir"})
-                elif child.suffix.lower() in ['.docx','.pdf','.xlsx','.xls','.csv','.md','.json','.txt']:
-                    entries.append({"name": child.name, "path": str(child), "type": "file"})
+                else:
+                    ext = child.suffix.lower().lstrip('.')
+                    is_doc = ext in ['docx','pdf','xlsx','xls','csv','md','json','txt']
+                    if show_all or is_doc:
+                        entries.append({
+                            "name": child.name,
+                            "path": str(child),
+                            "type": "file",
+                            "ext": ext
+                        })
             except PermissionError:
+                permission_denied += 1
                 pass
-        return jsonify({"success": True, "current": str(p), "parent": str(p.parent) if p != p.parent else None, "entries": entries})
+
+        # Lepsza diagnostyka dla pustych / problematycznych dysków (np. /mnt/g w WSL)
+        is_empty = (total_children == 0) or (len(entries) == 0 and permission_denied == 0)
+        has_hidden_or_other = (total_children > 0) and (len(entries) == 0) and (permission_denied == 0)
+
+        return jsonify({
+            "success": True,
+            "current": str(p),
+            "parent": str(p.parent) if p != p.parent else None,
+            "entries": entries,
+            "is_empty": is_empty,
+            "total_children": total_children,
+            "permission_denied": permission_denied,
+            "has_unlisted_items": has_hidden_or_other or permission_denied > 0,
+            "show_all": show_all
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
+# AUTOMATYCZNE MAPOWANIE DYSKÓW LOKALNYCH (dla zakładki Import)
+# ============================================================
+
+def _discover_local_drives():
+    """Zwraca listę sensownych punktów startowych (dysków/mountów) bez dodatkowych zależności."""
+    import string
+    drives = []
+    sysname = platform.system()
+    home = str(Path.home())
+
+    try:
+        if sysname == "Windows":
+            for letter in string.ascii_uppercase:
+                p = Path(f"{letter}:\\")
+                if p.exists():
+                    drives.append({
+                        "path": str(p),
+                        "label": f"{letter}:",
+                        "kind": "drive",
+                        "icon": "💾"
+                    })
+        else:
+            # Linux / WSL / macOS
+            candidates = ['/', home, '/mnt', '/media', '/data']
+            for c in candidates:
+                pp = Path(c)
+                if pp.exists() and pp.is_dir():
+                    label = "🏠 Home" if c == home else c
+                    drives.append({"path": str(pp), "label": label, "kind": "dir", "icon": "📁" if c != home else "🏠"})
+
+            # WSL — dyski Windows widoczne jako /mnt/c, /mnt/d itd.
+            mnt = Path("/mnt")
+            if mnt.exists():
+                for child in sorted(mnt.iterdir()):
+                    if child.is_dir() and len(child.name) == 1:
+                        letter = child.name.upper()
+                        drives.append({
+                            "path": str(child),
+                            "label": f"{letter}: (Windows)",
+                            "kind": "wsl",
+                            "icon": "🪟"
+                        })
+
+            # Spróbuj wyciągnąć prawdziwe montowania z /proc/mounts (najlepszy wysiłek)
+            try:
+                with open("/proc/mounts") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) < 3:
+                            continue
+                        dev, mp, fstype = parts[0], parts[1], parts[2]
+                        # Tylko sensowne systemy plików dyskowych
+                        if fstype in ("ext4", "ext3", "xfs", "btrfs", "ntfs", "fuseblk", "vfat") and \
+                           mp not in ("/", "/boot", "/boot/efi", "/proc", "/sys", "/dev", "/run"):
+                            if len(mp) <= 24 and not any(x in mp for x in ("/snap/", "/docker/", "/tmp/")):
+                                if not any(d["path"] == mp for d in drives):
+                                    drives.append({"path": mp, "label": mp, "kind": "mount", "icon": "💿"})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Zawsze dodaj Home jeśli nie ma
+    if not any(d["path"] == home for d in drives):
+        drives.insert(0, {"path": home, "label": "🏠 Home", "kind": "dir", "icon": "🏠"})
+
+    # Deduplikacja + limit
+    seen = set()
+    out = []
+    for d in drives:
+        if d["path"] not in seen:
+            seen.add(d["path"])
+            out.append(d)
+    return out[:14]
+
+
+@app.route('/api/drives')
+def api_drives():
+    try:
+        drives = _discover_local_drives()
+        return jsonify({
+            "success": True,
+            "platform": platform.system(),
+            "drives": drives
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 
 @app.route('/import/stream')
 def import_stream():
@@ -1742,7 +1865,7 @@ def build_network():
             "FORMAT JSON (zwracaj tylko poprawny JSON):\n"
             '{\n'
             '  "nodes": [ {"id": "jan_kowalski", "type": "osoba", "label": "Jan Kowalski"}, ... ],\n'
-            '  "edges": [ {"source": "jan_kowalski", "target": "abc_spolka", "label": "prezes zarządu", "doc": "umowa_2023.pdf", "evidence": "Podpisał umowę 12.03.2023", "date": "2023-03-12"}, ... ]\n'
+            '  "edges": [ {"source": "jan_kowalski", "target": "abc_spolka", "label": "prezes zarządu", "doc": "umowa_2023.pdf", "evidence": "Podpisał umowę 12.03.2023", "date": "2023-03-12", "strength": 3}, ... ]\n'
             '}\n\n'
             "Typy węzłów (type): osoba, firma, kwota, dokument, przetarg, umowa, inne\n\n"
             "Bogate typy relacji (label krawędzi) — używaj precyzyjnych:\n"
@@ -1755,7 +1878,9 @@ def build_network():
             "- zatwierdził / skontrolował\n\n"
             "W polu 'evidence' wstaw krótki, dosłowny cytat z dokumentu.\n"
             "Jeśli w tekście pojawia się data (nawet przybliżona) — dodaj ją w polu 'date' w formacie YYYY-MM-DD lub YYYY-MM.\n"
-            "Staraj się wyciągać jak najwięcej dat, ról i numerów dokumentów.\n\n"
+            "W polu 'strength' (opcjonalnie 1-5) podaj jak silne jest to powiązanie na podstawie liczby i jakości dowodów w tym dokumencie.\n"
+            "Jeśli ta sama relacja pojawia się w wielu dokumentach — LLM może zwrócić kilka krawędzi; my je później zsumujemy.\n"
+            "Staraj się wyciągać jak najwięcej dat, ról, numerów dokumentów i konkretnych kwot.\n\n"
             "id: snake_case, bez polskich znaków, max 40 znaków."
         )
         prompt = (
@@ -1794,21 +1919,61 @@ def build_network():
                     "label": n.get("label", nid)[:40]
                 })
 
-        seen_edges = set()
-        clean_edges = []
+        # Agregacja powiązań — liczymy SIŁĘ POWIĄZANIA (ile dowodów na daną relację)
+        # Zamiast odrzucać duplikaty, grupujemy je i sumujemy
+        edge_groups = defaultdict(list)  # key=(src,tgt) -> lista krawędzi
+
         for e in graph.get("edges", []):
-            src = str(e.get("source","")).strip()
-            tgt = str(e.get("target","")).strip()
-            key = f"{src}|{tgt}"
-            if src and tgt and src in seen_nodes and tgt in seen_nodes and key not in seen_edges:
-                seen_edges.add(key)
-                clean_edges.append({
-                    "source":   src,
-                    "target":   tgt,
-                    "label":    e.get("label","")[:35],
-                    "doc":      e.get("doc","")[:80],
-                    "evidence": e.get("evidence","")[:150]
-                })
+            src = str(e.get("source", "")).strip()
+            tgt = str(e.get("target", "")).strip()
+            if not src or not tgt or src not in seen_nodes or tgt not in seen_nodes:
+                continue
+            key = (src, tgt)
+            edge_groups[key].append({
+                "label":    (e.get("label") or "")[:40],
+                "doc":      (e.get("doc") or "")[:90],
+                "evidence": (e.get("evidence") or "")[:180],
+                "date":     (e.get("date") or "")[:20],
+                "strength": max(1, min(5, int(e.get("strength", 1))))
+            })
+
+        clean_edges = []
+        for (src, tgt), items in edge_groups.items():
+            # Wybierz najbardziej powtarzający się label jako główny
+            labels = [it["label"] for it in items if it["label"]]
+            main_label = max(set(labels), key=labels.count) if labels else items[0]["label"]
+
+            # Zbierz wszystkie unikalne dowody (max 6)
+            seen_ev = set()
+            evidences = []
+            for it in items:
+                ev_key = (it["doc"], it["evidence"][:80])
+                if ev_key not in seen_ev:
+                    seen_ev.add(ev_key)
+                    evidences.append({
+                        "doc": it["doc"],
+                        "evidence": it["evidence"],
+                        "date": it["date"]
+                    })
+                if len(evidences) >= 6:
+                    break
+
+            total_strength = sum(it["strength"] for it in items) + (len(items) - 1)  # bonus za powtarzalność
+
+            clean_edges.append({
+                "source": src,
+                "target": tgt,
+                "label": main_label,
+                "doc": items[0]["doc"],           # pierwszy dokument dla kompatybilności
+                "evidence": items[0]["evidence"], # pierwszy dowód
+                "date": items[0]["date"],
+                "strength": max(1, min(12, total_strength)),  # cap
+                "evidence_count": len(evidences),
+                "evidences": evidences
+            })
+
+        # Sortuj krawędzie malejąco po sile (najmocniejsze relacje na wierzchu)
+        clean_edges.sort(key=lambda e: e.get("strength", 1), reverse=True)
 
         return jsonify({
             "success": True,

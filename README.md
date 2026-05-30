@@ -1,5 +1,18 @@
 # AI Analiza Dokumentów
 
+> **⚠️ OPROGRAMOWANIE PROPRIETARY / WŁASNOŚĆ INTELEKTUALNA PRYWATNA**
+>
+> Ten projekt **nie jest open source**. Wszystkie prawa autorskie i prawa własności intelektualnej należą wyłącznie do Właściciela.
+> Kopiowanie, modyfikowanie, rozpowszechnianie lub jakiekolwiek inne wykorzystanie bez pisemnej zgody jest **ścisłe zabronione**.
+> Kod chroniony prawem polskim i międzynarodowymi traktatami.
+>
+> Możliwe jest uzyskanie płatnej licencji komercyjnej / wdrożeniowej.
+> W sprawie licencji i warunków komercyjnych — kontakt z właścicielem.
+>
+> Licencja znajduje się w pliku [LICENSE](LICENSE).
+
+---
+
 Lokalny system RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszukiwania dokumentów. Działa w pełni offline — dane nigdy nie opuszczają Twojego komputera.
 
 ## Na czym polega?
@@ -124,3 +137,30 @@ Upload your documents (PDF, Word, Excel, CSV, JSON, Markdown) and ask questions 
 **Key features:** semantic search, 5 analysis modes, dual-LLM verification, Excel forensics (Goal Seek detection, hidden rows, formula verification), network graph visualization, DOCX export, multi-collection management.
 
 **Stack:** Python/Flask · Qdrant Cloud · Llama3 (Ollama) · nomic-embed-text · Bootstrap 5 · D3.js
+
+---
+
+## Licencja i prawa własności intelektualnej
+
+**Ten projekt jest oprogramowaniem zamkniętym (proprietary software).**
+
+- Wszystkie prawa autorskie, prawa do kodu źródłowego, dokumentacji, wzorów, algorytmów i interfejsu użytkownika należą wyłącznie do Właściciela.
+- Projekt **nie jest udostępniany na żadnej licencji open source** (MIT, Apache, GPL itp. nie mają zastosowania).
+- Jakiekolwiek kopiowanie, modyfikowanie, integracja z innymi systemami, sprzedaż, wynajem lub publiczne udostępnianie bez wyraźnej pisemnej zgody Właściciela jest **zabronione** i będzie ścigane.
+- Plik [LICENSE](LICENSE) zawiera pełny tekst licencji (wersja polska + angielska).
+
+### Licencje komercyjne
+
+Właściciel jest otwarty na rozmowy w sprawie płatnych licencji, w tym:
+- licencja komercyjna na użytkowanie wewnętrzne
+- licencja wdrożeniowa / integracyjna
+- licencja OEM / white-label
+- licencja dla instytucji (urzędy, sądy, firmy śledcze, kancelarie)
+
+Jeśli jesteś zainteresowany wykorzystaniem tego narzędzia w celach komercyjnych lub instytucjonalnych — skontaktuj się z właścicielem.
+
+*Możliwość generowania przychodu z tego projektu jest brana pod uwagę.*
+
+---
+
+*© 2025 Właściciel projektu. Wszelkie prawa zastrzeżone.*
