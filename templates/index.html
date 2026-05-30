@@ -305,6 +305,7 @@
             <div id="deleteBar" class="d-none d-flex align-items-center gap-2 ms-auto flex-shrink-0">
                 <span class="small fw-bold text-danger" id="selectedCount"></span>
                 <button class="btn btn-danger btn-sm" onclick="deleteSelected()">🗑 Usuń zaznaczone</button>
+                <button class="btn btn-primary btn-sm" onclick="generateSelectedMetadataReport()">📋 Raport metadanych</button>
                 <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">Odznacz</button>
             </div>
         </div>
@@ -981,6 +982,46 @@ function downloadMetadataReport(index) {
     a.download = `metadata_${doc.file.replace(/[^a-z0-9]/gi, '_')}.json`;
     a.click();
     URL.revokeObjectURL(url);
+}
+
+function generateSelectedMetadataReport() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    if (!checked.length) {
+        alert('Nie zaznaczono żadnych plików.');
+        return;
+    }
+
+    const selectedFiles = [];
+    checked.forEach(chk => {
+        const fileName = chk.value;
+        const doc = allDocs.find(d => d.file === fileName);
+        if (doc) {
+            selectedFiles.push({
+                file: doc.file,
+                full_path: doc.full_path || '',
+                chunks: doc.chunks || 0,
+                metadata: doc.metadata || null
+            });
+        }
+    });
+
+    const report = {
+        generated_at: new Date().toISOString(),
+        total_files: selectedFiles.length,
+        files: selectedFiles
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const date = new Date().toISOString().slice(0,10);
+    a.download = `raport_metadanych_${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // Opcjonalnie: schowaj pasek zaznaczenia
+    document.getElementById('deleteBar').classList.add('d-none');
 }
 
 function clearSelection() {
