@@ -36,6 +36,7 @@ QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
 # ---- Cache embeddingów (SHA256 → wektor, plik JSON) ----
@@ -169,7 +170,7 @@ def generate_answer(query: str, contexts: list, mode: str = "normal") -> str:
     context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text'][:1400]}" for c in contexts])
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
-    payload = {"model": "llama3", "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
+    payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
@@ -202,7 +203,7 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
         "UZASADNIENIE: <jedno zdanie>\n\n"
         "Weryfikacja:"
     )
-    payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+    payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
@@ -877,7 +878,7 @@ def hybrid_stream():
                         f"PYTANIE: {query_text}\n\n"
                         "Wygeneruj SELECT:"
                     )
-                    payload = {"model": "llama3", "prompt": prompt_sql, "system": system_sql,
+                    payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
                                "stream": False, "options": {"num_ctx": 4096}}
                     req = urllib.request.Request(
                         OLLAMA_URL + "/api/generate",
@@ -944,7 +945,7 @@ def hybrid_stream():
                 f"{cfg['prompt_suffix']}\n"
                 "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski."
             )
-            payload = {"model": "llama3", "prompt": prompt, "system": cfg["system"],
+            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
                        "stream": True, "options": {"num_ctx": 8192}}
 
             req = urllib.request.Request(
@@ -1031,7 +1032,7 @@ def search_stream():
             cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
             context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1400]}" for c in raw_contexts])
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
-            payload = {"model": "llama3", "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
+            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
 
             req = urllib.request.Request(
                 OLLAMA_URL + "/api/generate",
@@ -1156,7 +1157,7 @@ def get_suggestions():
             f"DOKUMENTY:\n{context}"
         )
         url = OLLAMA_URL + "/api/generate"
-        payload = {"model": "llama3", "prompt": prompt, "stream": False,
+        payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False,
                    "system": "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań.",
                    "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
@@ -1425,7 +1426,7 @@ def build_network():
             "NIE używaj placeholderów. Każdy label = prawdziwa wartość z tekstu.\n"
             "JSON:"
         )
-        payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
             OLLAMA_URL + "/api/generate",
             data=json.dumps(payload).encode("utf-8"),
@@ -1729,7 +1730,7 @@ def analyze_excel():
             "Co to oznacza w kontekście śledztwa finansowego? Odpowiedz po polsku, krótko."
         )
         system = "Jesteś biegłym rewidentem śledczym. Analizujesz anomalie w plikach Excel pod kątem fałszowania dokumentów finansowych."
-        payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
         try:
             req = urllib.request.Request(
                 OLLAMA_URL + "/api/generate",
@@ -1791,7 +1792,7 @@ def compare_documents():
             f"ZADANIE: {focus}\n\n"
             "Porównanie (wskaż konkretne różnice z cytatami):"
         )
-        payload = {"model": "llama3", "prompt": prompt, "system": system,
+        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system,
                    "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
             OLLAMA_URL + "/api/generate",
@@ -2006,7 +2007,7 @@ def sql_ask():
             f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
             "Wygeneruj zapytanie T-SQL:"
         )
-        payload = {"model": "llama3", "prompt": prompt_sql, "system": system_sql,
+        payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
                    "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
             OLLAMA_URL + "/api/generate",
@@ -2042,7 +2043,7 @@ def sql_ask():
             f"Przykładowe wyniki:\n{result_preview}\n\n"
             "Odpowiedz po polsku: co wynika z tych danych? Podaj konkretne liczby i wnioski."
         )
-        payload2 = {"model": "llama3", "prompt": prompt_interp,
+        payload2 = {"model": LLM_MODEL, "prompt": prompt_interp,
                     "system": "Jesteś analitykiem danych. Interpretujesz wyniki SQL po polsku.",
                     "stream": False, "options": {"num_ctx": 4096}}
         req2 = urllib.request.Request(
@@ -2094,7 +2095,7 @@ def sql_write():
                 f"ZADANIE: {question}\n\n"
                 "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
             )
-            payload = {"model": "llama3", "prompt": prompt_sql, "system": system_sql,
+            payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
                        "stream": False, "options": {"num_ctx": 4096}}
             req = urllib.request.Request(
                 OLLAMA_URL + "/api/generate",
