@@ -870,6 +870,7 @@ function renderDocTable(docs) {
             <td class="text-end">
                 <button class="doc-row-btn" onclick="searchByFile('${safe}')">Szukaj</button>
                 ${d.file.match(/\.xlsx?$/i) ? `<button class="doc-row-btn" style="color:#d97706;border-color:#fde68a;background:#fffbeb;" onclick="analyzeExcel('${safe}')">🔬 Forensyka</button>` : ''}
+                <button class="doc-row-btn" onclick="showDocMetadata('${safe}', ${i})">📋 Metadane</button>
             </td>
         </tr>`;
     }).join('');
@@ -900,6 +901,86 @@ function onDocCheck() {
     }
     sa.indeterminate = checked.length > 0 && checked.length < all.length;
     sa.checked = all.length > 0 && checked.length === all.length;
+}
+
+// --- Metadane dokumentów (dla śledczych) ---
+function showDocMetadata(fileName, index) {
+    const doc = allDocs[index];
+    if (!doc) return;
+
+    const meta = doc.metadata || {};
+
+    let html = `<h5 style="margin-bottom:12px;">📄 ${doc.file}</h5>`;
+
+    html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane systemowe</h6>`;
+    html += `<table style="width:100%;font-size:0.85rem;margin-bottom:12px;">`;
+    if (meta.size_human) html += `<tr><td style="width:140px;color:#64748b;">Rozmiar</td><td><strong>${meta.size_human}</strong></td></tr>`;
+    if (meta.created) html += `<tr><td style="color:#64748b;">Utworzono</td><td>${meta.created}</td></tr>`;
+    if (meta.modified) html += `<tr><td style="color:#64748b;">Zmodyfikowano</td><td>${meta.modified}</td></tr>`;
+    if (meta.accessed) html += `<tr><td style="color:#64748b;">Ostatni dostęp</td><td>${meta.accessed}</td></tr>`;
+    html += `</table>`;
+
+    if (meta.embedded && Object.keys(meta.embedded).length > 0) {
+        html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane wbudowane w plik</h6>`;
+        for (const [format, data] of Object.entries(meta.embedded)) {
+            html += `<div style="margin-bottom:10px;"><strong style="color:#0ea5e9;">${format.toUpperCase()}</strong><br>`;
+            for (const [k, v] of Object.entries(data)) {
+                html += `<span style="color:#64748b;">${k}:</span> <strong>${v}</strong><br>`;
+            }
+            html += `</div>`;
+        }
+    } else {
+        html += `<div class="text-muted small mt-2">Brak dodatkowych metadanych wbudowanych w plik.</div>`;
+    }
+
+    html += `<details class="mt-3"><summary style="cursor:pointer;font-size:0.8rem;color:#64748b;">Pokaż surowe metadane (JSON)</summary>`;
+    html += `<pre style="font-size:0.7rem;background:#f1f5f9;padding:8px;border-radius:4px;overflow:auto;max-height:220px;">${JSON.stringify(meta, null, 2)}</pre></details>`;
+
+    let modal = document.getElementById('metadataModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'metadataModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:99999;display:flex;align-items:center;justify-content:center;';
+        document.body.appendChild(modal);
+    }
+
+    modal.innerHTML = `
+        <div style="background:white;max-width:720px;width:95%;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+            <div style="padding:20px 24px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+                <strong style="font-size:1.05rem;">Metadane pliku — ${doc.file}</strong>
+                <button onclick="document.getElementById('metadataModal').remove()" style="background:none;border:none;font-size:1.4rem;line-height:1;cursor:pointer;">&times;</button>
+            </div>
+            <div style="padding:20px 24px;max-height:70vh;overflow:auto;">
+                ${html}
+            </div>
+            <div style="padding:14px 24px;border-top:1px solid #eee;display:flex;gap:8px;justify-content:flex-end;">
+                <button class="btn btn-outline-secondary btn-sm" onclick="copyMetadataToClipboard(${index})">📋 Kopiuj JSON</button>
+                <button class="btn btn-primary btn-sm" onclick="downloadMetadataReport(${index})">📄 Pobierz raport (JSON)</button>
+                <button class="btn btn-secondary btn-sm" onclick="document.getElementById('metadataModal').remove()">Zamknij</button>
+            </div>
+        </div>
+    `;
+    modal.style.display = 'flex';
+}
+
+function copyMetadataToClipboard(index) {
+    const doc = allDocs[index];
+    if (!doc || !doc.metadata) return;
+    navigator.clipboard.writeText(JSON.stringify(doc.metadata, null, 2)).then(() => {
+        alert('Metadane skopiowane do schowka');
+    });
+}
+
+function downloadMetadataReport(index) {
+    const doc = allDocs[index];
+    if (!doc || !doc.metadata) return;
+    const blob = new Blob([JSON.stringify(doc.metadata, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `metadata_${doc.file.replace(/[^a-z0-9]/gi, '_')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
 }
 
 function clearSelection() {

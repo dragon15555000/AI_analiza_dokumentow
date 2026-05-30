@@ -558,6 +558,90 @@ def _extract_excel(file_path: Path) -> str:
         try: wb_form.close()
         except Exception: pass
 
+
+def extract_file_metadata(f_path: Path) -> dict:
+    """Zbiera bogate metadane pliku (systemowe + formatowe) do celów śledczych."""
+    meta = {
+        "file_name": f_path.name,
+        "full_path": str(f_path),
+        "size_bytes": None,
+        "size_human": None,
+        "created": None,
+        "modified": None,
+        "accessed": None,
+        "file_type": f_path.suffix.lower().lstrip('.'),
+        "embedded": {}
+    }
+
+    try:
+        stat = f_path.stat()
+        meta["size_bytes"] = stat.st_size
+        meta["size_human"] = f"{stat.st_size / 1024:.1f} KB" if stat.st_size < 10*1024*1024 else f"{stat.st_size / (1024*1024):.2f} MB"
+
+        # Czas modyfikacji jest wiarygodny wszędzie
+        meta["modified"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+
+        # Czas dostępu
+        if hasattr(stat, "st_atime"):
+            meta["accessed"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_atime))
+
+        # Czas utworzenia — Windows ma st_ctime jako creation time, Unix ma jako change time
+        if os.name == 'nt' and hasattr(stat, "st_ctime"):
+            meta["created"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_ctime))
+        else:
+            # Na Linux/WSL często nie mamy wiarygodnego created time z filesystemu
+            meta["created"] = None
+
+    except Exception as e:
+        logger.warning(f"Błąd pobierania stat dla {f_path.name}: {e}")
+
+    # === Metadane wbudowane w pliki ===
+    ext = f_path.suffix.lower()
+
+    # PDF
+    if ext == '.pdf' and pdfplumber:
+        try:
+            with pdfplumber.open(f_path) as pdf:
+                if pdf.metadata:
+                    meta["embedded"]["pdf"] = {k: str(v) for k, v in pdf.metadata.items() if v}
+        except Exception:
+            pass
+
+    # DOCX
+    if ext == '.docx' and docx:
+        try:
+            d = docx.Document(f_path)
+            core_props = d.core_properties
+            embedded = {}
+            if core_props.author: embedded["author"] = core_props.author
+            if core_props.title: embedded["title"] = core_props.title
+            if core_props.last_modified_by: embedded["last_modified_by"] = core_props.last_modified_by
+            if core_props.created: embedded["created"] = str(core_props.created)
+            if core_props.modified: embedded["modified"] = str(core_props.modified)
+            if embedded:
+                meta["embedded"]["docx"] = embedded
+        except Exception:
+            pass
+
+    # XLSX / XLS
+    if ext in ['.xlsx', '.xls'] and openpyxl:
+        try:
+            wb = openpyxl.load_workbook(f_path, data_only=True)
+            props = wb.properties
+            embedded = {}
+            if props.creator: embedded["author"] = props.creator
+            if props.title: embedded["title"] = props.title
+            if props.lastModifiedBy: embedded["last_modified_by"] = props.lastModifiedBy
+            if props.created: embedded["created"] = str(props.created)
+            if props.modified: embedded["modified"] = str(props.modified)
+            if embedded:
+                meta["embedded"]["excel"] = embedded
+            wb.close()
+        except Exception:
+            pass
+
+    return meta
+
     return "\n\n".join(parts)
 
 def extract_text(file_path: Path) -> str:
@@ -855,9 +939,19 @@ def import_stream():
                     batch_texts  = [item[1] for item in batch_items]
                     batch_ids    = [item[0] for item in batch_items]
                     vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                    file_meta = extract_file_metadata(f_path)
+
                     points  = [
-                        PointStruct(id=cid, vector=vec,
-                                    payload={"file": f_path.name, "text": txt, "full_path": str(f_path)})
+                        PointStruct(
+                            id=cid,
+                            vector=vec,
+                            payload={
+                                "file": f_path.name,
+                                "text": txt,
+                                "full_path": str(f_path),
+                                "metadata": file_meta
+                            }
+                        )
                         for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
                         if vec and any(v != 0.0 for v in vec)
                     ]
@@ -1420,12 +1514,13 @@ def get_documents():
         client = get_qdrant_client()
         file_chunks = {}
         file_paths  = {}
+        file_meta   = {}
         offset = None
         while True:
             records, offset = client.scroll(
                 collection_name=ACTIVE_COLLECTION,
                 limit=250, offset=offset,
-                with_payload=["file", "full_path"],
+                with_payload=["file", "full_path", "metadata"],
                 with_vectors=False
             )
             for r in records:
@@ -1434,10 +1529,17 @@ def get_documents():
                     file_chunks[fname] = file_chunks.get(fname, 0) + 1
                     if fname not in file_paths and r.payload.get("full_path"):
                         file_paths[fname] = r.payload["full_path"]
+                    if fname not in file_meta and r.payload.get("metadata"):
+                        file_meta[fname] = r.payload["metadata"]
             if offset is None:
                 break
         docs = sorted(
-            [{"file": f, "chunks": c, "full_path": file_paths.get(f, "")}
+            [{
+                "file": f,
+                "chunks": c,
+                "full_path": file_paths.get(f, ""),
+                "metadata": file_meta.get(f)
+            }
              for f, c in file_chunks.items()],
             key=lambda x: -x["chunks"]
         )
