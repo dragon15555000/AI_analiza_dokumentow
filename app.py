@@ -7,6 +7,7 @@ import re
 import os
 import hashlib
 import time
+import sqlite3
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
@@ -39,34 +40,39 @@ OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
-# ---- Cache embeddingów (SHA256 → wektor, plik JSON) ----
-_EMBED_CACHE_PATH = Path(__file__).parent / "embedding_cache.json"
-_embed_cache: dict = {}
-_embed_cache_dirty = 0
+# ---- Cache embeddingów (SQLite) ----
+_CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
 
-def _load_embed_cache():
-    global _embed_cache
-    if _EMBED_CACHE_PATH.exists():
-        try:
-            _embed_cache = json.loads(_EMBED_CACHE_PATH.read_text())
-            print(f"Załadowano cache embeddingów: {len(_embed_cache)} wpisów")
-        except Exception:
-            _embed_cache = {}
-
-def _save_embed_cache():
+def _init_embed_cache():
+    """Inicjalizuje tabelę w bazie SQLite, jeśli nie istnieje."""
     try:
-        _EMBED_CACHE_PATH.write_text(json.dumps(_embed_cache))
+        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vector TEXT)")
+        # Policz istniejące wpisy
+        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
+            count = cursor.fetchone()[0]
+        print(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
     except Exception as e:
-        print(f"⚠️ Błąd zapisu cache: {e}")
+        print(f"⚠️ Błąd inicjalizacji cache: {e}")
 
-_load_embed_cache()
+_init_embed_cache()
 
 def get_embedding(text: str) -> list:
     import hashlib as _hl
     key = _hl.sha256(text[:1500].encode('utf-8', errors='replace')).hexdigest()
-    if key in _embed_cache:
-        return _embed_cache[key]
 
+    # 1. Sprawdzaj, czy wektor jest w bazie
+    try:
+        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+            cursor = conn.execute("SELECT vector FROM embeddings WHERE hash = ?", (key,))
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row[0])
+    except Exception as e:
+        print(f"⚠️ Błąd odczytu cache: {e}")
+
+    # 2. Jeśli nie ma w cache, odpytaj Ollamę
     url = OLLAMA_URL + "/api/embeddings"
     payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
     try:
@@ -74,12 +80,15 @@ def get_embedding(text: str) -> list:
                                      headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=30) as r:
             vec = json.loads(r.read().decode("utf-8"))["embedding"]
-        _embed_cache[key] = vec
-        global _embed_cache_dirty
-        _embed_cache_dirty += 1
-        if _embed_cache_dirty >= 50:   # zapisuj co 50 nowych wpisów
-            _save_embed_cache()
-            _embed_cache_dirty = 0
+
+        # 3. Zapisz nowy wektor natychmiast do bazy SQLite
+        try:
+            with sqlite3.connect(_CACHE_DB_PATH) as conn:
+                conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
+                             (key, json.dumps(vec)))
+        except Exception as e:
+            print(f"⚠️ Błąd zapisu cache: {e}")
+
         return vec
     except Exception as e:
         print(f"⚠️ Ollama Embedding Error: {e}")
@@ -1847,9 +1856,15 @@ def export_csv():
 
 @app.route('/cache/stats', methods=['GET'])
 def cache_stats():
-    _save_embed_cache()
-    size_mb = round(_EMBED_CACHE_PATH.stat().st_size / 1_048_576, 2) if _EMBED_CACHE_PATH.exists() else 0
-    return jsonify({"entries": len(_embed_cache), "size_mb": size_mb})
+    try:
+        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
+            count = cursor.fetchone()[0]
+    except Exception:
+        count = 0
+
+    size_mb = round(_CACHE_DB_PATH.stat().st_size / 1_048_576, 2) if _CACHE_DB_PATH.exists() else 0
+    return jsonify({"entries": count, "size_mb": size_mb})
 
 
 # ============================================================
