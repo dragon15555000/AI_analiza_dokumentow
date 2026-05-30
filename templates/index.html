@@ -168,6 +168,13 @@
 
             <div id="aiResponseContainer"></div>
             <div id="resultsContainer"></div>
+            <div id="sqlHybridResults" class="d-none mt-3" style="background:#f8f9fa;padding:12px;border-radius:8px;border-left:4px solid #0dcaf0;">
+              <div class="d-flex align-items-center mb-2">
+                <span class="badge bg-info me-2">🗄 SQL Server</span>
+                <small id="sqlHybridInfo" class="text-muted" style="font-size:0.85rem;"></small>
+              </div>
+              <div id="sqlHybridTable" class="table-responsive" style="max-height:300px;overflow-y:auto;"></div>
+            </div>
         </div>
 
         <div class="col-lg-4">
@@ -889,17 +896,29 @@ function executeSearch() {
     const loader = document.getElementById('loader');
     const container = document.getElementById('resultsContainer');
     const aiContainer = document.getElementById('aiResponseContainer');
+    const sqlResultsContainer = document.getElementById('sqlHybridResults');
     const btn = document.getElementById('searchBtn');
 
     loader.classList.remove('d-none');
     container.innerHTML = '';
     aiContainer.innerHTML = '';
+    if (sqlResultsContainer) sqlResultsContainer.classList.add('d-none');
     btn.disabled = true;
 
-    fetch('/search/stream', {
+    // Wybierz endpoint na podstawie połączenia SQL
+    const hasSQL = sqlConn && sqlConn.server && sqlConn.database;
+    const endpoint = hasSQL ? '/hybrid/stream' : '/search/stream';
+    const body = {
+        query: query + getChatContext(),
+        limit, mode,
+        file_filter: activeFileFilter,
+        ...(hasSQL ? {conn: sqlConn, schema: sqlSchema} : {})
+    };
+
+    fetch(endpoint, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query: query + getChatContext(), limit, mode, file_filter: activeFileFilter})
+        body: JSON.stringify(body)
     })
     .then(async response => {
         const reader  = response.body.getReader();
@@ -919,7 +938,7 @@ function executeSearch() {
                 try {
                     const ev = JSON.parse(dataLine.slice(6));
                     if (ev.results !== undefined) {
-                        // Wyniki Qdrant dostępne — renderuj natychmiast
+                        // Wyniki RAG dostępne — renderuj natychmiast
                         resultsData = ev;
                         loader.classList.add('d-none');
                         const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
@@ -937,6 +956,9 @@ function executeSearch() {
                             </div>
                             <div id="verifyContainer"></div>`;
                         renderDocResults(ev.results, query, container);
+                    } else if (ev.sql_results !== undefined) {
+                        // Wyniki SQL — renderuj tabelę
+                        renderSqlHybridTable(ev.sql_results);
                     } else if (ev.token !== undefined) {
                         aiText += ev.token;
                         const body = document.getElementById('aiAnswerBody');
@@ -1288,6 +1310,49 @@ function renderMarkdownTable(text) {
     if (inTable) html += '</tbody>';
     html += '</table></div>';
     return html;
+}
+
+function renderSqlHybridTable(data) {
+    const div = document.getElementById('sqlHybridResults');
+    const infoDiv = document.getElementById('sqlHybridInfo');
+    const tableDiv = document.getElementById('sqlHybridTable');
+
+    if (data.error) {
+        div.classList.remove('d-none');
+        infoDiv.textContent = `⚠️ Błąd SQL: ${data.error}`;
+        tableDiv.innerHTML = '';
+        return;
+    }
+
+    if (!data.success || !data.rows || data.rows.length === 0) {
+        div.classList.add('d-none');
+        return;
+    }
+
+    div.classList.remove('d-none');
+    infoDiv.textContent = `${data.total} wierszy · SQL: ${data.sql}`;
+
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+
+    if (cols.length === 0) {
+        tableDiv.innerHTML = '<small class="text-muted">Brak kolumn</small>';
+        return;
+    }
+
+    const headerHtml = cols.map(c => `<th style="padding:6px;font-weight:600;border-bottom:2px solid #0dcaf0;font-size:0.8rem;white-space:nowrap;">${c}</th>`).join('');
+    const rowsHtml = rows.map(r => {
+        const cellsHtml = cols.map(c => {
+            const val = r[c] !== undefined ? r[c] : '';
+            return `<td style="padding:4px 6px;border-bottom:1px solid #e9ecef;font-size:0.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;">${val}</td>`;
+        }).join('');
+        return `<tr>${cellsHtml}</tr>`;
+    }).join('');
+
+    tableDiv.innerHTML = `<table class="table table-sm table-hover" style="margin:0;font-size:0.85rem;">
+        <thead><tr>${headerHtml}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
+    </table>`;
 }
 
 function openFile(wslPath) {
