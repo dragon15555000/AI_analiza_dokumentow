@@ -139,6 +139,31 @@
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
+
+    <!-- Prosty przełącznik LLM + wybór modelu -->
+    <div class="badge-stat" style="background:#2d3561; padding:2px 6px; border-radius:999px; display:flex; align-items:center; gap:6px; font-size:0.72rem;">
+        <select id="llmProviderSelect" onchange="onLlmProviderChange()" 
+                style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:999px; cursor:pointer;">
+            <option value="ollama">Lokalny</option>
+            <option value="openrouter">OpenRouter</option>
+        </select>
+
+        <select id="openrouterModelSelect" onchange="onOpenRouterModelSelectChange()"
+                style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:6px; cursor:pointer; font-size:0.7rem; max-width:260px;">
+            <option value="">-- wybierz model --</option>
+            <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★ najlepszy</option>
+            <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free) - szybki</option>
+            <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (free)</option>
+            <option value="qwen/qwen-2.5-7b-instruct:free">Qwen 2.5 7B (free) - niezawodny</option>
+            <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (free) - bardzo szybki</option>
+            <option value="custom">Własny model...</option>
+        </select>
+
+        <input id="openrouterModelInput" type="text" placeholder="lub wpisz model"
+               style="background:#1a1f36; color:#e2e8f0; border:1px solid #4a5568; font-size:0.7rem; padding:1px 6px; border-radius:6px; width:180px; display:none;"
+               onchange="onOpenRouterModelChange()"
+               title="Np: meta-llama/llama-3.3-70b-instruct:free">
+    </div>
 </div>
 
 <ul class="nav nav-tabs" id="mainTabs">
@@ -421,11 +446,35 @@
       <div class="input-group mb-2">
         <input type="text" id="networkQuery" class="form-control" placeholder="Zapytanie do analizy..." onkeydown="if(event.key==='Enter') buildNetwork()">
         <button class="btn btn-primary" onclick="buildNetwork()" id="networkBtn">Buduj graf</button>
-        <div id="networkFilters" class="ms-2 d-flex gap-2 align-items-center" style="font-size:0.8rem;">
-            <label class="form-check-label"><input type="checkbox" class="node-filter" value="osoba" checked> Osoby</label>
-            <label class="form-check-label"><input type="checkbox" class="node-filter" value="firma" checked> Firmy</label>
-            <label class="form-check-label"><input type="checkbox" class="node-filter" value="kwota" checked> Kwoty</label>
-            <label class="form-check-label"><input type="checkbox" class="node-filter" value="dokument" checked> Dokumenty</label>
+      </div>
+
+      <!-- FILTRY GRAFU - rozbudowane -->
+      <div id="networkFilters" class="mb-2" style="font-size:0.8rem;">
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-1">
+          <span class="text-muted small me-1">Węzły:</span>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="osoba" checked> Osoby</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="firma" checked> Firmy</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="kwota" checked> Kwoty</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="dokument" checked> Dokumenty</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="przetarg" checked> Przetargi</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="umowa" checked> Umowy</label>
+        </div>
+
+        <div class="d-flex flex-wrap gap-3 align-items-center">
+          <!-- Siła powiązania -->
+          <div class="d-flex align-items-center gap-2">
+            <span class="text-muted small">Min. siła:</span>
+            <input type="range" id="networkMinStrength" min="1" max="10" step="1" value="1" style="width:110px;">
+            <span id="networkMinStrengthVal" class="fw-bold" style="min-width:18px;">1</span>
+          </div>
+
+          <!-- Typy relacji (dynamiczne) -->
+          <div class="flex-grow-1">
+            <span class="text-muted small me-1">Relacje:</span>
+            <span id="networkRelationFilters" class="d-inline-flex flex-wrap gap-1"></span>
+          </div>
+
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="resetNetworkFilters()" style="font-size:0.72rem;">Reset</button>
         </div>
       </div>
       <div class="mb-2">
@@ -481,7 +530,7 @@
           <span style="color:#94a3b8;">╌╌ powiązanie</span>
         </div>
         <div class="small text-muted mb-1">Grubość krawędzi + badge <b>×N</b> = siła powiązania (liczba niezależnych dowodów)</div>
-        <div class="small text-muted">Przeciągnij węzły · Scroll = zoom · Hover/click = szczegóły</div>
+        <div class="small text-muted">Filtry działają na bieżąco · Przeciągnij węzły · Scroll = zoom · Hover/click krawędzi = dowody</div>
       </div>
     </div>
   </div>
@@ -1208,6 +1257,8 @@ function executeSearch() {
         query: query + getChatContext(),
         limit, mode,
         file_filter: activeFileFilter,
+        llm_provider: getCurrentLlmProvider(),
+        openrouter_model: getCurrentOpenRouterModel(),
         ...(hasSQL ? {conn: sqlConn, schema: sqlSchema} : {})
     };
 
@@ -1256,7 +1307,14 @@ function executeSearch() {
                         } else if (ev.sql_results !== undefined) {
                             renderSqlHybridTable(ev.sql_results);
                         } else if (ev.token !== undefined) {
-                            aiText += ev.token;
+                            // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
+                            const t = ev.token;
+                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter') || t.startsWith('[FALLBACK]'))) {
+                                // Zamień na prawdziwy błąd z ładnym UI
+                                handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
+                                return;
+                            }
+                            aiText += t;
                             const body = document.getElementById('aiAnswerBody');
                             if (body) body.innerHTML = formatAiText(aiText, mode);
                         } else if (ev.done !== undefined) {
@@ -1275,7 +1333,11 @@ function executeSearch() {
                             btn.disabled = false; return;
                         } else if (ev.error) {
                             loader.classList.add('d-none');
-                            container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                            if (typeof ev.error === 'string' && (ev.error.includes('RATE_LIMIT') || ev.error.includes('429') || ev.error.includes('Too Many'))) {
+                                handleRateLimitError(ev.error, container, loader, btn, stopBtn, query, mode);
+                            } else {
+                                container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                            }
                             btn.disabled = false; return;
                         }
                     } catch(e) {}
@@ -1523,7 +1585,11 @@ function runVerification(query, answer, contexts) {
     fetch('/verify', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, answer, contexts})
+        body: JSON.stringify({
+            query, answer, contexts,
+            llm_provider: getCurrentLlmProvider(),
+            openrouter_model: getCurrentOpenRouterModel()
+        })
     })
     .then(r => r.json())
     .then(d => {
@@ -2160,7 +2226,12 @@ function buildNetwork() {
     fetch('/network', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, limit})
+        body: JSON.stringify({
+            query,
+            limit,
+            llm_provider: getCurrentLlmProvider(),
+            openrouter_model: getCurrentOpenRouterModel()
+        })
     })
     .then(r => r.json())
     .then(d => {
@@ -2181,7 +2252,10 @@ function buildNetwork() {
         document.getElementById('networkStats').textContent =
             `${d.nodes.length} węzłów · ${d.edges.length} relacji · z ${d.sources} dokumentów`;
         document.getElementById('networkLegend').classList.remove('d-none');
-        renderNetwork(d.nodes, d.edges);
+
+        // Zapisz oryginalne dane grafu i włącz filtry
+        saveNetworkData(d.nodes, d.edges);
+        renderNetworkWithFilters();
     })
     .catch(e => {
         document.getElementById('networkLoader').classList.add('d-none');
@@ -2231,6 +2305,185 @@ function showEdgeEvidence(d, event) {
     panel.style.display = '';
     if (event) event.stopPropagation();
 }
+
+// ============================================================
+// FILTRY DO SIECI POWIĄZAŃ (nowe rozbudowane filtrowanie)
+// ============================================================
+let networkOriginalNodes = [];
+let networkOriginalEdges = [];
+let networkRelationCheckboxes = {}; // label -> checkbox element
+
+function saveNetworkData(nodes, edges) {
+    networkOriginalNodes = JSON.parse(JSON.stringify(nodes)); // głęboka kopia
+    networkOriginalEdges = JSON.parse(JSON.stringify(edges));
+
+    // Wygeneruj dynamiczne checkboxy dla typów relacji
+    generateRelationFilterCheckboxes(edges);
+}
+
+function generateRelationFilterCheckboxes(edges) {
+    const container = document.getElementById('networkRelationFilters');
+    if (!container) return;
+
+    container.innerHTML = '';
+    networkRelationCheckboxes = {};
+
+    // Zbierz unikalne etykiety relacji + policz ile razy występują
+    const counts = {};
+    edges.forEach(e => {
+        const label = e.label || '(bez etykiety)';
+        counts[label] = (counts[label] || 0) + 1;
+    });
+
+    // Posortuj po liczbie wystąpień malejąco, weź max 12
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+    sorted.forEach(([label, count]) => {
+        const id = 'rel-' + label.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+        const labelEl = document.createElement('label');
+        labelEl.className = 'form-check-label';
+        labelEl.style.fontSize = '0.72rem';
+        labelEl.innerHTML = `
+            <input type="checkbox" id="${id}" class="relation-filter" checked>
+            <span title="${label} (${count})">${label.length > 18 ? label.slice(0,17)+'…' : label}</span>
+        `;
+        container.appendChild(labelEl);
+
+        const cb = labelEl.querySelector('input');
+        cb.onchange = renderNetworkWithFilters;
+        networkRelationCheckboxes[label] = cb;
+    });
+
+    // Jeśli jest więcej relacji niż pokazujemy
+    if (Object.keys(counts).length > 12) {
+        const more = document.createElement('span');
+        more.className = 'text-muted small ms-1';
+        more.textContent = `+${Object.keys(counts).length - 12} więcej`;
+        container.appendChild(more);
+    }
+
+    // Na wszelki wypadek dołącz listenery jeszcze raz
+    initNetworkFilterListeners();
+}
+
+function getActiveNetworkFilters() {
+    // Typy węzłów
+    const nodeTypes = {};
+    document.querySelectorAll('.node-filter').forEach(cb => {
+        nodeTypes[cb.value] = cb.checked;
+    });
+
+    // Minimalna siła
+    const minStrengthEl = document.getElementById('networkMinStrength');
+    const minStrength = minStrengthEl ? parseInt(minStrengthEl.value) : 1;
+
+    // Aktywne typy relacji
+    const activeRelations = new Set();
+    Object.entries(networkRelationCheckboxes).forEach(([label, cb]) => {
+        if (cb.checked) activeRelations.add(label);
+    });
+
+    return { nodeTypes, minStrength, activeRelations };
+}
+
+function applyNetworkFilters(nodes, edges) {
+    const filters = getActiveNetworkFilters();
+    const { nodeTypes, minStrength, activeRelations } = filters;
+
+    // 1. Filtruj węzły po typie
+    let filteredNodes = nodes.filter(n => {
+        const type = n.type || 'inne';
+        return nodeTypes[type] !== false; // domyślnie pokazuj jeśli nie ma checkboxa
+    });
+
+    const visibleNodeIds = new Set(filteredNodes.map(n => n.id));
+
+    // 2. Filtruj krawędzie: siła + relacja + tylko między widocznymi węzłami
+    let filteredEdges = edges.filter(e => {
+        const sId = (e.source && e.source.id) ? e.source.id : e.source;
+        const tId = (e.target && e.target.id) ? e.target.id : e.target;
+
+        if (!visibleNodeIds.has(sId) || !visibleNodeIds.has(tId)) return false;
+
+        const strength = Number(e.strength || e.evidence_count || 1);
+        if (strength < minStrength) return false;
+
+        const relLabel = e.label || '(bez etykiety)';
+        if (activeRelations.size > 0 && !activeRelations.has(relLabel)) return false;
+
+        return true;
+    });
+
+    // 3. Po odfiltrowaniu krawędzi — zostaw tylko węzły, które mają choć jedną krawędź (opcjonalnie można wyłączyć)
+    // Dla czytelności zostawiamy wszystkie pasujące węzły nawet jeśli zostały bez krawędzi po filtrach relacji
+    return { nodes: filteredNodes, edges: filteredEdges };
+}
+
+function renderNetworkWithFilters() {
+    if (!networkOriginalNodes.length) return;
+
+    const { nodes, edges } = applyNetworkFilters(networkOriginalNodes, networkOriginalEdges);
+
+    // Zaktualizuj statystyki
+    const statsEl = document.getElementById('networkStats');
+    if (statsEl) {
+        const totalNodes = networkOriginalNodes.length;
+        const totalEdges = networkOriginalEdges.length;
+        if (nodes.length !== totalNodes || edges.length !== totalEdges) {
+            statsEl.textContent = `Wyświetlono ${nodes.length}/${totalNodes} węzłów · ${edges.length}/${totalEdges} relacji (po filtrach)`;
+        }
+    }
+
+    // Przerenderuj graf
+    renderNetwork(nodes, edges);
+}
+
+function resetNetworkFilters() {
+    // Zaznacz wszystkie node-type
+    document.querySelectorAll('.node-filter').forEach(cb => cb.checked = true);
+
+    // Min siła = 1
+    const strengthSlider = document.getElementById('networkMinStrength');
+    if (strengthSlider) {
+        strengthSlider.value = 1;
+        const valEl = document.getElementById('networkMinStrengthVal');
+        if (valEl) valEl.textContent = '1';
+    }
+
+    // Zaznacz wszystkie relacje
+    Object.values(networkRelationCheckboxes).forEach(cb => cb.checked = true);
+
+    renderNetworkWithFilters();
+}
+
+// Podłącz listenery do istniejących checkboxów i suwaka
+function initNetworkFilterListeners() {
+    // Node type filters
+    document.querySelectorAll('.node-filter').forEach(cb => {
+        if (!cb._filterListenerAttached) {
+            cb.onchange = renderNetworkWithFilters;
+            cb._filterListenerAttached = true;
+        }
+    });
+
+    // Strength slider
+    const strengthSlider = document.getElementById('networkMinStrength');
+    const strengthVal = document.getElementById('networkMinStrengthVal');
+    if (strengthSlider && strengthVal && !strengthSlider._filterListenerAttached) {
+        strengthSlider.oninput = () => {
+            strengthVal.textContent = strengthSlider.value;
+            renderNetworkWithFilters();
+        };
+        strengthSlider._filterListenerAttached = true;
+    }
+}
+
+// Uruchom inicjalizację filtrów po załadowaniu strony
+document.addEventListener('DOMContentLoaded', () => {
+    // Małe opóźnienie, żeby DOM był gotowy
+    setTimeout(initNetworkFilterListeners, 300);
+    setTimeout(restoreLlmProvider, 400);
+});
 
 function renderNetwork(nodes, edges) {
     const svg  = document.getElementById('networkSvg');
@@ -2425,6 +2678,166 @@ function renderNetwork(nodes, edges) {
     });
 }
 
+// ============================================================
+// PROSTY PRZEŁĄCZNIK LLM (Ollama <-> OpenRouter)
+// ============================================================
+function getCurrentLlmProvider() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (sel) return sel.value;
+    return localStorage.getItem('llm_provider') || 'ollama';
+}
+
+function onLlmProviderChange() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (!sel) return;
+    localStorage.setItem('llm_provider', sel.value);
+    
+    const badge = sel.parentElement;
+    badge.style.transition = 'all 0.2s';
+    badge.style.boxShadow = sel.value === 'openrouter' ? '0 0 0 2px #22c55e' : 'none';
+    setTimeout(() => { badge.style.boxShadow = ''; }, 800);
+}
+
+function onOpenRouterModelChange() {
+    const input = document.getElementById('openrouterModelInput');
+    if (!input) return;
+    localStorage.setItem('openrouter_model', input.value.trim());
+}
+
+function onOpenRouterModelSelectChange() {
+    const select = document.getElementById('openrouterModelSelect');
+    const input = document.getElementById('openrouterModelInput');
+    if (!select || !input) return;
+
+    if (select.value === 'custom') {
+        input.style.display = 'inline-block';
+        input.focus();
+    } else if (select.value) {
+        input.style.display = 'none';
+        input.value = select.value;
+        localStorage.setItem('openrouter_model', select.value);
+    } else {
+        input.style.display = 'none';
+        input.value = '';
+        localStorage.removeItem('openrouter_model');
+    }
+}
+
+function restoreLlmProvider() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (!sel) return;
+
+    const savedProvider = localStorage.getItem('llm_provider');
+    if (savedProvider === 'openrouter' || savedProvider === 'ollama') {
+        sel.value = savedProvider;
+    }
+
+    // Przywróć zapisany model OpenRouter
+    const savedModel = localStorage.getItem('openrouter_model');
+    const modelSelect = document.getElementById('openrouterModelSelect');
+    const modelInput = document.getElementById('openrouterModelInput');
+
+    if (modelSelect && modelInput) {
+        if (savedModel) {
+            // Sprawdź czy model jest na liście
+            let found = false;
+            for (let i = 0; i < modelSelect.options.length; i++) {
+                if (modelSelect.options[i].value === savedModel) {
+                    modelSelect.value = savedModel;
+                    modelInput.style.display = 'none';
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                modelSelect.value = 'custom';
+                modelInput.style.display = 'inline-block';
+                modelInput.value = savedModel;
+            }
+        } else {
+            modelInput.style.display = 'none';
+        }
+    }
+}
+
+function getCurrentOpenRouterModel() {
+    const select = document.getElementById('openrouterModelSelect');
+    const input = document.getElementById('openrouterModelInput');
+
+    // Prefer select if it has a real value
+    if (select && select.value && select.value !== 'custom') {
+        return select.value;
+    }
+
+    // Fallback to custom input
+    if (input && input.value.trim()) {
+        return input.value.trim();
+    }
+
+    return localStorage.getItem('openrouter_model') || null;
+}
+
+// ---- Obsługa błędów rate limit OpenRouter z ładnym UI + szybki switch ----
+function handleRateLimitError(errorText, container, loader, btn, stopBtn, lastQuery, lastMode) {
+    loader.classList.add('d-none');
+    if (stopBtn) stopBtn.style.display = 'none';
+    btn.disabled = false;
+
+    const isFallback = errorText.includes('[FALLBACK]');
+    const alertClass = isFallback ? 'alert-warning' : 'alert-danger';
+    const icon = isFallback ? '⚠️' : '🚫';
+
+    container.innerHTML = `
+        <div class="alert ${alertClass}">
+            <strong>${icon} Limit OpenRouter</strong><br>
+            ${errorText.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim() || 'Zbyt wiele zapytań w krótkim czasie.'}
+            <div class="mt-2 d-flex gap-2 flex-wrap">
+                <button onclick="quickSwitchToOllama()" class="btn btn-primary btn-sm">
+                    🔄 Przełącz na Ollama (lokalny)
+                </button>
+                ${lastQuery ? `<button onclick="retryLastQuery(${JSON.stringify(lastQuery)}, ${JSON.stringify(lastMode || 'normal')})" class="btn btn-outline-secondary btn-sm">🔁 Spróbuj ponownie</button>` : ''}
+            </div>
+            <div class="small mt-2 text-muted">
+                Wskazówka: w <code>.env</code> ustaw <code>OPENROUTER_FALLBACK_TO_OLLAMA=true</code> żeby aplikacja automatycznie przełączała się na Ollama przy limicie.
+            </div>
+        </div>`;
+
+    // Opcjonalnie: automatycznie podświetl selektor providera
+    const providerSel = document.getElementById('llmProviderSelect');
+    if (providerSel) {
+        providerSel.style.boxShadow = '0 0 0 3px rgba(220, 53, 69, 0.4)';
+        setTimeout(() => { if (providerSel) providerSel.style.boxShadow = ''; }, 2200);
+    }
+}
+
+function quickSwitchToOllama() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (sel) {
+        sel.value = 'ollama';
+        if (typeof onLlmProviderChange === 'function') onLlmProviderChange();
+        // Zapisz wybór
+        localStorage.setItem('llm_provider', 'ollama');
+    }
+    // Delikatne info
+    const toast = document.createElement('div');
+    toast.className = 'position-fixed bottom-0 end-0 m-3 p-2 bg-success text-white rounded shadow';
+    toast.style.zIndex = '9999';
+    toast.innerHTML = '✓ Przełączono na Ollama. Możesz teraz zadać pytanie ponownie.';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2400);
+}
+
+function retryLastQuery(query, mode) {
+    const qInput = document.getElementById('queryInput');
+    const modeSel = document.getElementById('modeSelect');
+    if (qInput) qInput.value = query || '';
+    if (modeSel && mode) modeSel.value = mode;
+    // Uruchom wyszukiwanie
+    const askBtn = document.getElementById('askBtn');
+    if (askBtn) askBtn.click();
+}
+
+// ============================================================
 // ---- ZAKŁADKA BAZY ----
 function loadStorageStats() {
     colTabLoaded = true;

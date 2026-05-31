@@ -1,0 +1,30 @@
+[Unit]
+Description=AI Analiza Dokumentów (Waitress)
+After=network.target
+
+[Service]
+Type=simple
+User=marcin
+WorkingDirectory=/home/marcin/projekty/AI_analiza_dokumentow
+
+# Ścieżka do venv
+Environment="PATH=/home/marcin/projekty/AI_analiza_dokumentow/venv/bin"
+EnvironmentFile=/home/marcin/projekty/AI_analiza_dokumentow/.env
+
+# Produkcyjny start przez waitress
+ExecStart=/home/marcin/projekty/AI_analiza_dokumentow/venv/bin/python -m waitress \
+    --listen=0.0.0.0:5000 \
+    --threads=8 \
+    --url-scheme=http \
+    --ident="ai-analiza" \
+    wsgi:app
+
+Restart=always
+RestartSec=5
+
+# Ograniczenia (dostosuj pod serwer)
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

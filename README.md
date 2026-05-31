@@ -115,11 +115,49 @@ QDRANT_URL=https://twoj-klaster.cloud.qdrant.io
 QDRANT_KEY=twoj_klucz_api
 ACTIVE_COLLECTION=dokumenty
 OLLAMA_URL=http://127.0.0.1:11434
+LLM_MODEL=llama3:latest
+
+# OpenRouter (opcjonalnie — przełącznik w UI)
+# LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_MODEL_VERIFY=google/gemini-2.0-flash-exp:free
+# OPENROUTER_FALLBACK_TO_OLLAMA=true   # automatyczny fallback przy limicie
 ```
+
+**Zalecane darmowe modele OpenRouter (2026):**
+- `meta-llama/llama-3.3-70b-instruct:free` — obecnie najlepszy stosunek jakości do limitów
+- `google/gemini-2.0-flash-exp:free` — bardzo szybki
+- `qwen/qwen-2.5-7b-instruct:free` — stabilny
+
+Aplikacja ma wbudowaną obsługę limitów (retry + exponential backoff + opcjonalny fallback na Ollama).
 
 ## Automatyczny start (WSL2 + Windows)
 
 Serwis systemd uruchamia aplikację automatycznie przy starcie WSL2.
+
+### Produkcyjny serwer (zalecane)
+
+Zamiast Flask dev servera używamy **waitress**.
+
+**Szybka migracja:**
+
+```bash
+# 1. Zainstaluj waitress
+source venv/bin/activate
+pip install waitress
+
+# 2. Skopiuj serwis
+sudo cp mzk_web.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mzk_web
+
+# 3. Sprawdź status
+sudo systemctl status mzk_web
+```
+
+Plik `mzk_web.service` jest w repozytorium (gotowy do użycia).
+
 Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy logowaniu.
 
 ---

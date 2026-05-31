@@ -11,3 +11,6 @@ requests>=2.32.3
 pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0   # do bezpośredniego odczytu obrazów w OCR
+
+# Produkcyjny serwer WSGI (zastępuje Flask dev server)
+waitress>=3.0.0
