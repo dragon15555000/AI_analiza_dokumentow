@@ -155,6 +155,46 @@ bash migrate_to_waitress.sh
 
 ---
 
+## Baza wektorowa — Cloud lub lokalnie / Vector DB — Cloud or Local
+
+Aplikacja działa z **Qdrant Cloud** (domyślnie) lub z **lokalnym Qdrant** bez żadnych limitów.
+Zmiana wymaga tylko jednej linii w `.env` — kod aplikacji jest identyczny.
+
+*The app works with Qdrant Cloud (default) or a local Qdrant instance with no limits. One line change in `.env` — no code changes.*
+
+### Qdrant lokalnie — uruchomienie / Local Qdrant — setup
+
+**Docker (zalecane):**
+```bash
+docker run -d --name qdrant \
+  -p 6333:6333 \
+  -v ~/qdrant_data:/qdrant/storage \
+  qdrant/qdrant
+```
+
+**Bez Dockera (binarny):**
+```bash
+# Pobierz ze strony github.com/qdrant/qdrant/releases
+tar xzf qdrant-x86_64-unknown-linux-gnu.tar.gz
+./qdrant
+```
+
+Potem w `.env`:
+```env
+QDRANT_URL=http://localhost:6333
+QDRANT_KEY=                      # zostaw puste
+```
+
+| | Qdrant Cloud | Qdrant lokalny |
+|---|---|---|
+| Limit RAM | 1 GB (free) | brak |
+| Limit dysk | 4 GB (free) | brak |
+| Dostęp zdalny | ✅ | tylko localhost |
+| Backup | automatyczny | ⚠️ ręczny |
+| Wymaga Dockera | nie | opcjonalnie |
+
+---
+
 ## Konfiguracja / Configuration (`.env`)
 
 ```env
