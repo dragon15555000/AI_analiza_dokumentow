@@ -15,17 +15,17 @@ source venv/bin/activate
 pip install waitress
 
 echo "2. Kopiuję serwis systemd..."
-sudo cp mzk_web.service /etc/systemd/system/
+sudo cp ai_analiza.service /etc/systemd/system/
 
 echo "3. Przeładowuję systemd..."
 sudo systemctl daemon-reload
 
 echo "4. Włączam i startuję serwis..."
-sudo systemctl enable --now mzk_web
+sudo systemctl enable --now ai_analiza
 
 echo "5. Status:"
-sudo systemctl status mzk_web --no-pager
+sudo systemctl status ai_analiza --no-pager
 
 echo ""
 echo "Gotowe."
-echo "Logi na żywo: sudo journalctl -u mzk_web -f"
+echo "Logi na żywo: sudo journalctl -u ai_analiza -f"
