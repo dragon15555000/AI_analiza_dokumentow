@@ -1,107 +1,186 @@
-# AI Analiza Dokumentów
+# AI Analiza Dokumentów / AI Document Analysis
 
-System RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszukiwania dokumentów.
+> **⚠️ OPROGRAMOWANIE PROPRIETARY — WŁASNOŚĆ INTELEKTUALNA PRYWATNA**
+>
+> Ten projekt **nie jest open source**. Wszystkie prawa autorskie i prawa własności intelektualnej należą wyłącznie do Właściciela.
+> Kopiowanie, modyfikowanie, rozpowszechnianie lub jakiekolwiek inne wykorzystanie bez pisemnej zgody jest **ścisłe zabronione**.
+> Kod chroniony prawem polskim i międzynarodowymi traktatami.
+> Szczegóły w pliku [LICENSE](LICENSE).
 
-## Na czym polega?
+---
 
-Wgrywasz swoje dokumenty (PDF, Word, Excel, CSV, JSON, Markdown) i możesz zadawać im pytania w języku naturalnym. Zamiast ręcznego przeszukiwania setek plików — system sam znajduje odpowiednie fragmenty i syntetyzuje odpowiedź.
+System RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszukiwania dokumentów. Wgrywasz pliki, zadajesz pytania w języku naturalnym — system znajduje odpowiednie fragmenty i syntetyzuje precyzyjną odpowiedź z cytatami źródłowymi.
+
+*A RAG (Retrieval-Augmented Generation) system for intelligent document analysis and search. Upload your files, ask questions in natural language — the system retrieves relevant passages and synthesizes a precise, source-cited answer.*
+
+---
+
+## Jak to działa / How it works
 
 ```
-Ty piszesz pytanie
-        ↓
-System szuka semantycznie w bazie wektorów (Qdrant Cloud)
-        ↓
-LLM (Llama3) analizuje znalezione fragmenty
-        ↓
-Dostajesz konkretną odpowiedź z cytatami źródłowymi
+Pytanie użytkownika / User question
+            ↓
+Wyszukiwanie semantyczne w bazie wektorów (Qdrant Cloud)
+Semantic search in vector database (Qdrant Cloud)
+            ↓
+LLM analizuje znalezione fragmenty / LLM analyses retrieved passages
+            ↓
+Odpowiedź z cytatami + weryfikacja przez drugi model (Krytyk)
+Answer with citations + second-model verification (Critic)
 ```
 
-## Możliwości
+---
 
-### Wyszukiwanie i analiza
+## Możliwości / Features
+
+### Wyszukiwanie i analiza / Search & Analysis
 - **5 trybów analizy** — standardowy, detektyw (anomalie), prawny (przepisy), niespójności, ekstrakcja danych
-- **Weryfikacja 2× LLM** — pierwszy model odpowiada, drugi sprawdza czy nie zmyślił (Generator + Krytyk)
-- **Streaming** — odpowiedź pojawia się słowo po słowie, wyniki widoczne od razu
-- **Filtrowanie** — szukaj w całej bazie lub tylko w wybranym pliku
+- **Weryfikacja 2× LLM** — Generator odpowiada, Krytyk sprawdza każde twierdzenie względem źródeł
+- **Wyszukiwanie hybrydowe** — łączy wyszukiwanie semantyczne z wyszukiwaniem po słowach kluczowych
+- **Streaming** — odpowiedź pojawia się słowo po słowie
+- **Historia zapytań** — podgląd poprzednich pytań i odpowiedzi
 
-### Importowanie dokumentów
-- Obsługuje: PDF, DOCX, XLSX/XLS (wszystkie arkusze + formuły), CSV, JSON, MD, TXT
-- Pasek postępu w czasie rzeczywistym — widać każdy plik
-- Deduplikacja po treści — ten sam tekst nie wchodzi dwa razy
-- Chunking z nakładką 200 znaków — zachowanie kontekstu na granicach
+*5 analysis modes — standard, detective (anomalies), legal (regulations), inconsistencies, data extraction · Dual-LLM verification · Hybrid search · Streaming · Query history*
 
-### Forensyka Excel
-- Wykrywa **ślady Goal Seek** (ekstremalnie precyzyjna liczba = ktoś cofał obliczenia)
-- Weryfikuje czy formuły zgadzają się z zapisanymi wartościami
+### Obsługiwane formaty / Supported formats
+PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD · TXT · obrazy i skany (OCR)
+
+*PDF · DOCX · XLSX/XLS (all sheets + formulas) · CSV · JSON · MD · TXT · scanned images (OCR)*
+
+### Forensyka Excel / Excel Forensics
+- Wykrywa **ślady Goal Seek** — ekstremalnie precyzyjna liczba to sygnał cofania obliczeń
+- Weryfikuje zgodność formuł z wartościami zapisanymi w pamięci podręcznej
 - Wykrywa **ukryte wiersze i kolumny**
-- Komentarz LLM co anomalia może oznaczać
+- Komentarz LLM co dana anomalia może oznaczać
 
-### Zarządzanie bazą
-- Przeglądarka dokumentów z możliwością usuwania (checkbox + bulk delete)
-- Automatyczne wykrywanie śmieci (licencje, logi, zaszyfrowane nazwy)
-- Wiele kolekcji — tworzenie, przełączanie, statystyki zużycia
-- Otwarcie pliku źródłowego jednym kliknięciem (Windows Explorer)
+*Detects Goal Seek traces, formula vs. cached-value mismatches, hidden rows/columns, with LLM commentary on each finding.*
 
-### Wizualizacja
-- **Sieć powiązań** (D3.js) — LLM wyciąga osoby, firmy, kwoty i rysuje graf relacji
+### Baza danych SQL / SQL Integration
+- Konfiguracja połączenia z MS SQL Server / PostgreSQL / MySQL
+- Zadawanie pytań do bazy w języku naturalnym (Text-to-SQL)
+- Wektoryzacja danych z tabel SQL do Qdrant — przeszukiwanie semantyczne danych relacyjnych
+
+*Natural language queries to SQL databases · Text-to-SQL · Vectorize SQL table data into Qdrant for semantic search.*
+
+### Sieć powiązań / Connection Network
+- LLM wyciąga osoby, firmy, kwoty, umowy i rysuje interaktywny graf (D3.js)
 - Kolory krawędzi: czerwony = przepływ finansowy, fioletowy = zatrudnienie, zielony = przetarg
-- **Export do DOCX** — raport z odpowiedzią LLM i fragmentami źródłowymi gotowy do wydruku
+- Każda krawędź zawiera cytat z dokumentu jako dowód
 
-## Stos technologiczny
+*D3.js interactive graph: persons, companies, amounts, contracts · Edge colors: red=financial, purple=employment, green=tender · Evidence citations per edge.*
 
-| Komponent | Technologia |
+### Zarządzanie bazą / Collection Management
+- Wiele kolekcji — tworzenie, przełączanie, statystyki zużycia
+- Przeglądarka plików z możliwością usuwania (checkbox + bulk delete)
+- Zbiorczy raport metadanych dla zaznaczonych plików (JSON + DOCX)
+- Automatyczne wykrywanie śmieci (licencje, logi, zaszyfrowane nazwy)
+- Przeglądarka dysków — import bezpośrednio z systemu plików
+
+*Multiple collections · Bulk delete · Metadata reports (JSON + DOCX) · Noise detection · Disk browser.*
+
+### Export / Export
+- **DOCX** — raport z odpowiedzią LLM i fragmentami źródłowymi gotowy do wydruku
+- **CSV** — eksport wyników ekstrakcji danych
+
+*DOCX report (LLM answer + source passages) · CSV data export.*
+
+---
+
+## Stos technologiczny / Tech Stack
+
+| Komponent / Component | Technologia / Technology |
 |---|---|
 | Backend | Python 3.12 + Flask / Gunicorn |
-| Baza wektorowa | Qdrant Cloud (darmowy plan wystarczy) |
-| Embeddingi | nomic-embed-text 137M (768 dim) |
-| LLM | Llama3 8B Q4 (via Ollama) |
+| Baza wektorowa / Vector DB | Qdrant Cloud |
+| Embeddingi / Embeddings | nomic-embed-text 137M (768 dim, via Ollama) |
+| LLM | Llama3 (via Ollama) |
 | Frontend | Bootstrap 5 + D3.js + vanilla JS |
 | Chunking | 1000 znaków, nakładka 200, granice zdań |
+| OCR | Tesseract (opcjonalnie / optional) |
+| SQL | pyodbc / psycopg2 / mysql-connector |
 
-## Wymagania
+---
+
+## Wymagania / Requirements
 
 - Python 3.10+
 - [Ollama](https://ollama.ai/) z modelami: `llama3`, `nomic-embed-text`
 - Konto [Qdrant Cloud](https://cloud.qdrant.io/) (plan Free: 1 GB RAM, 4 GB dysk)
-- Windows + WSL2 (lub Linux bezpośrednio)
+- Windows + WSL2 lub Linux
 
-## Instalacja
+---
+
+## Instalacja / Installation
 
 ```bash
 git clone https://github.com/dragon15555000/AI_analiza_dokumentow.git
 cd AI_analiza_dokumentow
 pip install -r requirements.txt
 cp .env.example .env
-nano .env          # wpisz swoje dane Qdrant Cloud
+nano .env        # wpisz dane Qdrant Cloud / enter your Qdrant Cloud credentials
 python app.py
 ```
 
-Otwórz: `http://localhost:5000`
+Otwórz / Open: `http://localhost:5000`
 
-## Konfiguracja (.env)
+### OCR (opcjonalnie / optional)
 
-```env
-QDRANT_URL=https://twoj-klaster.cloud.qdrant.io
-QDRANT_KEY=twoj_klucz_api
-ACTIVE_COLLECTION=dokumenty
-OLLAMA_URL=http://127.0.0.1:11434
+Aby czytać zeskanowane dokumenty i obrazy:
+
+```bash
+sudo apt update && sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils -y
+pip install pytesseract pdf2image Pillow
 ```
 
-## Automatyczny start (WSL2 + Windows)
+OCR uruchamiany jest automatycznie jako fallback gdy brak warstwy tekstowej.
+*OCR runs automatically as a fallback when no text layer is detected.*
+
+---
+
+## Konfiguracja / Configuration (`.env`)
+
+```env
+# Qdrant Cloud
+QDRANT_URL=https://your-cluster.cloud.qdrant.io
+QDRANT_KEY=your_qdrant_api_key
+ACTIVE_COLLECTION=dokumenty
+
+# Ollama
+OLLAMA_URL=http://127.0.0.1:11434
+LLM_MODEL=llama3:latest
+
+# SQL Server (opcjonalnie / optional)
+SQL_SERVER=127.0.0.1
+SQL_PORT=1433
+SQL_DATABASE=YourDatabase
+SQL_USER=sa
+SQL_PASSWORD=YourPassword
+```
+
+---
+
+## Automatyczny start / Auto-start (WSL2 + Windows)
 
 Serwis systemd uruchamia aplikację automatycznie przy starcie WSL2.
 Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy logowaniu.
 
----
+*systemd service auto-starts the app on WSL2 boot. VBScript in Windows Startup wakes WSL2 and launches Ollama on login.*
 
 ---
 
-# AI Document Analysis (English)
+## Licencja / License
 
-A RAG system for intelligent document search and analysis.
+**Ten projekt jest oprogramowaniem zamkniętym (proprietary software).**
 
-Upload your documents (PDF, Word, Excel, CSV, JSON, Markdown) and ask questions in natural language. Instead of manually searching hundreds of files — the system finds relevant passages and synthesizes an answer.
+- Wszelkie prawa autorskie należą wyłącznie do Właściciela.
+- Projekt nie jest udostępniany na żadnej licencji open source.
+- Kopiowanie, modyfikowanie lub dystrybucja bez zgody Właściciela jest zabroniona.
+- Plik [LICENSE](LICENSE) zawiera pełny tekst licencji (PL + EN).
 
-**Key features:** semantic search, 5 analysis modes, dual-LLM verification, Excel forensics (Goal Seek detection, hidden rows, formula verification), network graph visualization, DOCX export, multi-collection management.
+Właściciel jest otwarty na rozmowy w sprawie płatnych licencji komercyjnych, wdrożeniowych, OEM i instytucjonalnych.
 
-**Stack:** Python/Flask · Qdrant Cloud · Llama3 (Ollama) · nomic-embed-text · Bootstrap 5 · D3.js
+*This project is proprietary software. All rights reserved. No open-source license applies. See [LICENSE](LICENSE) for full terms. Commercial licensing inquiries welcome.*
+
+---
+
+*© 2025 Właściciel projektu. Wszelkie prawa zastrzeżone. / All rights reserved.*

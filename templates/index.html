@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MZK Gorzów — System RAG</title>
+    <title>AI Analiza Dokumentów</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
     <style>
@@ -19,6 +19,12 @@
 
         /* Wyszukiwarka */
         .search-card { background: #fff; border-radius: 10px; padding: 20px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 16px; }
+        #sqlVecProgress, #sqlVecAllProgress {
+            background: #fafafa;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
         .search-card h2 { font-size: 1.15rem; font-weight: 700; color: #1a1f36; margin-bottom: 16px; }
         .filter-badge { cursor: pointer; display: inline-block; padding: 3px 10px; border-radius: 20px; background: #e8f0fe; color: #1a73e8; font-size: 0.78rem; font-weight: 600; margin: 2px; border: 1px solid #c5d8fc; transition: all 0.15s; }
         .filter-badge:hover { background: #1a73e8; color: #fff; }
@@ -31,9 +37,58 @@
         .cat-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; color: #6c757d; margin: 12px 0 6px; }
 
         /* Wyniki */
-        .ai-box { background: #eef2ff; border-left: 5px solid #4f46e5; border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
-        .ai-box h5 { color: #4f46e5; font-weight: 700; font-size: 0.95rem; margin-bottom: 10px; }
-        .result-card { background: #fff; border-radius: 8px; border-left: 5px solid #0d6efd; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); overflow: hidden; }
+        .ai-box { 
+            background: #f0f4ff; 
+            border-left: 5px solid #6366f1; 
+            border-radius: 10px; 
+            padding: 20px 22px; 
+            margin-bottom: 18px; 
+            box-shadow: 0 2px 8px rgba(99, 102, 241, 0.1);
+        }
+        .ai-box h5 { 
+            color: #4338ca; 
+            font-weight: 700; 
+            font-size: 1rem; 
+            margin-bottom: 12px; 
+            display: flex; 
+            align-items: center; 
+            gap: 8px; 
+        }
+        .result-card { 
+            background: #fff; 
+            border-radius: 10px; 
+            border-left: 5px solid #3b82f6; 
+            margin-bottom: 14px; 
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06); 
+            overflow: hidden; 
+            transition: all 0.2s ease;
+        }
+        .result-card:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            transform: translateY(-1px);
+        }
+        .result-header {
+            padding: 12px 18px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8fafc;
+        }
+        .result-preview {
+            padding: 0 18px 12px;
+            font-size: 0.9rem;
+            color: #475569;
+            line-height: 1.5;
+        }
+        .result-body {
+            padding: 12px 18px;
+            background: #f8fafc;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            border-top: 1px solid #e2e8f0;
+            display: none;
+        }
         .result-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: #f8f9fa; cursor: pointer; user-select: none; }
         .result-header:hover { background: #f0f2f5; }
         .result-fname { font-weight: 700; font-size: 0.9rem; color: #0d6efd; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 10px; }
@@ -79,11 +134,11 @@
 <body>
 
 <div class="topbar">
-    <h1>MZK Gorzów &mdash; Inteligentny System RAG</h1>
+    <h1>AI Analiza Dokumentów</h1>
     <div class="badge-stat">Wektory: <span id="statVectors">...</span></div>
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
-    <div class="badge-stat">Baza: <span id="statActiveCol">mzk_documents</span></div>
+    <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
 </div>
 
 <ul class="nav nav-tabs" id="mainTabs">
@@ -97,13 +152,19 @@
         <a class="nav-link" href="#" onclick="showTab('ai'); return false;">AI z bazy</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('compare'); return false;">Porównaj</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('network'); return false;">Sieć powiązań</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('sql'); return false;">SQL</a>
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('collections'); return false;">Bazy</a>
     </li>
     <li class="nav-item">
-        <a class="nav-link" href="#" onclick="showTab('import'); return false;">Import</a>
+        <a class="nav-link" href="#" onclick="showTab('import'); setTimeout(()=> { if (!window.quickDrivesLoaded) loadQuickDrives(); window.quickDrivesLoaded=true; }, 80); return false;">Import</a>
     </li>
 </ul>
 
@@ -121,6 +182,7 @@
                 <div class="input-group input-group-lg mb-2">
                     <input type="text" id="queryInput" class="form-control" placeholder="Wybierz szablon lub wpisz pytanie..." onkeydown="if(event.key==='Enter') executeSearch()">
                     <button class="btn btn-primary px-4" onclick="executeSearch()" id="searchBtn">Analizuj</button>
+                    <button class="btn btn-danger px-3" id="searchStopBtn" style="display:none;">⏹ Stop</button>
                 </div>
                 <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
                     <select class="form-select form-select-sm" id="searchMode" style="max-width:220px;">
@@ -141,14 +203,18 @@
                 </div>
                 <div id="modeDesc" class="mt-2 small rounded px-3 py-2 d-none"
                     style="background:#f0f4ff;border-left:3px solid #4f46e5;color:#4f46e5;"></div>
-                <div class="mt-2 d-flex align-items-center gap-2">
+                <div class="mt-2 d-flex flex-wrap align-items-center gap-3">
                     <div class="form-check form-switch mb-0">
                         <input class="form-check-input" type="checkbox" id="verifyToggle">
-                        <label class="form-check-label small fw-semibold" for="verifyToggle"
-                            style="cursor:pointer;">Weryfikacja (2× LLM)</label>
+                        <label class="form-check-label small fw-semibold" for="verifyToggle" style="cursor:pointer;">Weryfikacja (2× LLM)</label>
                     </div>
-                    <span class="small text-muted">— Krytyk sprawdza czy Generator nie zmyślił</span>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="chatToggle">
+                        <label class="form-check-label small fw-semibold" for="chatToggle" style="cursor:pointer;">Tryb rozmowy</label>
+                    </div>
+                    <button class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;" onclick="toggleHistory()">📋 Historia</button>
                 </div>
+                <div id="historyPanel" class="d-none mt-2" style="background:#f8f9fa;border-radius:6px;padding:10px;max-height:180px;overflow-y:auto;"></div>
             </div>
 
             <div id="loader" class="text-center py-4 d-none">
@@ -158,39 +224,46 @@
 
             <div id="aiResponseContainer"></div>
             <div id="resultsContainer"></div>
+            <div id="sqlHybridResults" class="d-none mt-3" style="background:#f0f9ff;padding:14px 16px;border-radius:10px;border-left:5px solid #0ea5e9;">
+              <div class="d-flex align-items-center mb-2">
+                <span class="badge bg-info me-2">🗄 SQL Server</span>
+                <small id="sqlHybridInfo" class="text-muted" style="font-size:0.85rem;"></small>
+              </div>
+              <div id="sqlHybridTable" class="table-responsive" style="max-height:300px;overflow-y:auto;"></div>
+            </div>
         </div>
 
         <div class="col-lg-4">
             <div class="search-card" style="max-height:82vh; overflow-y:auto; padding: 16px;">
                 <h2 style="font-size:1rem;">Szablony (20)</h2>
 
-                <div class="cat-label">1. Zarząd i Odpowiedzialność</div>
-                <button class="prompt-btn" onclick="selectPrompt('Roman Maksymiak Iwona Trzcińska odpowiedzialność niegospodarność')">Rola i odpowiedzialność zarządu</button>
-                <button class="prompt-btn" onclick="selectPrompt('Zmiana w planie celów zarządczych na 2023 kar umownych')">Kary umowne a cele 2023</button>
-                <button class="prompt-btn" onclick="selectPrompt('Zarząd MZK poświadczenie nieprawdy Art 271 K.k. Art 296 K.k.')">Naruszenie Art. 271 i 296 K.k.</button>
-                <button class="prompt-btn" onclick="selectPrompt('Aneksy i zmiana planu celów zarządczych wpływ na premie')">Wpływ aneksów na premie</button>
-                <button class="prompt-btn" onclick="selectPrompt('Zajączkowski Romuald wydruk Uchwała NZW nr 22')">Uchwała NZW nr 22</button>
+                <div class="cat-label">1. Finanse i Budżet</div>
+                <button class="prompt-btn" onclick="selectPrompt('odpowiedzialność zarządu wyniki finansowe niegospodarność')">Odpowiedzialność zarządu</button>
+                <button class="prompt-btn" onclick="selectPrompt('kary umowne cele plan budżetowy korekta')">Kary umowne i korekty planu</button>
+                <button class="prompt-btn" onclick="selectPrompt('przychody koszty wynik finansowy rok obrotowy')">Wyniki finansowe</button>
+                <button class="prompt-btn" onclick="selectPrompt('aneksy umowy zmiany warunków wpływ na wynagrodzenia premie')">Zmiany umów i premie</button>
+                <button class="prompt-btn" onclick="selectPrompt('uchwały zarządu rady nadzorczej decyzje finansowe')">Uchwały organów spółki</button>
 
-                <div class="cat-label">2. Anomalie Excel</div>
-                <button class="prompt-btn" onclick="selectPrompt('Anomalia zmiennoprzecinkowa Goal Seek kwota 92 247 144.999999985')">Ślad Goal Seek 92 mln</button>
-                <button class="prompt-btn" onclick="selectPrompt('TABELA 2025 - 2026.xlsx Przychody fabrykacja budżetu koszty')">Budżet w TABELA 2025-2026</button>
-                <button class="prompt-btn" onclick="selectPrompt('Przyczyny Prognoza Korekta PKO rozliczenie inwentaryzacji niedobory')">Niedobory w Korekcie PKO</button>
-                <button class="prompt-btn" onclick="selectPrompt('Rozbieżności między Dziennikiem a ZOiS ręczne usuwanie transakcji')">Rozbieżności Dziennik vs ZOiS</button>
-                <button class="prompt-btn" onclick="selectPrompt('Wartość rekompensaty wpisana z precyzją do 9 miejsc po przecinku')">Precyzja zapisu rekompensat</button>
+                <div class="cat-label">2. Anomalie w danych</div>
+                <button class="prompt-btn" onclick="selectPrompt('anomalia zmiennoprzecinkowa Goal Seek precyzja liczby')">Ślady Goal Seek w Excelu</button>
+                <button class="prompt-btn" onclick="selectPrompt('budżet przychody koszty fabrykacja danych')">Anomalie w budżecie</button>
+                <button class="prompt-btn" onclick="selectPrompt('prognoza korekta rozliczenie inwentaryzacja niedobory nadwyżki')">Niedobory w rozliczeniach</button>
+                <button class="prompt-btn" onclick="selectPrompt('rozbieżności rejestr transakcji ręczne modyfikacje')">Rozbieżności w rejestrach</button>
+                <button class="prompt-btn" onclick="selectPrompt('wartość zapisana ekstremalna precyzja podejrzana liczba')">Podejrzana precyzja danych</button>
 
-                <div class="cat-label">3. Przetargi i Zmowy</div>
-                <button class="prompt-btn" onclick="selectPrompt('REFUNDA Ekoenergetyka zmowa przetargowa Bid Rigging PFU EOS')">Zmowa REFUNDA i Ekoenergetyka</button>
-                <button class="prompt-btn" onclick="selectPrompt('Modyfikacja wymogów budowlanych w trakcie przetargu PFU EOS')">Faworyzowanie systemu EOS</button>
-                <button class="prompt-btn" onclick="selectPrompt('Podejrzenie naruszenia Art 305 K.k. zakłócanie przetargu publicznego')">Zakłócanie przetargu Art. 305</button>
-                <button class="prompt-btn" onclick="selectPrompt('BTC Dysant Clustering Faktur seryjne fakturowanie ominięcie progów')">Seryjne fakturowanie BTC/Dysant</button>
-                <button class="prompt-btn" onclick="selectPrompt('Provector Sp. z o.o. Mariusz Dziakowicz przekształcenie JDG')">Podmiot Provector Sp. z o.o.</button>
+                <div class="cat-label">3. Zamówienia i Przetargi</div>
+                <button class="prompt-btn" onclick="selectPrompt('zmowa przetargowa bid rigging oferty specyfikacja')">Zmowa przetargowa</button>
+                <button class="prompt-btn" onclick="selectPrompt('modyfikacja wymogów specyfikacja przetarg faworyzowanie')">Faworyzowanie wykonawcy</button>
+                <button class="prompt-btn" onclick="selectPrompt('naruszenie prawa zamówień publicznych zakłócanie przetargu')">Naruszenia prawa zamówień</button>
+                <button class="prompt-btn" onclick="selectPrompt('faktury seryjne fragmentacja zamówień próg bagatela')">Fragmentacja zamówień</button>
+                <button class="prompt-btn" onclick="selectPrompt('podmiot powiązany przekształcenie spółka jednoosobowa')">Powiązania podmiotów</button>
 
-                <div class="cat-label">4. Akta i Sygnalista</div>
-                <button class="prompt-btn" onclick="selectPrompt('Raport z audytu śledczego nr 01/2026/MZK 60')">Raport z audytu nr 01/2026</button>
-                <button class="prompt-btn" onclick="selectPrompt('Raport_Sledczy_Zal11.docx Kwalifikacja prawna tabela zarzutów')">Tabela zarzutów w Zal11</button>
-                <button class="prompt-btn" onclick="selectPrompt('Marcin Gallos Sygnalista ustawa o ochronie sygnalistów rekomendacje')">Status sygnalisty</button>
-                <button class="prompt-btn" onclick="selectPrompt('Email_NIK_FINAL.docx wniosek o przeprowadzenie kontroli doraznej')">Wniosek do NIK</button>
-                <button class="prompt-btn" onclick="selectPrompt('Bilans Aktywa Pasywa Rachunek zysków i strat BNW 10.03.2026')">Bilans BNW marzec 2026</button>
+                <div class="cat-label">4. Dokumentacja i Kontrola</div>
+                <button class="prompt-btn" onclick="selectPrompt('raport z audytu wewnętrznego nieprawidłowości')">Raport z audytu</button>
+                <button class="prompt-btn" onclick="selectPrompt('kwalifikacja prawna zarzuty odpowiedzialność')">Kwalifikacja prawna</button>
+                <button class="prompt-btn" onclick="selectPrompt('sygnalista ochrona zgłoszenie nieprawidłowości')">Ochrona sygnalisty</button>
+                <button class="prompt-btn" onclick="selectPrompt('wniosek organ kontroli skarga zawiadomienie')">Wnioski do organów kontroli</button>
+                <button class="prompt-btn" onclick="selectPrompt('bilans aktywa pasywa rachunek zysków strat sprawozdanie')">Sprawozdanie finansowe</button>
 
                 <div style="border-top:2px dashed #dee2e6;margin:16px 0 10px;"></div>
                 <div class="d-flex align-items-center justify-content-between mb-2">
@@ -232,6 +305,8 @@
             <div id="deleteBar" class="d-none d-flex align-items-center gap-2 ms-auto flex-shrink-0">
                 <span class="small fw-bold text-danger" id="selectedCount"></span>
                 <button class="btn btn-danger btn-sm" onclick="deleteSelected()">🗑 Usuń zaznaczone</button>
+                <button class="btn btn-primary btn-sm" onclick="generateSelectedMetadataReport()">📋 Raport (JSON)</button>
+                <button class="btn btn-info btn-sm" onclick="generateSelectedMetadataReportDocx()">📄 Raport (DOCX)</button>
                 <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">Odznacz</button>
             </div>
         </div>
@@ -291,6 +366,51 @@
     </div>
 </div>
 
+<!-- TAB: PORÓWNAJ -->
+<div id="tabCompare" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="search-card">
+      <h2>Porównanie dokumentów</h2>
+      <p class="small text-muted">LLM dostaje pełną treść obu plików i wskazuje różnice, sprzeczności i rozbieżności.</p>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Dokument A</label>
+        <input type="text" id="compareFileA" class="form-control form-control-sm" placeholder="Nazwa pliku A...">
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Dokument B</label>
+        <input type="text" id="compareFileB" class="form-control form-control-sm" placeholder="Nazwa pliku B...">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold mb-1">Czego szukasz?</label>
+        <select class="form-select form-select-sm" id="compareFocus">
+          <option value="Porównaj te dokumenty — wskaż różnice, sprzeczności i podobieństwa.">Ogólne porównanie</option>
+          <option value="Znajdź sprzeczności w kwotach, datach i liczbach między tymi dokumentami.">Sprzeczności liczbowe</option>
+          <option value="Porównaj zapisy prawne i klauzule umowne. Wskaż różnice w warunkach.">Klauzule umowne</option>
+          <option value="Sprawdź czy dokument B jest zgodny z dokument A lub go modyfikuje. Wskaż co zostało zmienione.">Zgodność / aneks</option>
+          <option value="Znajdź dane które są w dokumencie A ale brakuje ich w dokumencie B i odwrotnie.">Brakujące dane</option>
+        </select>
+      </div>
+      <button class="btn btn-primary w-100" onclick="compareDocuments()" id="compareBtn">Porównaj</button>
+      <div id="compareStatus" class="mt-2 small text-muted d-none"></div>
+    </div>
+    <div class="search-card mt-3" style="background:#f8f9ff;border:1px solid #e0e0ff;">
+      <h2 style="font-size:0.95rem;color:#4f46e5;">Szybki wybór z bazy</h2>
+      <input type="text" id="compareSearch" class="form-control form-control-sm mb-2" placeholder="Filtruj pliki..." oninput="filterCompareList()">
+      <div id="compareFileList" style="max-height:200px;overflow-y:auto;font-size:0.8rem;"></div>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="search-card" style="min-height:400px;" id="compareResult">
+      <div class="text-center py-5 text-muted">
+        <div style="font-size:2.5rem;">⚖️</div>
+        <div class="mt-2">Wybierz dwa pliki i kliknij Porównaj</div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
 <!-- TAB: SIEĆ POWIĄZAŃ -->
 <div id="tabNetwork" class="main-wrap" style="display:none;">
 <div class="row g-3">
@@ -301,6 +421,12 @@
       <div class="input-group mb-2">
         <input type="text" id="networkQuery" class="form-control" placeholder="Zapytanie do analizy..." onkeydown="if(event.key==='Enter') buildNetwork()">
         <button class="btn btn-primary" onclick="buildNetwork()" id="networkBtn">Buduj graf</button>
+        <div id="networkFilters" class="ms-2 d-flex gap-2 align-items-center" style="font-size:0.8rem;">
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="osoba" checked> Osoby</label>
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="firma" checked> Firmy</label>
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="kwota" checked> Kwoty</label>
+            <label class="form-check-label"><input type="checkbox" class="node-filter" value="dokument" checked> Dokumenty</label>
+        </div>
       </div>
       <div class="mb-2">
         <select class="form-select form-select-sm" id="networkLimit">
@@ -310,7 +436,33 @@
         </select>
       </div>
       <div id="networkStats" class="small text-muted mt-2"></div>
-      <hr>
+
+      <hr style="margin:10px 0;">
+      <div class="small fw-bold mb-2" style="color:#374151;">Gotowe scenariusze:</div>
+      <div class="d-flex flex-column gap-1" id="networkScenarios">
+        <button class="prompt-btn" style="border-color:#bfdbfe;background:#f0f7ff;"
+          onclick="runNetworkScenario('Wyciągnij wszystkie umowy i aneksy: strony umowy, daty podpisania, wartości, liczba aneksów i zmiany warunków')">
+          📋 Umowy i aneksy — strony, daty, wartości
+        </button>
+        <button class="prompt-btn" style="border-color:#bbf7d0;background:#f0fdf4;"
+          onclick="runNetworkScenario('Znajdź firmy które wielokrotnie się pojawiają w dokumentach, powiąż je z rodzajem usługi, wartością zamówień i osobami decyzyjnymi')">
+          🏢 Powtarzające się firmy i usługi
+        </button>
+        <button class="prompt-btn" style="border-color:#fee2e2;background:#fff8f8;"
+          onclick="runNetworkScenario('Pokaż wszystkie przepływy finansowe: kto płacił, komu, ile, za co i w jakim dokumencie')">
+          💸 Przepływy finansowe między podmiotami
+        </button>
+        <button class="prompt-btn" style="border-color:#e9d5ff;background:#faf5ff;"
+          onclick="runNetworkScenario('Kto podpisywał, zatwierdzał i zlecał — powiąż osoby z dokumentami, decyzjami i ich skutkami finansowymi')">
+          👤 Osoby decyzyjne i ich podpisy
+        </button>
+        <button class="prompt-btn" style="border-color:#fde68a;background:#fffdf0;"
+          onclick="runNetworkScenario('Wyciągnij przetargi i zamówienia: oferenci, wyniki, kwoty ofert, powiązania między firmami biorącymi udział')">
+          🏆 Przetargi — oferenci i wyniki
+        </button>
+      </div>
+
+      <hr style="margin:10px 0;">
       <div id="networkLegend" class="d-none">
         <div class="small fw-bold mb-1">Legenda:</div>
         <div class="d-flex flex-wrap gap-1 mb-2" style="font-size:0.75rem;">
@@ -328,7 +480,8 @@
           <span style="color:#1d4ed8;">━━ decyzja</span>
           <span style="color:#94a3b8;">╌╌ powiązanie</span>
         </div>
-        <div class="small text-muted">Przeciągnij węzły · Scroll = zoom · Hover = info</div>
+        <div class="small text-muted mb-1">Grubość krawędzi + badge <b>×N</b> = siła powiązania (liczba niezależnych dowodów)</div>
+        <div class="small text-muted">Przeciągnij węzły · Scroll = zoom · Hover/click = szczegóły</div>
       </div>
     </div>
   </div>
@@ -343,10 +496,160 @@
         <div class="spinner-border text-primary"></div>
         <p class="mt-2 small text-muted">LLM ekstrahuje encje i relacje...</p>
       </div>
-      <svg id="networkSvg" style="width:100%;height:550px;display:none;"></svg>
-      <div id="nodeTooltip" style="position:absolute;background:#1a1f36;color:#fff;padding:6px 12px;border-radius:6px;font-size:0.8rem;display:none;pointer-events:none;max-width:220px;"></div>
+      <svg id="networkSvg" style="width:100%;height:500px;display:none;"></svg>
+      <div id="nodeTooltip" style="position:absolute;background:#1a1f36;color:#fff;padding:6px 12px;border-radius:6px;font-size:0.8rem;display:none;pointer-events:none;max-width:240px;z-index:10;"></div>
+      <div id="evidencePanel" style="display:none;position:absolute;bottom:0;left:0;right:0;background:#fff;border-top:3px solid #4f46e5;padding:12px 16px;z-index:10;">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <strong id="evidenceTitle" style="font-size:0.88rem;color:#4f46e5;"></strong>
+          <button onclick="document.getElementById('evidencePanel').style.display='none'" style="background:none;border:none;color:#adb5bd;font-size:1.1rem;cursor:pointer;">✕</button>
+        </div>
+        <div id="evidenceDoc" style="font-size:0.73rem;color:#6c757d;margin-bottom:6px;"></div>
+        <div id="evidenceText" style="font-size:0.85rem;line-height:1.5;color:#374151;font-style:italic;background:#f8f9ff;padding:8px 10px;border-radius:4px;border-left:3px solid #4f46e5;"></div>
+      </div>
     </div>
   </div>
+</div>
+</div>
+
+<!-- TAB: SQL -->
+<div id="tabSql" class="main-wrap" style="display:none;">
+<div class="row g-3">
+
+  <!-- Lewa kolumna: konfiguracja -->
+  <div class="col-lg-4">
+    <div class="search-card">
+      <h2>Połączenie MS SQL Server</h2>
+      <div class="row g-2 mb-2">
+        <div class="col-8">
+          <label class="form-label small fw-bold mb-1">Serwer</label>
+          <input type="text" id="sqlServer" class="form-control form-control-sm" value="127.0.0.1" placeholder="127.0.0.1 lub nazwa\instancja" data-default="127.0.0.1">
+        </div>
+        <div class="col-4">
+          <label class="form-label small fw-bold mb-1">Port</label>
+          <input type="number" id="sqlPort" class="form-control form-control-sm" value="1433" data-default="1433">
+        </div>
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Baza danych</label>
+        <input type="text" id="sqlDatabase" class="form-control form-control-sm" value="Prolider_MZK_SPOLKA" placeholder="nazwa_bazy">
+      </div>
+      <div class="row g-2 mb-2">
+        <div class="col-6">
+          <label class="form-label small fw-bold mb-1">Użytkownik</label>
+          <input type="text" id="sqlUser" class="form-control form-control-sm" value="prolideradmin" placeholder="sa">
+        </div>
+        <div class="col-6">
+          <label class="form-label small fw-bold mb-1">Hasło</label>
+          <input type="password" id="sqlPass" class="form-control form-control-sm" value="pro#LiderSqlAdmin%1">
+        </div>
+      </div>
+      <div class="d-flex gap-2 mb-2">
+        <button class="btn btn-primary btn-sm flex-grow-1" onclick="sqlConnect()" id="sqlConnectBtn">Połącz</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="sqlSaveConn()" title="Zapisz dane połączenia">💾</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="sqlClearConn()" title="Wyczyść zapisane">🗑</button>
+      </div>
+      <div id="sqlConnectStatus" class="small d-none"></div>
+    </div>
+
+    <div class="search-card mt-3" id="sqlTablesCard" style="display:none;">
+      <h2 style="font-size:0.95rem;">Tabele w bazie</h2>
+      <input type="text" id="sqlTableFilter" class="form-control form-control-sm mb-2" placeholder="Filtruj tabele..." oninput="filterSqlTables()">
+      <div id="sqlTableList" style="max-height:300px;overflow-y:auto;font-size:0.82rem;"></div>
+    </div>
+  </div>
+
+  <!-- Prawa kolumna: zapytania -->
+  <div class="col-lg-8">
+    <div class="search-card">
+      <h2>Zapytaj bazę po polsku (Text-to-SQL)</h2>
+      <div class="d-flex gap-2 mb-2 align-items-center">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="sqlWriteMode" onchange="toggleSqlWriteMode(this)">
+          <label class="form-check-label small fw-semibold text-danger" for="sqlWriteMode" style="cursor:pointer;">
+            Tryb zapisu (INSERT/UPDATE/DELETE)
+          </label>
+        </div>
+      </div>
+      <div id="sqlWriteWarning" class="d-none alert alert-warning small py-2 mb-2">
+        ⚠️ Tryb zapisu aktywny — AI może modyfikować dane w bazie. Każda operacja wymaga Twojego potwierdzenia.
+      </div>
+      <div class="input-group mb-2">
+        <input type="text" id="sqlQuestion" class="form-control"
+          placeholder="np. Ile spraw zostało zarejestrowanych w 2023 roku?"
+          onkeydown="if(event.key==='Enter') sqlAsk()">
+        <button class="btn btn-primary px-4" onclick="sqlAsk()" id="sqlAskBtn">Zapytaj</button>
+      </div>
+
+      <div class="mb-2 d-flex flex-wrap gap-1" id="sqlQuickBtns" style="display:none!important;">
+        <span class="small text-muted me-1">Szybkie:</span>
+      </div>
+
+      <div id="sqlLoader" class="text-center py-3 d-none">
+        <div class="spinner-border spinner-border-sm text-primary"></div>
+        <span class="ms-2 small text-muted">LLM generuje SQL, wykonuje zapytanie...</span>
+      </div>
+
+      <div id="sqlResult"></div>
+    </div>
+
+    <!-- Wektoryzacja -->
+    <div class="search-card mt-3" id="sqlVectorCard" style="display:none;">
+      <h5 class="mb-1" style="font-weight:700;color:#166534;">🗄 Wektoryzacja tabel SQL</h5>
+      <p class="small text-muted mb-3">Przenieś dane z wybranych tabel do wektorowej bazy. Dzięki temu będziesz mógł zadawać pytania łączące dokumenty i dane z bazy.</p>
+
+      <div class="row g-2 align-items-end mb-3">
+        <div class="col">
+          <label class="form-label small fw-semibold mb-1">Tabela</label>
+          <select id="sqlVecTable" class="form-select form-select-sm"></select>
+        </div>
+        <div class="col">
+          <label class="form-label small fw-semibold mb-1">Kolumna jako tytuł (opcjonalna)</label>
+          <input type="text" id="sqlVecLabelCol" class="form-control form-control-sm" placeholder="np. NumerSprawy">
+        </div>
+        <div class="col-auto d-flex gap-2">
+          <button class="btn btn-success btn-sm px-3" onclick="sqlVectorize()">Wektoryzuj tabelę</button>
+          <button class="btn btn-danger btn-sm" id="sqlVecStopBtn" style="display:none;">⏹ Stop</button>
+        </div>
+      </div>
+
+      <!-- Single table progress -->
+      <div id="sqlVecProgress" class="d-none mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <small class="fw-semibold text-success">Postęp wektoryzacji</small>
+          <small id="sqlVecPct" class="fw-bold text-success">0%</small>
+        </div>
+        <div class="progress" style="height:10px; background:#e6f4ea;">
+          <div id="sqlVecBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
+        </div>
+        <div id="sqlVecLog" class="mt-2 small text-muted" style="font-family:monospace; background:#f8f9fa; padding:6px 10px; border-radius:4px; max-height:90px; overflow-y:auto;"></div>
+      </div>
+
+      <hr class="my-3" style="border-color:#e5e7eb;">
+
+      <!-- Vectorize All -->
+      <div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-outline-warning flex-grow-1 py-2" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
+            <strong>🗄 Wektoryzuj całą bazę danych</strong>
+          </button>
+          <button class="btn btn-danger" id="sqlVecAllStopBtn" style="display:none;">⏹ Stop</button>
+        </div>
+        <small class="text-muted d-block mt-1" style="font-size:0.72rem;">(może trwać długo przy dużej bazie)</small>
+      </div>
+
+      <div id="sqlVecAllProgress" class="d-none mt-3">
+        <div class="d-flex justify-content-between mb-1">
+          <small id="sqlVecAllStatus" class="text-muted fw-semibold"></small>
+          <small id="sqlVecAllPct" class="fw-bold text-warning"></small>
+        </div>
+        <div class="progress" style="height:10px; background:#fef3c7;">
+          <div id="sqlVecAllBar" class="progress-bar bg-warning" style="width:0%; transition: width 0.3s;"></div>
+        </div>
+        <div id="sqlVecAllLog" class="mt-2 small" style="font-family:monospace; background:#fffbeb; padding:8px 10px; border-radius:6px; max-height:160px; overflow-y:auto; font-size:0.73rem;"></div>
+      </div>
+    </div>
+  </div>
+
 </div>
 </div>
 
@@ -429,6 +732,16 @@
   <div class="col-lg-5">
     <div class="search-card">
       <h2>Przeglądarka folderów</h2>
+
+      <!-- AUTOMATYCZNE MAPOWANIE DYSKÓW LOKALNYCH -->
+      <div class="mb-2">
+        <div class="d-flex align-items-center justify-content-between mb-1">
+          <span class="small fw-bold text-muted">Szybki dostęp — dyski lokalne:</span>
+          <button class="btn btn-sm btn-link p-0" style="font-size:0.7rem;" onclick="loadQuickDrives()" title="Odśwież listę dysków">↻</button>
+        </div>
+        <div id="quickDrives" class="d-flex flex-wrap gap-1" style="min-height:28px;"></div>
+      </div>
+
       <div class="input-group input-group-sm mb-2">
         <input type="text" id="browsePathInput" class="form-control font-monospace" value="/mnt" placeholder="/mnt/...">
         <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
@@ -443,7 +756,7 @@
       <div class="mb-3">
         <label class="form-label small fw-bold">Wybrany folder:</label>
         <div class="input-group">
-          <input type="text" id="importPathInput" class="form-control font-monospace" placeholder="Wybierz folder z przeglądarki lub wpisz ścieżkę..." value="/mnt/g/Mój dysk/NotebookLM">
+          <input type="text" id="importPathInput" class="form-control font-monospace" placeholder="Wybierz folder z przeglądarki lub wpisz ścieżkę..." value="">
           <button class="btn btn-outline-secondary btn-sm" onclick="browseDir(document.getElementById('importPathInput').value)">Przeglądaj</button>
         </div>
       </div>
@@ -478,22 +791,23 @@
         <button class="btn btn-outline-danger" onclick="confirmReindex()" id="reindexBtn" title="Wyczyść kolekcję i importuj od nowa z nowym chunkingiem (overlap 200)">
           ↺ Pełny re-indeks
         </button>
+        <button class="btn btn-danger" id="importStopBtn" style="display:none;">⏹ Stop</button>
       </div>
       <div id="reindexStatus" class="alert alert-warning small d-none">
         Czyszczenie kolekcji...
       </div>
 
       <div id="importProgressWrap" style="display:none;">
-        <div class="d-flex justify-content-between small mb-1">
-          <span id="importProgressLabel" class="fw-bold"></span>
-          <span id="importProgressPct" class="text-muted"></span>
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <span id="importProgressLabel" class="fw-semibold text-success"></span>
+          <span id="importProgressPct" class="fw-bold text-success" style="font-size:0.9rem;"></span>
         </div>
-        <div class="progress mb-2" style="height:10px;">
-          <div id="importProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%"></div>
+        <div class="progress mb-3" style="height:12px; background:#e6f4ea; border-radius:6px;">
+          <div id="importProgressBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
         </div>
-        <div id="importLog" style="max-height:250px;overflow-y:auto;font-size:0.78rem;font-family:monospace;background:#1a1f36;color:#a0aec0;border-radius:6px;padding:10px;"></div>
+        <div id="importLog" style="max-height:220px;overflow-y:auto;font-size:0.75rem;font-family:monospace;background:#0f172a;color:#94a3b8;border-radius:8px;padding:10px 12px; line-height:1.4;"></div>
       </div>
-      <div id="importDone" class="alert alert-success mt-2 d-none small"></div>
+      <div id="importDone" class="alert alert-success mt-3 d-none small py-2"></div>
     </div>
   </div>
 </div>
@@ -507,23 +821,26 @@ let maxChunks = 1;
 // ---- TABS ----
 let aiTabLoaded = false, colTabLoaded = false;
 function showTab(name) {
-    ['tabSearch','tabDocs','tabAi','tabNetwork','tabCollections','tabImport'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabSql','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
     const el = document.getElementById('tab' + name.charAt(0).toUpperCase() + name.slice(1));
     if (el) el.style.display = '';
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
-    const map = {search:0, docs:1, ai:2, network:3, collections:4, import:5};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, sql:5, collections:6, import:7};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); }
+    if (name === 'compare') renderCompareFileList();
+    if (name === 'sql') sqlLoadSavedConn();
 }
 
 // ---- STATS ----
 function updateStats() {
+    if (isHeavyVectorizing) return;  // wyłącz automatyczne odświeżanie podczas ciężkiej wektoryzacji
     fetch('/stats').then(r => r.json()).then(d => {
         if (d.success) {
             document.getElementById('statVectors').textContent = (d.vectors_count || 0).toLocaleString('pl');
@@ -572,6 +889,7 @@ function renderDocTable(docs) {
             <td class="text-end">
                 <button class="doc-row-btn" onclick="searchByFile('${safe}')">Szukaj</button>
                 ${d.file.match(/\.xlsx?$/i) ? `<button class="doc-row-btn" style="color:#d97706;border-color:#fde68a;background:#fffbeb;" onclick="analyzeExcel('${safe}')">🔬 Forensyka</button>` : ''}
+                <button class="doc-row-btn" onclick="showDocMetadata('${safe}', ${i})">📋 Metadane</button>
             </td>
         </tr>`;
     }).join('');
@@ -602,6 +920,172 @@ function onDocCheck() {
     }
     sa.indeterminate = checked.length > 0 && checked.length < all.length;
     sa.checked = all.length > 0 && checked.length === all.length;
+}
+
+// --- Metadane dokumentów (dla śledczych) ---
+function showDocMetadata(fileName, index) {
+    const doc = allDocs[index];
+    if (!doc) return;
+
+    const meta = doc.metadata || {};
+
+    let html = `<h5 style="margin-bottom:12px;">📄 ${doc.file}</h5>`;
+
+    html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane systemowe</h6>`;
+    html += `<table style="width:100%;font-size:0.85rem;margin-bottom:12px;">`;
+    if (meta.size_human) html += `<tr><td style="width:140px;color:#64748b;">Rozmiar</td><td><strong>${meta.size_human}</strong></td></tr>`;
+    if (meta.created) html += `<tr><td style="color:#64748b;">Utworzono</td><td>${meta.created}</td></tr>`;
+    if (meta.modified) html += `<tr><td style="color:#64748b;">Zmodyfikowano</td><td>${meta.modified}</td></tr>`;
+    if (meta.accessed) html += `<tr><td style="color:#64748b;">Ostatni dostęp</td><td>${meta.accessed}</td></tr>`;
+    html += `</table>`;
+
+    if (meta.embedded && Object.keys(meta.embedded).length > 0) {
+        html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane wbudowane w plik</h6>`;
+        for (const [format, data] of Object.entries(meta.embedded)) {
+            html += `<div style="margin-bottom:10px;"><strong style="color:#0ea5e9;">${format.toUpperCase()}</strong><br>`;
+            for (const [k, v] of Object.entries(data)) {
+                html += `<span style="color:#64748b;">${k}:</span> <strong>${v}</strong><br>`;
+            }
+            html += `</div>`;
+        }
+    } else {
+        html += `<div class="text-muted small mt-2">Brak dodatkowych metadanych wbudowanych w plik.</div>`;
+    }
+
+    html += `<details class="mt-3"><summary style="cursor:pointer;font-size:0.8rem;color:#64748b;">Pokaż surowe metadane (JSON)</summary>`;
+    html += `<pre style="font-size:0.7rem;background:#f1f5f9;padding:8px;border-radius:4px;overflow:auto;max-height:220px;">${JSON.stringify(meta, null, 2)}</pre></details>`;
+
+    let modal = document.getElementById('metadataModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'metadataModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:99999;display:flex;align-items:center;justify-content:center;';
+        document.body.appendChild(modal);
+    }
+
+    modal.innerHTML = `
+        <div style="background:white;max-width:720px;width:95%;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+            <div style="padding:20px 24px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+                <strong style="font-size:1.05rem;">Metadane pliku — ${doc.file}</strong>
+                <button onclick="document.getElementById('metadataModal').remove()" style="background:none;border:none;font-size:1.4rem;line-height:1;cursor:pointer;">&times;</button>
+            </div>
+            <div style="padding:20px 24px;max-height:70vh;overflow:auto;">
+                ${html}
+            </div>
+            <div style="padding:14px 24px;border-top:1px solid #eee;display:flex;gap:8px;justify-content:flex-end;">
+                <button class="btn btn-outline-secondary btn-sm" onclick="copyMetadataToClipboard(${index})">📋 Kopiuj JSON</button>
+                <button class="btn btn-primary btn-sm" onclick="downloadMetadataReport(${index})">📄 Pobierz raport (JSON)</button>
+                <button class="btn btn-secondary btn-sm" onclick="document.getElementById('metadataModal').remove()">Zamknij</button>
+            </div>
+        </div>
+    `;
+    modal.style.display = 'flex';
+}
+
+function copyMetadataToClipboard(index) {
+    const doc = allDocs[index];
+    if (!doc || !doc.metadata) return;
+    navigator.clipboard.writeText(JSON.stringify(doc.metadata, null, 2)).then(() => {
+        alert('Metadane skopiowane do schowka');
+    });
+}
+
+function downloadMetadataReport(index) {
+    const doc = allDocs[index];
+    if (!doc || !doc.metadata) return;
+    const blob = new Blob([JSON.stringify(doc.metadata, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `metadata_${doc.file.replace(/[^a-z0-9]/gi, '_')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function generateSelectedMetadataReport() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    if (!checked.length) {
+        alert('Nie zaznaczono żadnych plików.');
+        return;
+    }
+
+    const selectedFiles = [];
+    checked.forEach(chk => {
+        const fileName = chk.value;
+        const doc = allDocs.find(d => d.file === fileName);
+        if (doc) {
+            selectedFiles.push({
+                file: doc.file,
+                full_path: doc.full_path || '',
+                chunks: doc.chunks || 0,
+                metadata: doc.metadata || null
+            });
+        }
+    });
+
+    const report = {
+        generated_at: new Date().toISOString(),
+        total_files: selectedFiles.length,
+        files: selectedFiles
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const date = new Date().toISOString().slice(0,10);
+    a.download = `raport_metadanych_${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    document.getElementById('deleteBar').classList.add('d-none');
+}
+
+function generateSelectedMetadataReportDocx() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    if (!checked.length) {
+        alert('Nie zaznaczono żadnych plików.');
+        return;
+    }
+
+    const selectedFiles = [];
+    checked.forEach(chk => {
+        const fileName = chk.value;
+        const doc = allDocs.find(d => d.file === fileName);
+        if (doc) {
+            selectedFiles.push({
+                file: doc.file,
+                full_path: doc.full_path || '',
+                chunks: doc.chunks || 0,
+                metadata: doc.metadata || null
+            });
+        }
+    });
+
+    fetch('/export/metadata_report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: selectedFiles })
+    })
+    .then(response => {
+        if (!response.ok) throw new Error('Błąd generowania raportu');
+        return response.blob();
+    })
+    .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const date = new Date().toISOString().slice(0,10);
+        a.download = `raport_metadanych_${date}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        document.getElementById('deleteBar').classList.add('d-none');
+    })
+    .catch(err => {
+        alert('Błąd podczas generowania raportu DOCX: ' + err.message);
+    });
 }
 
 function clearSelection() {
@@ -688,17 +1172,50 @@ function executeSearch() {
     const loader = document.getElementById('loader');
     const container = document.getElementById('resultsContainer');
     const aiContainer = document.getElementById('aiResponseContainer');
+    const sqlResultsContainer = document.getElementById('sqlHybridResults');
     const btn = document.getElementById('searchBtn');
+    const stopBtn = document.getElementById('searchStopBtn');
 
     loader.classList.remove('d-none');
     container.innerHTML = '';
     aiContainer.innerHTML = '';
+    if (sqlResultsContainer) sqlResultsContainer.classList.add('d-none');
     btn.disabled = true;
+    if (stopBtn) stopBtn.style.display = '';
 
-    fetch('/search/stream', {
+    const controller = new AbortController();
+
+    // Stop button
+    if (stopBtn) {
+        stopBtn.onclick = () => {
+            controller.abort();
+            if (stopBtn) stopBtn.style.display = 'none';
+            loader.classList.add('d-none');
+            const box = document.getElementById('aiStreamBox');
+            if (box) {
+                const sp = box.querySelector('.spinner-border');
+                if (sp) sp.remove();
+            }
+            container.innerHTML = `<div class="alert alert-warning">⏹ Wyszukiwanie anulowane przez użytkownika.</div>`;
+            btn.disabled = false;
+        };
+    }
+
+    // Wybierz endpoint na podstawie połączenia SQL
+    const hasSQL = sqlConn && sqlConn.server && sqlConn.database;
+    const endpoint = hasSQL ? '/hybrid/stream' : '/search/stream';
+    const body = {
+        query: query + getChatContext(),
+        limit, mode,
+        file_filter: activeFileFilter,
+        ...(hasSQL ? {conn: sqlConn, schema: sqlSchema} : {})
+    };
+
+    fetch(endpoint, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, limit, mode, file_filter: activeFileFilter})
+        body: JSON.stringify(body),
+        signal: controller.signal
     })
     .then(async response => {
         const reader  = response.body.getReader();
@@ -706,66 +1223,77 @@ function executeSearch() {
         let buffer = '', resultsData = null, aiText = '';
 
         const readChunk = async () => {
-            const {done, value} = await reader.read();
-            if (done) { btn.disabled = false; return; }
-            buffer += decoder.decode(value, {stream: true});
-            const parts = buffer.split('\n\n');
-            buffer = parts.pop();
+            try {
+                const {done, value} = await reader.read();
+                if (done) { btn.disabled = false; return; }
+                buffer += decoder.decode(value, {stream: true});
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop();
 
-            for (const block of parts) {
-                const dataLine = block.split('\n').find(l => l.startsWith('data: '));
-                if (!dataLine) continue;
-                try {
-                    const ev = JSON.parse(dataLine.slice(6));
-                    if (ev.results !== undefined) {
-                        // Wyniki Qdrant dostępne — renderuj natychmiast
-                        resultsData = ev;
-                        loader.classList.add('d-none');
-                        const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
-                        aiContainer.innerHTML = `
-                            <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
-                                <div class="d-flex justify-content-between align-items-start mb-2">
-                                    <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
-                                    <div class="d-flex gap-2">
-                                        <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
-                                        <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                for (const block of parts) {
+                    const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+                    if (!dataLine) continue;
+                    try {
+                        const ev = JSON.parse(dataLine.slice(6));
+                        if (ev.results !== undefined) {
+                            resultsData = ev;
+                            loader.classList.add('d-none');
+                            const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
+                            aiContainer.innerHTML = `
+                                <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
+                                        <div class="d-flex gap-2">
+                                            <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
+                            ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
+                                            <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                                        </div>
                                     </div>
+                                    <div id="aiAnswerBody" style="font-size:0.96rem;line-height:1.65;color:#1e2937;white-space:pre-wrap;"></div>
                                 </div>
-                                <div id="aiAnswerBody" style="font-size:0.95rem;line-height:1.7;font-weight:500;white-space:pre-wrap;"></div>
-                            </div>
-                            <div id="verifyContainer"></div>`;
-                        renderDocResults(ev.results, query, container);
-                    } else if (ev.token !== undefined) {
-                        aiText += ev.token;
-                        const body = document.getElementById('aiAnswerBody');
-                        if (body) body.innerHTML = formatAiText(aiText, mode);
-                    } else if (ev.done !== undefined) {
-                        // Finalizuj
-                        const box = document.getElementById('aiStreamBox');
-                        if (box) {
-                            const spinner = box.querySelector('.spinner-border');
-                            if (spinner) spinner.remove();
+                                <div id="verifyContainer"></div>`;
+                            renderDocResults(ev.results, query, container);
+                        } else if (ev.sql_results !== undefined) {
+                            renderSqlHybridTable(ev.sql_results);
+                        } else if (ev.token !== undefined) {
+                            aiText += ev.token;
+                            const body = document.getElementById('aiAnswerBody');
+                            if (body) body.innerHTML = formatAiText(aiText, mode);
+                        } else if (ev.done !== undefined) {
+                            const box = document.getElementById('aiStreamBox');
+                            if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
+                            if (resultsData) {
+                                window._lastSearchData = {query, mode_label: resultsData.mode_label,
+                                    results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
+                                if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
+                                    runVerification(query, aiText, resultsData.contexts);
+                                saveToHistory(query, aiText, resultsData.mode);
+                                chatHistory.push({q: query, a: aiText});
+                                if (chatHistory.length > 5) chatHistory.shift();
+                            }
+                            if (stopBtn) stopBtn.style.display = 'none';
+                            btn.disabled = false; return;
+                        } else if (ev.error) {
+                            loader.classList.add('d-none');
+                            container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                            btn.disabled = false; return;
                         }
-                        if (resultsData) {
-                            window._lastSearchData = {query, mode_label: resultsData.mode_label,
-                                results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
-                            if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
-                                runVerification(query, aiText, resultsData.contexts);
-                        }
-                        btn.disabled = false; return;
-                    } else if (ev.error) {
-                        loader.classList.add('d-none');
-                        container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
-                        btn.disabled = false; return;
-                    }
-                } catch(e) {}
+                    } catch(e) {}
+                }
+                await readChunk();
+            } catch (err) {
+                // Lepsza obsługa zerwania połączenia podczas streamingu wyszukiwania
+                loader.classList.add('d-none');
+                container.innerHTML = `<div class="alert alert-warning">Połączenie przerwane podczas wyszukiwania. Spróbuj ponownie.</div>`;
+                btn.disabled = false;
+                console.warn("Search stream interrupted:", err);
             }
-            await readChunk();
         };
         await readChunk();
     })
     .catch(err => {
         loader.classList.add('d-none');
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         container.innerHTML = `<div class="alert alert-danger">Błąd: ${err}</div>`;
     });
@@ -852,6 +1380,131 @@ function executeSearch() {
         btn.disabled = false;
         container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${err}</div>`;
     });
+}
+
+// ---- HISTORIA ZAPYTAŃ ----
+const HISTORY_KEY = 'ai_analiza_history';
+function getHistory() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]'); } catch{ return []; } }
+function saveToHistory(query, answer, mode) {
+    const h = getHistory();
+    h.unshift({ query, answer: answer.slice(0,300), mode, ts: new Date().toLocaleString('pl') });
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0,20)));
+    renderHistoryPanel();
+}
+function renderHistoryPanel() {
+    const panel = document.getElementById('historyPanel');
+    if (!panel || panel.classList.contains('d-none')) return;
+    const h = getHistory();
+    if (!h.length) { panel.innerHTML = '<div class="text-muted small">Brak historii.</div>'; return; }
+    panel.innerHTML = h.map((item, i) => `
+        <div class="d-flex align-items-start gap-2 mb-1 pb-1 border-bottom" style="font-size:0.78rem;">
+            <div class="flex-grow-1" style="min-width:0;">
+                <div class="text-muted" style="font-size:0.68rem;">${item.ts} · ${item.mode||'normal'}</div>
+                <a href="#" onclick="reuseHistory(${i});return false;" class="text-truncate d-block fw-semibold">${item.query}</a>
+            </div>
+            <button onclick="deleteHistory(${i})" style="background:none;border:none;color:#adb5bd;padding:0;font-size:0.85rem;">✕</button>
+        </div>`).join('');
+}
+function toggleHistory() {
+    const p = document.getElementById('historyPanel');
+    p.classList.toggle('d-none');
+    if (!p.classList.contains('d-none')) renderHistoryPanel();
+}
+function reuseHistory(i) {
+    const item = getHistory()[i];
+    if (!item) return;
+    document.getElementById('queryInput').value = item.query;
+    document.getElementById('historyPanel').classList.add('d-none');
+    executeSearch();
+}
+function deleteHistory(i) {
+    const h = getHistory(); h.splice(i,1);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
+    renderHistoryPanel();
+}
+
+// ---- TRYB ROZMOWY (chat z pamięcią) ----
+let chatHistory = [];  // [{q, a}] ostatnie 3 pary
+function getChatContext() {
+    if (!document.getElementById('chatToggle').checked || !chatHistory.length) return '';
+    return '\n\nKONTEKST POPRZEDNICH PYTAŃ:\n' +
+        chatHistory.slice(-3).map(p => `Pytanie: ${p.q}\nOdpowiedź: ${p.a.slice(0,400)}`).join('\n---\n');
+}
+
+// ---- CSV EXPORT ----
+function exportCsv() {
+    const d = window._lastSearchData;
+    if (!d || !d.ai_answer) { alert('Najpierw wykonaj wyszukiwanie w trybie Ekstrakcja danych.'); return; }
+    fetch('/export/csv', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({table: d.ai_answer})
+    })
+    .then(r => { if(!r.ok) return r.json().then(e=>{throw new Error(e.error)}); return r.blob(); })
+    .then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `ekstrakcja_${new Date().toISOString().slice(0,16).replace(/[T:]/g,'_')}.csv`;
+        a.click();
+    })
+    .catch(e => alert('Błąd: '+e.message));
+}
+
+// ---- PORÓWNANIE DOKUMENTÓW ----
+function renderCompareFileList() {
+    if (allDocs.length === 0) { fetch('/documents').then(r=>r.json()).then(d=>{ allDocs=d.documents||[]; maxChunks=allDocs[0]?.chunks||1; renderCompareFileList(); }); return; }
+    const list = document.getElementById('compareFileList');
+    if (!list) return;
+    const q = (document.getElementById('compareSearch')?.value||'').toLowerCase();
+    const filtered = allDocs.filter(d => d.file.toLowerCase().includes(q)).slice(0,50);
+    list.innerHTML = filtered.map(d => `
+        <div class="d-flex justify-content-between align-items-center py-1 border-bottom">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${d.file}">${d.file}</span>
+            <div class="d-flex gap-1 flex-shrink-0 ms-1">
+                <button class="doc-row-btn" onclick="setCompareFile('A','${d.file.replace(/'/g,"\\'")}')">A</button>
+                <button class="doc-row-btn" onclick="setCompareFile('B','${d.file.replace(/'/g,"\\'")}')">B</button>
+            </div>
+        </div>`).join('');
+}
+function filterCompareList() { renderCompareFileList(); }
+function setCompareFile(ab, fname) {
+    document.getElementById(`compareFile${ab}`).value = fname;
+}
+function compareDocuments() {
+    const fa = document.getElementById('compareFileA').value.trim();
+    const fb = document.getElementById('compareFileB').value.trim();
+    const focus = document.getElementById('compareFocus').value;
+    if (!fa || !fb) { alert('Wybierz dwa pliki.'); return; }
+    if (fa === fb) { alert('Wybierz dwa różne pliki.'); return; }
+
+    const btn = document.getElementById('compareBtn');
+    const res = document.getElementById('compareResult');
+    const st  = document.getElementById('compareStatus');
+    btn.disabled = true;
+    st.classList.remove('d-none'); st.textContent = 'LLM czyta oba dokumenty...';
+    res.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary"></div><p class="mt-2 small text-muted">Porównywanie dokumentów przez LLM (~30-60 sek)...</p></div>`;
+
+    fetch('/compare', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({file_a: fa, file_b: fb, focus})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        btn.disabled = false; st.classList.add('d-none');
+        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${d.error}</div>`; return; }
+        res.innerHTML = `
+            <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+                <div class="d-flex gap-3 small">
+                    <span>📄 <strong>${d.file_a}</strong> (${d.chunks_a} chunków)</span>
+                    <span style="color:#4f46e5;">⚖️</span>
+                    <span>📄 <strong>${d.file_b}</strong> (${d.chunks_b} chunków)</span>
+                </div>
+            </div>
+            <div style="font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">${d.comparison.replace(/\n/g,'<br>')}</div>
+            <div class="mt-3 d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
+            </div>`;
+    })
+    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
@@ -962,6 +1615,49 @@ function renderMarkdownTable(text) {
     return html;
 }
 
+function renderSqlHybridTable(data) {
+    const div = document.getElementById('sqlHybridResults');
+    const infoDiv = document.getElementById('sqlHybridInfo');
+    const tableDiv = document.getElementById('sqlHybridTable');
+
+    if (data.error) {
+        div.classList.remove('d-none');
+        infoDiv.textContent = `⚠️ Błąd SQL: ${data.error}`;
+        tableDiv.innerHTML = '';
+        return;
+    }
+
+    if (!data.success || !data.rows || data.rows.length === 0) {
+        div.classList.add('d-none');
+        return;
+    }
+
+    div.classList.remove('d-none');
+    infoDiv.textContent = `${data.total} wierszy · SQL: ${data.sql}`;
+
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+
+    if (cols.length === 0) {
+        tableDiv.innerHTML = '<small class="text-muted">Brak kolumn</small>';
+        return;
+    }
+
+    const headerHtml = cols.map(c => `<th style="padding:6px;font-weight:600;border-bottom:2px solid #0dcaf0;font-size:0.8rem;white-space:nowrap;">${c}</th>`).join('');
+    const rowsHtml = rows.map(r => {
+        const cellsHtml = cols.map(c => {
+            const val = r[c] !== undefined ? r[c] : '';
+            return `<td style="padding:4px 6px;border-bottom:1px solid #e9ecef;font-size:0.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;">${val}</td>`;
+        }).join('');
+        return `<tr>${cellsHtml}</tr>`;
+    }).join('');
+
+    tableDiv.innerHTML = `<table class="table table-sm table-hover" style="margin:0;font-size:0.85rem;">
+        <thead><tr>${headerHtml}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
+    </table>`;
+}
+
 function openFile(wslPath) {
     fetch('/file/open', {
         method: 'POST',
@@ -994,8 +1690,26 @@ function browseDir(path) {
             ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
             : `<span>${d.current}</span>`;
         const list = document.getElementById('browseList');
-        if (!d.entries.length) {
-            list.innerHTML = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
+
+        if (!d.entries || d.entries.length === 0) {
+            let msg = '';
+            if (d.is_empty) {
+                msg = `<div class="p-3 text-muted small">
+                    <strong>Ten folder jest pusty.</strong><br>
+                    <span style="font-size:0.7rem">/mnt/g w WSL często pokazuje się jako pusty, gdy dysk nie jest w pełni zamontowany lub nie ma uprawnień.</span>
+                </div>`;
+            } else if (d.has_unlisted_items) {
+                msg = `<div class="p-3">
+                    <div class="small text-warning">Brak plików dokumentów w tym folderze.</div>
+                    <div class="small text-muted mt-1">Na dysku są pliki, ale żaden nie pasuje do wybranych typów (PDF/DOCX/XLSX itp.).</div>
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="browseDirWithAll('${d.current.replace(/'/g,"\\'")}')">Pokaż wszystkie pliki i foldery</button>
+                </div>`;
+            } else if (d.permission_denied > 0) {
+                msg = `<div class="p-3 text-muted small">Brak uprawnień do odczytu zawartości (${d.permission_denied} elementów pominiętych).</div>`;
+            } else {
+                msg = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
+            }
+            list.innerHTML = msg;
             return;
         }
         list.innerHTML = d.entries.map(e => {
@@ -1019,9 +1733,94 @@ function browseDir(path) {
     });
 }
 
+function browseDirWithAll(path) {
+    if (!path) path = '/mnt';
+    fetch('/browse?path=' + encodeURIComponent(path) + '&all=1')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+            document.getElementById('browsePathInput').value = d.current;
+            const crumb = document.getElementById('browseCrumb');
+            crumb.innerHTML = d.parent
+                ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
+                : `<span>${d.current}</span>`;
+            const list = document.getElementById('browseList');
+            if (!d.entries || !d.entries.length) {
+                list.innerHTML = '<div class="p-3 text-muted small">Folder jest pusty lub brak uprawnień.</div>';
+                return;
+            }
+            list.innerHTML = d.entries.map(e => {
+                if (e.type === 'dir') {
+                    return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
+                        <span style="color:#f59e0b;">📁</span>
+                        <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                        <button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
+                            onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>
+                    </div>`;
+                } else {
+                    const ext = e.ext || (e.name.split('.').pop() || '').toLowerCase();
+                    return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.75;">
+                        <span style="font-size:0.7rem;color:#64748b;">📄</span>
+                        <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                        <span class="ext-badge">${ext}</span>
+                    </div>`;
+                }
+            }).join('');
+        });
+}
+
 function selectImportFolder(path) {
     document.getElementById('importPathInput').value = path;
 }
+
+// ---- AUTOMATYCZNE DYSKI LOKALNE (Import tab) ----
+let quickDrivesLoaded = false;
+
+function loadQuickDrives() {
+    const container = document.getElementById('quickDrives');
+    if (!container) return;
+    container.innerHTML = '<span class="text-muted small">ładowanie...</span>';
+
+    fetch('/api/drives')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success || !d.drives || !d.drives.length) {
+                container.innerHTML = '<span class="text-muted small">Nie wykryto dysków</span>';
+                return;
+            }
+            container.innerHTML = d.drives.map(drive => {
+                const safePath = drive.path.replace(/'/g, "\\'");
+                const title = drive.path;
+                return `<button class="btn btn-sm btn-outline-secondary py-0 px-2" 
+                            style="font-size:0.72rem; border-radius:999px;"
+                            title="${title}"
+                            onclick="quickDriveSelect('${safePath}')">
+                        ${drive.icon || '💾'} ${drive.label}
+                    </button>`;
+            }).join(' ');
+            quickDrivesLoaded = true;
+        })
+        .catch(() => {
+            container.innerHTML = '<span class="text-muted small">Błąd pobierania dysków</span>';
+        });
+    window.quickDrivesLoaded = true;
+}
+
+function quickDriveSelect(path) {
+    // Ustaw oba inputy + od razu otwórz przeglądarkę
+    document.getElementById('browsePathInput').value = path;
+    document.getElementById('importPathInput').value = path;
+    browseDir(path);
+}
+
+// Auto-ładuj dyski przy pierwszym wejściu do zakładki Import
+const _origShowTab = showTab;
+showTab = function(name) {
+    _origShowTab(name);
+    if (name === 'import' && !window.quickDrivesLoaded) {
+        setTimeout(() => { if (document.getElementById('quickDrives')) loadQuickDrives(); }, 120);
+    }
+};
 
 // ---- IMPORT SSE ----
 function executeImport() {
@@ -1037,8 +1836,10 @@ function executeImport() {
     const pct  = document.getElementById('importProgressPct');
     const log  = document.getElementById('importLog');
     const done = document.getElementById('importDone');
+    const stopBtn = document.getElementById('importStopBtn');
 
     btn.disabled = true;
+    if (stopBtn) stopBtn.style.display = '';
     wrap.style.display = '';
     done.classList.add('d-none');
     log.innerHTML = '';
@@ -1049,6 +1850,18 @@ function executeImport() {
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
     const es = new EventSource('/import/stream?' + params.toString());
+
+    // Stop button handler
+    const stopHandler = () => {
+        es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
+        btn.disabled = false;
+        lbl.textContent = 'Anulowano przez użytkownika';
+        log.innerHTML += `<div style="color:#f59e0b;">⏹ Operacja anulowana.</div>`;
+    };
+    if (stopBtn) {
+        stopBtn.onclick = stopHandler;
+    }
 
     es.addEventListener('start', e => {
         const d = JSON.parse(e.data);
@@ -1076,6 +1889,7 @@ function executeImport() {
     es.addEventListener('done', e => {
         const d = JSON.parse(e.data);
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         bar.style.width = '100%';
         bar.classList.remove('progress-bar-animated');
@@ -1094,12 +1908,14 @@ function executeImport() {
             log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg}</div>`;
         } catch(_) {}
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
     });
 
     es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) return;
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         log.innerHTML += `<div style="color:#fc8181;">❌ Połączenie SSE przerwane.</div>`;
     };
@@ -1244,6 +2060,20 @@ function analyzeExcel(fname) {
                 <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.llm_comment.replace(/\n/g,'<br>')}</div>
             </div>`;
         }
+        // pasek pewności
+        if (d.confidence_pct !== null && d.confidence_pct !== undefined) {
+            const cpct = d.confidence_pct;
+            const cc = cpct >= 70 ? '#16a34a' : cpct >= 40 ? '#d97706' : '#dc2626';
+            html += `<div class="mb-3">
+                <div class="d-flex justify-content-between small mb-1">
+                    <span class="fw-bold">Pewność odpowiedzi</span>
+                    <span style="color:${cc};font-weight:700;">${cpct}%</span>
+                </div>
+                <div class="progress" style="height:8px;border-radius:4px;">
+                    <div class="progress-bar" style="width:${cpct}%;background:${cc};border-radius:4px;"></div>
+                </div>
+            </div>`;
+        }
 
         if (!d.findings.length) {
             html += `<div class="alert alert-success">✅ Nie wykryto anomalii w formułach.</div>`;
@@ -1306,6 +2136,15 @@ function openNetworkForQuery(q) {
     buildNetwork();
 }
 
+function runNetworkScenario(prompt) {
+    document.getElementById('networkQuery').value = prompt;
+    // Ustaw więcej dokumentów dla scenariuszy
+    document.getElementById('networkLimit').value = '20';
+    buildNetwork();
+    // Przewiń do grafu
+    document.getElementById('networkSvg').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
 function buildNetwork() {
     const query = document.getElementById('networkQuery').value.trim();
     const limit = parseInt(document.getElementById('networkLimit').value);
@@ -1352,6 +2191,47 @@ function buildNetwork() {
     });
 }
 
+// Pomocnik do pokazywania panelu z dowodami (obsługuje wiele evidencji + siłę powiązania)
+function showEdgeEvidence(d, event) {
+    if (!d.evidence && !d.doc && (!d.evidences || !d.evidences.length)) return;
+
+    const panel = document.getElementById('evidencePanel');
+    const sLabel = (d.source && typeof d.source === 'object') ? d.source.label : (d.source || '?');
+    const tLabel = (d.target && typeof d.target === 'object') ? d.target.label : (d.target || '?');
+
+    let title = `${sLabel} → ${tLabel}: ${d.label || ''}`;
+    if (d.strength > 1) title += `  ×${d.strength}`;
+    document.getElementById('evidenceTitle').textContent = title;
+
+    // Nagłówek z licznikiem
+    let header = '';
+    const cnt = d.evidence_count || (d.evidences ? d.evidences.length : 1);
+    if (cnt > 1) header = `📎 ${cnt} dowodów powiązania`;
+    else if (d.doc) header = `📄 ${d.doc}`;
+    if (d.date) header = (header ? header + '  •  ' : '') + `📅 ${d.date}`;
+    document.getElementById('evidenceDoc').textContent = header || (d.doc || '');
+
+    // Treść — jeśli mamy tablicę evidences pokazujemy listę
+    const evBox = document.getElementById('evidenceText');
+    if (d.evidences && d.evidences.length > 1) {
+        let html = `<div style="font-size:0.8rem;margin-bottom:4px;color:#4f46e5;">Najważniejsze dowody:</div>`;
+        d.evidences.slice(0, 5).forEach((ev, i) => {
+            html += `<div style="margin:3px 0;padding:4px 6px;background:#f8f9ff;border-radius:3px;border-left:2px solid #64748b;font-size:0.82rem;">`;
+            if (ev.date) html += `<span style="color:#16a34a;">📅 ${ev.date}</span> `;
+            if (ev.doc) html += `<span style="color:#64748b;">${ev.doc}</span><br>`;
+            html += `<span style="font-style:italic;">${(ev.evidence||'').slice(0,140)}</span>`;
+            html += `</div>`;
+        });
+        if (d.evidences.length > 5) html += `<div class="small text-muted">… i ${d.evidences.length-5} więcej</div>`;
+        evBox.innerHTML = html;
+    } else {
+        evBox.textContent = d.evidence || '(brak cytatu)';
+    }
+
+    panel.style.display = '';
+    if (event) event.stopPropagation();
+}
+
 function renderNetwork(nodes, edges) {
     const svg  = document.getElementById('networkSvg');
     svg.style.display = '';
@@ -1361,9 +2241,32 @@ function renderNetwork(nodes, edges) {
     // Wyczyść poprzedni graf
     d3.select('#networkSvg').selectAll('*').remove();
 
+    // Oblicz siłę węzłów (degree)
+    const degree = {};
+    edges.forEach(e => {
+        degree[e.source.id || e.source] = (degree[e.source.id || e.source] || 0) + 1;
+        degree[e.target.id || e.target] = (degree[e.target.id || e.target] || 0) + 1;
+    });
+    nodes.forEach(n => {
+        n.degree = degree[n.id] || 1;
+    });
+
+    // Używaj SIŁY z backendu (agregacja dowodów). Fallback na 1.
+    edges.forEach(e => {
+        // Serwer zwraca "strength" lub "evidence_count"
+        e.strength = Number(e.strength || e.evidence_count || 1);
+        if (e.strength < 1) e.strength = 1;
+    });
+
+    // Lepsza, bardziej czytelna paleta kolorów
     const colors = {
-        osoba:    '#fde68a', firma: '#bfdbfe', kwota: '#bbf7d0',
-        dokument: '#e9d5ff', inne: '#fed7aa'
+        osoba:    '#f59e0b',      // pomarańczowy – osoby
+        firma:    '#3b82f6',      // niebieski – firmy
+        kwota:    '#10b981',      // zielony – pieniądze
+        dokument: '#8b5cf6',      // fioletowy – dokumenty
+        przetarg: '#ec4899',      // różowy – przetargi
+        umowa:    '#14b8a6',      // turkusowy – umowy
+        inne:     '#64748b'       // szary
     };
     const edgeColors = (label) => {
         if (!label) return '#94a3b8';
@@ -1406,25 +2309,49 @@ function renderNetwork(nodes, edges) {
         .data(edges).join('line')
         .attr('stroke', d => edgeColors(d.label))
         .attr('stroke-width', d => {
-            const l = (d.label||'').toLowerCase();
-            return (l.includes('zł') || l.includes('zapłacił') || l.includes('przelał')) ? 3 : 1.5;
+            // Znacznie wyraźniejsze skalowanie siły powiązania
+            const s = Math.max(1, d.strength || 1);
+            const base = (d.label||'').toLowerCase().includes('zł') || (d.label||'').toLowerCase().includes('zapłacił') ? 2.8 : 1.6;
+            return Math.min(base + (s - 1) * 1.15, 9.5);
         })
         .attr('stroke-dasharray', d => {
             const l = (d.label||'').toLowerCase();
             return l.includes('znajomy') || l.includes('rodzina') ? '5,4' : null;
         })
-        .attr('marker-end','url(#arrow)');
+        .attr('marker-end','url(#arrow)')
+        .style('cursor', d => d.evidence ? 'pointer' : 'default')
+        .on('click', (event, d) => { showEdgeEvidence(d, event); })
+        .on('mouseover', (e, d) => {
+            const tt = document.getElementById('nodeTooltip');
+            let html = `<div style="font-weight:700;margin-bottom:2px;">${d.label || ''}`;
+            if (d.strength > 1) html += ` <span style="color:#f59e0b;font-size:0.75rem;">×${d.strength}</span>`;
+            html += `</div>`;
+            if (d.date) html += `<div style="color:#16a34a;font-size:0.72rem;">📅 ${d.date}</div>`;
+            if (d.doc) html += `<div style="opacity:0.7;font-size:0.72rem;">📄 ${d.doc}</div>`;
+            if (d.evidence) html += `<div style="margin-top:3px;font-style:italic;font-size:0.78rem;">${d.evidence.slice(0,95)}${d.evidence.length>95?'…':''}</div>`;
+            if (d.evidence_count > 1) html += `<div style="margin-top:2px;color:#f59e0b;font-size:0.7rem;">+${d.evidence_count-1} innych dowodów</div>`;
+            tt.innerHTML = html;
+            tt.style.display = 'block';
+            tt.style.left = (e.offsetX + 12) + 'px';
+            tt.style.top  = (e.offsetY - 10) + 'px';
+        })
+        .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
 
     const edgeLabel = g.append('g').selectAll('text')
         .data(edges).join('text')
-        .text(d => d.label)
+        .text(d => {
+            const badge = (d.strength && d.strength > 1) ? ` ×${d.strength}` : '';
+            return d.label + badge + (d.evidence ? ' 📎' : '');
+        })
         .attr('font-size', 9)
         .attr('fill', d => edgeColors(d.label))
         .attr('font-weight', d => {
             const l = (d.label||'').toLowerCase();
-            return (l.includes('zł') || l.includes('zapłacił')) ? '700' : '400';
+            return ((l.includes('zł') || l.includes('zapłacił')) || (d.strength > 2)) ? '700' : '400';
         })
-        .attr('text-anchor','middle');
+        .attr('text-anchor','middle')
+        .style('cursor', d => d.evidence ? 'pointer' : 'default')
+        .on('click', (event, d) => { showEdgeEvidence(d, event); });
 
     const node = g.append('g').selectAll('g')
         .data(nodes).join('g')
@@ -1441,16 +2368,51 @@ function renderNetwork(nodes, edges) {
         })
         .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
 
-    node.append('circle')
-        .attr('r', d => d.type === 'kwota' ? 22 : 28)
-        .attr('fill', d => colors[d.type] || colors.inne)
-        .attr('stroke','#fff').attr('stroke-width',2)
-        .style('filter','drop-shadow(0 2px 4px rgba(0,0,0,0.15))');
+    // Różne kształty w zależności od typu węzła (lepsza czytelność)
+    node.each(function(d) {
+        const gNode = d3.select(this);
+        const color = colors[d.type] || colors.inne;
+        const r = 20 + Math.min((d.degree || 1) * 2, 14); // większy węzeł = więcej powiązań
+
+        if (d.type === 'osoba') {
+            gNode.append('circle')
+                .attr('r', r)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        } else if (d.type === 'firma') {
+            gNode.append('rect')
+                .attr('x', -r * 0.9)
+                .attr('y', -r * 0.9)
+                .attr('width', r * 1.8)
+                .attr('height', r * 1.8)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2)
+                .attr('rx', 5);
+        } else if (d.type === 'kwota') {
+            gNode.append('path')
+                .attr('d', `M 0,-${r} L ${r},${r} L -${r},${r} Z`)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        } else {
+            gNode.append('circle')
+                .attr('r', r * 0.9)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        }
+    });
 
     node.append('text')
-        .text(d => d.label.length > 14 ? d.label.slice(0,13)+'…' : d.label)
-        .attr('text-anchor','middle').attr('dy','0.35em')
-        .attr('font-size', 10).attr('font-weight','600').attr('fill','#1a1f36');
+        .text(d => d.label.length > 13 ? d.label.slice(0,12) + '…' : d.label)
+        .attr('text-anchor', 'middle')
+        .attr('dy', '0.35em')
+        .attr('font-size', 9)
+        .attr('font-weight', 700)
+        .attr('fill', '#1e2937')
+        .style('pointer-events', 'none');
 
     sim.on('tick', () => {
         link
@@ -1679,7 +2641,438 @@ function confirmReindex() {
     });
 }
 
-window.onload = function() { updateStats(); loadSuggestions(false); };
+// ---- SQL ----
+let sqlConn = {};
+let sqlTables = [];
+let sqlSchema = '';
+let isHeavyVectorizing = false;  // tymczasowa flaga podczas ciężkiej wektoryzacji
+
+const SQL_CONN_KEY = 'ai_sql_connection';
+
+function sqlLoadSavedConn() {
+    fetch('/sql/config')
+        .then(r => r.json())
+        .then(d => {
+            if (d.has_config && d.config) {
+                const cfg = d.config;
+                document.getElementById('sqlServer').value   = cfg.server   || '127.0.0.1';
+                document.getElementById('sqlPort').value     = cfg.port     || '1433';
+                document.getElementById('sqlDatabase').value = cfg.database || '';
+                document.getElementById('sqlUser').value     = cfg.user     || '';
+                document.getElementById('sqlPass').value     = cfg.password || '';
+            }
+        })
+        .catch(e => console.warn('Nie udało się załadować config:', e));
+}
+
+function sqlSaveConn() {
+    const cfg = getSqlConn();
+    fetch('/sql/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(cfg)
+    })
+    .then(r => r.json())
+    .then(d => {
+        const st = document.getElementById('sqlConnectStatus');
+        st.className = 'small alert alert-success mt-2';
+        st.textContent = '✅ Dane połączenia zapisane na serwerze.';
+        st.classList.remove('d-none');
+        setTimeout(() => st.classList.add('d-none'), 3000);
+    })
+    .catch(e => {
+        const st = document.getElementById('sqlConnectStatus');
+        st.className = 'small alert alert-danger mt-2';
+        st.textContent = '❌ Błąd: ' + e;
+        st.classList.remove('d-none');
+    });
+}
+
+function sqlClearConn() {
+    if (confirm('Usunąć zapisane dane połączenia SQL Server?')) {
+        fetch('/sql/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({server: '', port: '', database: '', user: '', password: ''})
+        })
+        .then(() => {
+            ['sqlServer','sqlPort','sqlDatabase','sqlUser'].forEach(id =>
+                document.getElementById(id).value = id==='sqlServer'?'127.0.0.1':id==='sqlPort'?'1433':'');
+            document.getElementById('sqlPass').value = '';
+        });
+    }
+}
+
+function getSqlConn() {
+    return {
+        server:   document.getElementById('sqlServer').value.trim(),
+        port:     document.getElementById('sqlPort').value.trim(),
+        database: document.getElementById('sqlDatabase').value.trim(),
+        user:     document.getElementById('sqlUser').value.trim(),
+        password: document.getElementById('sqlPass').value
+    };
+}
+
+function sqlConnect() {
+    const btn = document.getElementById('sqlConnectBtn');
+    const st  = document.getElementById('sqlConnectStatus');
+    btn.disabled = true;
+    st.className = 'small alert alert-warning mt-2';
+    st.textContent = 'Łączenie...';
+    st.classList.remove('d-none');
+
+    sqlConn = getSqlConn();
+    fetch('/sql/test', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(sqlConn)
+    })
+    .then(r=>r.json())
+    .then(d => {
+        btn.disabled = false;
+        if (!d.success) {
+            st.className = 'small alert alert-danger mt-2';
+            st.innerHTML = `❌ ${d.error}`;
+            return;
+        }
+        st.className = 'small alert alert-success mt-2';
+        st.innerHTML = `✅ Połączono. SQL Server: ${d.version.slice(0,60)}...`;
+
+        sqlTables = d.tables;
+        document.getElementById('sqlTablesCard').style.display = '';
+        document.getElementById('sqlVectorCard').style.display = '';
+        renderSqlTableList(sqlTables);
+
+        // Wypełnij select wektoryzacji
+        const sel = document.getElementById('sqlVecTable');
+        sel.innerHTML = d.tables.map(t => `<option value="${t.name}">${t.name} (${t.type})</option>`).join('');
+    })
+    .catch(e => { btn.disabled=false; st.className='small alert alert-danger mt-2'; st.textContent='❌ '+e; });
+}
+
+function renderSqlTableList(tables) {
+    const q = (document.getElementById('sqlTableFilter')?.value||'').toLowerCase();
+    const filtered = tables.filter(t => t.name.toLowerCase().includes(q));
+    document.getElementById('sqlTableList').innerHTML = filtered.map(t => `
+        <div class="d-flex align-items-center justify-content-between py-1 border-bottom">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">
+                <span style="font-size:0.68rem;color:${t.type==='VIEW'?'#7c3aed':'#0d6efd'};font-weight:700;">${t.type==='VIEW'?'V':'T'}</span>
+                <span class="ms-1">${t.name}</span>
+            </span>
+            <div class="d-flex gap-1 flex-shrink-0 ms-1">
+                <button class="doc-row-btn" onclick="sqlLoadSchema('${t.name}')">Schemat</button>
+                <button class="doc-row-btn" style="color:#16a34a;" onclick="sqlQuickAsk('${t.name}')">Pytaj</button>
+            </div>
+        </div>`).join('');
+}
+function filterSqlTables() { renderSqlTableList(sqlTables); }
+
+function sqlLoadSchema(tableName) {
+    fetch('/sql/schema', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, table: tableName})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        if (!d.success) { alert('Błąd: ' + d.error); return; }
+        // Zbuduj opis schematu dla LLM
+        const colDesc = d.columns.map(c => `  ${c.name} (${c.type}${c.max_len?'('+c.max_len+')':''})`).join('\n');
+        sqlSchema += `\nTabela: ${tableName} (${d.row_count} wierszy)\nKolumny:\n${colDesc}\n`;
+        document.getElementById('sqlResult').innerHTML = `
+            <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-family:monospace;font-size:0.8rem;">
+                <strong>${tableName}</strong> — ${d.row_count.toLocaleString('pl')} wierszy<br>
+                ${d.columns.map(c=>`<span style="color:#0d6efd;">${c.name}</span> <span style="color:#6c757d;">${c.type}${c.max_len?'('+c.max_len+')':''}</span>`).join(' &nbsp;|&nbsp; ')}
+            </div>
+            <div class="small text-success mt-1">✅ Schemat załadowany — LLM zna teraz strukturę tej tabeli</div>`;
+    });
+}
+
+function sqlQuickAsk(tableName) {
+    sqlLoadSchema(tableName);
+    document.getElementById('sqlQuestion').value = `Pokaż przykładowe 10 rekordów z tabeli ${tableName}`;
+    setTimeout(sqlAsk, 800);
+}
+
+function toggleSqlWriteMode(cb) {
+    document.getElementById('sqlWriteWarning').classList.toggle('d-none', !cb.checked);
+    document.getElementById('sqlQuestion').placeholder = cb.checked
+        ? 'np. Dodaj kontrahenta ABC Sp. z o.o. z NIP 123-456-78-90'
+        : 'np. Ile spraw zostało zarejestrowanych w 2023 roku?';
+    document.getElementById('sqlAskBtn').className = cb.checked
+        ? 'btn btn-danger px-4' : 'btn btn-primary px-4';
+}
+
+function sqlAsk() {
+    const question  = document.getElementById('sqlQuestion').value.trim();
+    const writeMode = document.getElementById('sqlWriteMode').checked;
+    if (!question) return;
+    if (!sqlConn.server) { alert('Najpierw połącz się z bazą SQL.'); return; }
+
+    const loader = document.getElementById('sqlLoader');
+    const result = document.getElementById('sqlResult');
+    const btn    = document.getElementById('sqlAskBtn');
+    loader.classList.remove('d-none');
+    result.innerHTML = '';
+    btn.disabled = true;
+
+    const endpoint = writeMode ? '/sql/write' : '/sql/ask';
+    fetch(endpoint, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, question, schema: sqlSchema, confirmed: false})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        loader.classList.add('d-none');
+        btn.disabled = false;
+        if (!d.success) {
+            result.innerHTML = `<div class="alert alert-danger small">${d.error}</div>`
+                + (d.sql ? `<pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>` : '');
+            return;
+        }
+
+        // Tryb zapisu — podgląd z przyciskiem potwierdzenia
+        if (d.preview) {
+            const impactColor = d.first_word === 'DELETE' ? '#dc2626' : '#d97706';
+            result.innerHTML = `
+                <div style="background:#fef3c7;border-left:4px solid #d97706;border-radius:6px;padding:14px 16px;margin-bottom:12px;">
+                    <strong style="color:#92400e;">⚠️ Podgląd operacji zapisu — potwierdź wykonanie</strong>
+                    ${d.impact ? `<div class="mt-1 small" style="color:${impactColor};font-weight:700;">${d.impact}</div>` : ''}
+                </div>
+                <pre style="font-size:0.82rem;background:#1a1f36;color:#a0aec0;padding:12px;border-radius:6px;overflow-x:auto;margin-bottom:12px;">${d.sql}</pre>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-danger" onclick="sqlConfirmWrite('${d.sql.replace(/'/g,"\\'").replace(/\n/g,' ')}')">
+                        ✅ Potwierdź — wykonaj
+                    </button>
+                    <button class="btn btn-outline-secondary" onclick="document.getElementById('sqlResult').innerHTML=''">
+                        ✕ Anuluj
+                    </button>
+                </div>`;
+            return;
+        }
+
+        // Tryb odczytu — interpretacja + tabela
+        result.innerHTML = `
+            <div style="background:#eef2ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <strong style="color:#4f46e5;font-size:0.88rem;">Interpretacja AI:</strong>
+                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.interpretation.replace(/\n/g,'<br>')}</div>
+            </div>
+            <details class="mb-2">
+                <summary class="small text-muted" style="cursor:pointer;">SQL (${d.total} wierszy${d.truncated?' — obcięte do 500':''})</summary>
+                <pre style="font-size:0.75rem;background:#1a1f36;color:#a0aec0;padding:10px;border-radius:4px;margin-top:6px;overflow-x:auto;">${d.sql}</pre>
+            </details>
+            ${d.rows.length ? renderSqlTable(d.columns, d.rows) : '<div class="alert alert-warning small">Brak wyników.</div>'}`;
+    })
+    .catch(e => { loader.classList.add('d-none'); btn.disabled=false; result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+}
+
+function sqlConfirmWrite(sql) {
+    const result = document.getElementById('sqlResult');
+    result.innerHTML = '<div class="text-center py-3"><div class="spinner-border text-danger"></div><span class="ms-2 small">Wykonywanie...</span></div>';
+
+    fetch('/sql/write', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, question:'', schema: sqlSchema, confirmed: true, sql})
+    })
+    .then(r=>r.json())
+    .then(d => {
+        if (!d.success) {
+            result.innerHTML = `<div class="alert alert-danger">${d.error}</div>`;
+            return;
+        }
+        result.innerHTML = `
+            <div class="alert alert-success">
+                ✅ ${d.message}
+            </div>
+            <pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>`;
+    })
+    .catch(e => { result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+}
+
+function renderSqlTable(cols, rows) {
+    return `<div style="overflow-x:auto;max-height:350px;overflow-y:auto;">
+        <table class="table table-sm table-hover table-bordered mb-0" style="font-size:0.78rem;">
+            <thead style="position:sticky;top:0;background:#f8f9fa;">
+                <tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>
+            </thead>
+            <tbody>
+                ${rows.map(r=>`<tr>${cols.map(c=>`<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(r[c]||'').replace(/"/g,'&quot;')}">${r[c]||''}</td>`).join('')}</tr>`).join('')}
+            </tbody>
+        </table>
+    </div>`;
+}
+
+function sqlVectorize() {
+    const table    = document.getElementById('sqlVecTable').value;
+    const labelCol = document.getElementById('sqlVecLabelCol').value.trim();
+    if (!table) return;
+
+    const prog = document.getElementById('sqlVecProgress');
+    const bar  = document.getElementById('sqlVecBar');
+    const log  = document.getElementById('sqlVecLog');
+    const stopBtn = document.getElementById('sqlVecStopBtn');
+
+    prog.classList.remove('d-none');
+    bar.style.width = '0%';
+    log.textContent = 'Startowanie...';
+
+    const controller = new AbortController();
+
+    if (stopBtn) {
+        stopBtn.style.display = '';
+        stopBtn.onclick = () => {
+            controller.abort();
+            if (stopBtn) stopBtn.style.display = 'none';
+            log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja anulowana.</span>`;
+        };
+    }
+
+    fetch('/sql/vectorize', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol}),
+        signal: controller.signal
+    })
+    .then(async response => {
+        const reader = response.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, {stream:true});
+            const parts = buf.split('\n\n'); buf = parts.pop();
+            for (const block of parts) {
+                const dl = block.split('\n').find(l=>l.startsWith('data: '));
+                if (!dl) continue;
+                try {
+                    const ev = JSON.parse(dl.slice(6));
+                    if (ev.start !== undefined) {
+                        // Obsługa startu wektoryzacji pojedynczej tabeli
+                        log.textContent = `Przygotowanie do wektoryzacji tabeli ${ev.table} (${ev.total} wierszy)...`;
+                        bar.style.width = '0%';
+                    } else if (ev.done !== undefined) {
+                        bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
+                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        if (stopBtn) stopBtn.style.display = 'none';
+                        updateStats(); allDocs = [];
+                    } else if (ev.progress !== undefined) {
+                        bar.style.width = ev.pct + '%';
+                        log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
+                    } else if (ev.error) {
+                        log.innerHTML += `<br><span style="color:red;">❌ ${ev.error}</span>`;
+                        if (stopBtn) stopBtn.style.display = 'none';
+                    }
+                } catch(e) {}
+            }
+        }
+    });
+}
+
+function sqlVectorizeAll() {
+    if (!sqlConn || !sqlConn.server) {
+        alert('Najpierw połącz się z bazą SQL');
+        return;
+    }
+
+    const btn   = document.getElementById('sqlVecAllBtn');
+    const prog  = document.getElementById('sqlVecAllProgress');
+    const bar   = document.getElementById('sqlVecAllBar');
+    const log   = document.getElementById('sqlVecAllLog');
+    const status = document.getElementById('sqlVecAllStatus');
+    const pct_el = document.getElementById('sqlVecAllPct');
+
+    btn.disabled = true;
+    prog.classList.remove('d-none');
+    bar.style.width = '0%';
+    log.innerHTML = '⏳ Pobieranie listy tabel...';
+    status.textContent = '';
+    pct_el.textContent = '';
+
+    isHeavyVectorizing = true;   // wyłącz automatyczne odświeżanie statystyk podczas ciężkiej operacji
+
+    const controller = new AbortController();
+    const allStopBtn = document.getElementById('sqlVecAllStopBtn');
+    if (allStopBtn) {
+        allStopBtn.style.display = '';
+        allStopBtn.onclick = () => {
+            controller.abort();
+            if (allStopBtn) allStopBtn.style.display = 'none';
+            log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja całej bazy anulowana.</span>`;
+            btn.disabled = false;
+            isHeavyVectorizing = false;
+        };
+    }
+
+    fetch('/sql/vectorize-all', {
+        signal: controller.signal,
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({conn: sqlConn})
+    })
+    .then(async response => {
+        const reader = response.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        let totalTables = 0, totalRows = 0, tablesDone = 0;
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, {stream:true});
+            const parts = buf.split('\n\n'); buf = parts.pop();
+            for (const block of parts) {
+                const dl = block.split('\n').find(l=>l.startsWith('data: '));
+                if (!dl) continue;
+                try {
+                    const ev = JSON.parse(dl.slice(6));
+                    if (ev.start !== undefined) {
+                        totalTables = ev.total_tables;
+                        log.innerHTML = `<strong>Tabele do zwektoryzowania:</strong> ${ev.tables.join(', ')}<br>`;
+                    } else if (ev.table_start !== undefined) {
+                        const t = ev.table || 'unknown';
+                        status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${t}`;
+                    } else if (ev.progress !== undefined) {
+                        bar.style.width = ev.pct + '%';
+                        pct_el.textContent = ev.pct + '%';
+                        const t = ev.table || 'unknown';
+                        status.textContent = `${t}: ${ev.done}/${ev.total} wierszy`;
+                    } else if (ev.table_done !== undefined) {
+                        tablesDone = ev.table_idx + 1;
+                        const t = ev.table || 'unknown';
+                        log.innerHTML += `✅ ${t} (${ev.rows || 0} wierszy)<br>`;
+                    } else if (ev.table_error !== undefined) {
+                        const t = ev.table || 'unknown';
+                        log.innerHTML += `❌ ${t}: ${ev.error}<br>`;
+                    } else if (ev.done !== undefined) {
+                        bar.style.width = '100%';
+                        bar.classList.remove('progress-bar-animated');
+                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        btn.disabled = false;
+                        if (allStopBtn) allStopBtn.style.display = 'none';
+                        status.textContent = '';
+                        pct_el.textContent = '100%';
+                        isHeavyVectorizing = false;
+                        updateStats(); allDocs = [];
+                    } else if (ev.error !== undefined) {
+                        log.innerHTML += `<br><span style="color:red;">❌ Błąd: ${ev.error}</span>`;
+                        btn.disabled = false;
+                        if (allStopBtn) allStopBtn.style.display = 'none';
+                        isHeavyVectorizing = false;
+                    }
+                } catch(e) {}
+            }
+        }
+    })
+    .catch(err => {
+        log.innerHTML += `<br><span style="color:red;">❌ Błąd sieci: ${err}</span>`;
+        btn.disabled = false;
+        isHeavyVectorizing = false;
+    });
+}
+
+window.onload = function() {
+    updateStats();
+    sqlLoadSavedConn();
+    // Sugestie ładuj z opóźnieniem — nie blokuj strony przy starcie
+    setTimeout(() => loadSuggestions(false), 2000);
+};
 </script>
 </body>
 </html>

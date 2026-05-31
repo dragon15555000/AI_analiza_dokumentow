@@ -7,9 +7,16 @@ import re
 import os
 import hashlib
 import time
+import sqlite3
+import threading
+import subprocess
+import platform
 from pathlib import Path
+from collections import defaultdict
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
+import logging
+import requests   # ← dodane dla lepszej obsługi rozłączeń klienta w streamach SSE
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -29,28 +36,121 @@ try: import pdfplumber
 except ImportError: pdfplumber = None
 try: import openpyxl
 except ImportError: openpyxl = None
+try: import pytesseract
+except ImportError: pytesseract = None
+try: from pdf2image import convert_from_path
+except ImportError: convert_from_path = None
 
 app = Flask(__name__)
+
+# === Podstawowe logowanie ===
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("ai_analiza")
+
+# === Walidacja wymaganych zmiennych środowiskowych ===
+required_env = ["QDRANT_URL", "QDRANT_KEY"]
+missing = [key for key in required_env if not os.environ.get(key)]
+if missing:
+    logger.critical(f"Brak wymaganych zmiennych środowiskowych: {missing}")
+    logger.critical("Upewnij się, że plik .env istnieje i zawiera poprawne wartości.")
+    raise RuntimeError(f"Brakujące zmienne środowiskowe: {missing}")
 
 QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
+SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
+
+# ---- Qdrant Client (reuse connection) ----
+_qdrant_client = None
+_qdrant_lock = threading.Lock()
+
+def get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    with _qdrant_lock:
+        if _qdrant_client is None:
+            _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY, timeout=30.0)
+        return _qdrant_client
+
+# ---- Cache (dokumenty i sugestie) ----
+_docs_cache = {"data": None, "ts": 0}
+DOCS_CACHE_TTL = 300  # 5 minut
+_suggestions_cache = {"data": None, "ts": 0}
+SUGGESTIONS_TTL = 1800  # 30 minut
+
+# ---- Cache embeddingów (SQLite) ----
+_CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
+
+def _init_embed_cache():
+    """Inicjalizuje tabelę w bazie SQLite, jeśli nie istnieje."""
+    try:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vector TEXT)")
+        # Policz istniejące wpisy
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
+            count = cursor.fetchone()[0]
+        logger.info(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
+    except Exception as e:
+        logger.warning(f"Błąd inicjalizacji cache embeddingów: {e}")
+
+_init_embed_cache()
 
 def get_embedding(text: str) -> list:
+    import hashlib as _hl
+    key = _hl.sha256(text[:1500].encode('utf-8', errors='replace')).hexdigest()
+
+    # 1. Sprawdzaj, czy wektor jest w bazie
+    try:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+            cursor = conn.execute("SELECT vector FROM embeddings WHERE hash = ?", (key,))
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row[0])
+    except Exception as e:
+        logger.warning(f"Błąd odczytu cache embeddingów: {e}")
+
+    # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
     url = OLLAMA_URL + "/api/embeddings"
     payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
-    try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode("utf-8"))["embedding"]
-    except Exception as e:
-        print(f"⚠️ Ollama Embedding Error: {e}")
-        return [0.0] * 768
 
-def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
-    """Batch embeddings — wysyła kilka tekstów równolegle, ~5x szybszy import."""
+    for attempt in range(4):  # max 4 próby
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=45) as r:
+                vec = json.loads(r.read().decode("utf-8"))["embedding"]
+
+            # 3. Zapisz nowy wektor natychmiast do bazy SQLite
+            try:
+                with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+                    conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
+                                 (key, json.dumps(vec)))
+            except Exception as e:
+                logger.warning(f"Błąd zapisu cache embeddingów: {e}")
+
+            return vec
+
+        except Exception as e:
+            if "Connection reset by peer" in str(e) or "104" in str(e):
+                wait = (2 ** attempt) * 0.4   # 0.4s, 0.8s, 1.6s, 3.2s
+                logger.warning(f"Ollama embedding reset (próba {attempt+1}/4) — czekam {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            else:
+                logger.error(f"Ollama Embedding Error: {e}")
+                return [0.0] * 768
+
+    logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
+    return [0.0] * 768
+
+def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
+    """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results = [None] * len(texts)
 
@@ -65,7 +165,7 @@ def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
                 idx, vec = fut.result()
                 results[idx] = vec
             except Exception as e:
-                print(f"⚠️ Batch embedding error: {e}")
+                logger.error(f"Batch embedding error: {e}")
                 results[futures[fut]] = [0.0] * 768
 
     return results
@@ -98,7 +198,7 @@ SEARCH_MODES = {
             "Jesteś prawnikiem specjalizującym się w prawie zamówień publicznych i spółkach komunalnych. "
             "Identyfikuj każde odwołanie do ustaw, rozporządzeń i przepisów w dokumentach. "
             "Dla każdego przepisu oceń: (1) czy jest aktualny na dzień dokumentu, "
-            "(2) czy rzeczywiście dotyczy przedmiotu analizowanych dokumentów, "
+            "(2) czy rzeczywiście dotyczy tej organizacji / branży i kontekstu sprawy, "
             "(3) czy jest zastosowany prawidłowo w kontekście. "
             "Flaguj błędy: [PRZEPIS NIEAKTUALNY], [PRZEPIS NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE], [PRZEPIS NIEZGODNY]. "
             "Odpowiadaj wyłącznie po polsku."
@@ -134,13 +234,18 @@ def generate_answer(query: str, contexts: list, mode: str = "normal") -> str:
     context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text'][:1400]}" for c in contexts])
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
-    payload = {"model": "llama3", "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
+    payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
+
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=240) as r:
             return json.loads(r.read().decode("utf-8"))["response"]
+    except urllib.error.URLError as e:
+        logger.error(f"LLM connection error (generate_answer): {e}")
+        return "Błąd połączenia z modelem językowym (Ollama)."
     except Exception as e:
+        logger.error(f"LLM error in generate_answer: {e}")
         return f"Błąd syntezy LLM: {e}"
 
 def verify_answer(answer: str, contexts: list, query: str) -> dict:
@@ -167,7 +272,7 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
         "UZASADNIENIE: <jedno zdanie>\n\n"
         "Weryfikacja:"
     )
-    payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+    payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
@@ -187,6 +292,8 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
         confirmed = raw.count("✓")
         partial    = raw.count("⚠")
         hallucin   = raw.count("✗")
+        total = confirmed + partial + hallucin
+        confidence_pct = round(confirmed / total * 100) if total > 0 else None
 
         return {
             "success": True,
@@ -195,9 +302,14 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
             "justification": justification,
             "confirmed": confirmed,
             "partial": partial,
-            "hallucinations": hallucin
+            "hallucinations": hallucin,
+            "confidence_pct": confidence_pct
         }
+    except urllib.error.URLError as e:
+        logger.error(f"LLM connection error (verify_answer): {e}")
+        return {"success": False, "error": "Błąd połączenia z weryfikatorem (Ollama)."}
     except Exception as e:
+        logger.error(f"LLM error in verify_answer: {e}")
         return {"success": False, "error": str(e)}
 
 @app.route('/verify', methods=['POST'])
@@ -322,7 +434,7 @@ def _extract_xls(file_path: Path) -> str:
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
     except Exception as e:
-        print(f"⚠️ Błąd parsowania .xls {file_path.name}: {e}")
+        logger.warning(f"Błąd parsowania .xls {file_path.name}: {e}")
         return ""
 
 def _extract_excel(file_path: Path) -> str:
@@ -447,6 +559,90 @@ def _extract_excel(file_path: Path) -> str:
         try: wb_form.close()
         except Exception: pass
 
+
+def extract_file_metadata(f_path: Path) -> dict:
+    """Zbiera bogate metadane pliku (systemowe + formatowe) do celów śledczych."""
+    meta = {
+        "file_name": f_path.name,
+        "full_path": str(f_path),
+        "size_bytes": None,
+        "size_human": None,
+        "created": None,
+        "modified": None,
+        "accessed": None,
+        "file_type": f_path.suffix.lower().lstrip('.'),
+        "embedded": {}
+    }
+
+    try:
+        stat = f_path.stat()
+        meta["size_bytes"] = stat.st_size
+        meta["size_human"] = f"{stat.st_size / 1024:.1f} KB" if stat.st_size < 10*1024*1024 else f"{stat.st_size / (1024*1024):.2f} MB"
+
+        # Czas modyfikacji jest wiarygodny wszędzie
+        meta["modified"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+
+        # Czas dostępu
+        if hasattr(stat, "st_atime"):
+            meta["accessed"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_atime))
+
+        # Czas utworzenia — Windows ma st_ctime jako creation time, Unix ma jako change time
+        if os.name == 'nt' and hasattr(stat, "st_ctime"):
+            meta["created"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_ctime))
+        else:
+            # Na Linux/WSL często nie mamy wiarygodnego created time z filesystemu
+            meta["created"] = None
+
+    except Exception as e:
+        logger.warning(f"Błąd pobierania stat dla {f_path.name}: {e}")
+
+    # === Metadane wbudowane w pliki ===
+    ext = f_path.suffix.lower()
+
+    # PDF
+    if ext == '.pdf' and pdfplumber:
+        try:
+            with pdfplumber.open(f_path) as pdf:
+                if pdf.metadata:
+                    meta["embedded"]["pdf"] = {k: str(v) for k, v in pdf.metadata.items() if v}
+        except Exception:
+            pass
+
+    # DOCX
+    if ext == '.docx' and docx:
+        try:
+            d = docx.Document(f_path)
+            core_props = d.core_properties
+            embedded = {}
+            if core_props.author: embedded["author"] = core_props.author
+            if core_props.title: embedded["title"] = core_props.title
+            if core_props.last_modified_by: embedded["last_modified_by"] = core_props.last_modified_by
+            if core_props.created: embedded["created"] = str(core_props.created)
+            if core_props.modified: embedded["modified"] = str(core_props.modified)
+            if embedded:
+                meta["embedded"]["docx"] = embedded
+        except Exception:
+            pass
+
+    # XLSX / XLS
+    if ext in ['.xlsx', '.xls'] and openpyxl:
+        try:
+            wb = openpyxl.load_workbook(f_path, data_only=True)
+            props = wb.properties
+            embedded = {}
+            if props.creator: embedded["author"] = props.creator
+            if props.title: embedded["title"] = props.title
+            if props.lastModifiedBy: embedded["last_modified_by"] = props.lastModifiedBy
+            if props.created: embedded["created"] = str(props.created)
+            if props.modified: embedded["modified"] = str(props.modified)
+            if embedded:
+                meta["embedded"]["excel"] = embedded
+            wb.close()
+        except Exception:
+            pass
+
+    return meta
+
     return "\n\n".join(parts)
 
 def extract_text(file_path: Path) -> str:
@@ -460,16 +656,64 @@ def extract_text(file_path: Path) -> str:
                 return json.dumps(json.load(f), indent=2, ensure_ascii=False)
         elif ext == '.docx' and docx:
             return "\n".join([p.text for p in docx.Document(file_path).paragraphs])
-        elif ext == '.pdf' and pdfplumber:
-            with pdfplumber.open(file_path) as pdf:
-                return "\n".join([page.extract_text() or "" for page in pdf.pages])
+        
+        elif ext == '.pdf':
+            text = ""
+            # Próba 1: Zwykłe wyciągnięcie tekstu cyfrowego
+            if pdfplumber:
+                with pdfplumber.open(file_path) as pdf:
+                    text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+            
+            # Próba 2 (Fallback OCR): Jeżeli plik to skan (brak tekstu), uruchom Tesseract
+            if len(text.strip()) < 20 and pytesseract and convert_from_path:
+                logger.info(f"[OCR] Analiza wizualna pliku: {file_path.name}...")
+                try:
+                    pages = convert_from_path(file_path, dpi=200)
+                    ocr_text = []
+                    for page_img in pages:
+                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        ocr_text.append(page_text)
+                    text = "\n\n".join(ocr_text)
+                    logger.info(f"[OCR] Zakończono dla: {file_path.name} (Pobrano znaków: {len(text)})")
+                except Exception as ocr_err:
+                    logger.warning(f"Błąd OCR dla pliku {file_path.name}: {ocr_err}")
+            
+            return text
+
+        # Obsługa obrazów bezpośrednio (jpg, png, tiff itp.) przez OCR
+        elif ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'] and pytesseract:
+            if convert_from_path:
+                # pdf2image może obsłużyć niektóre obrazy, ale dla pewności używamy PIL jeśli dostępna
+                try:
+                    from PIL import Image
+                    img = Image.open(file_path)
+                    text = pytesseract.image_to_string(img, lang='pol')
+                    logger.info(f"[OCR] Przetworzono obraz: {file_path.name}")
+                    return text
+                except ImportError:
+                    pass  # fallback poniżej
+            # Fallback - spróbuj przez pdf2image jeśli PIL nie ma
+            if convert_from_path:
+                try:
+                    pages = convert_from_path(file_path, dpi=200)
+                    ocr_text = []
+                    for page_img in pages:
+                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        ocr_text.append(page_text)
+                    text = "\n\n".join(ocr_text)
+                    logger.info(f"[OCR] Przetworzono obraz przez pdf2image: {file_path.name}")
+                    return text
+                except Exception as ocr_err:
+                    logger.warning(f"Błąd OCR obrazu {file_path.name}: {ocr_err}")
+            return ""
+
         elif ext in ['.xlsx', '.xls'] and openpyxl:
             return _extract_excel(file_path)
         elif ext == '.csv':
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read()
     except Exception as e:
-        print(f"⚠️ Błąd parsowania pliku {file_path.name}: {e}")
+        logger.warning(f"Błąd parsowania pliku {file_path.name}: {e}")
     return ""
 
 @app.route('/')
@@ -479,11 +723,11 @@ def index():
 @app.route('/stats', methods=['GET'])
 def get_stats():
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         info = client.get_collection(collection_name=ACTIVE_COLLECTION)
         return jsonify({
             "success": True,
-            "vectors_count": info.vectors_count,
+            "vectors_count": getattr(info, 'vectors_count', None) or info.points_count,
             "points_count": info.points_count,
             "status": info.status,
             "active_collection": ACTIVE_COLLECTION
@@ -495,7 +739,7 @@ def get_stats():
 def stats_storage():
     global ACTIVE_COLLECTION
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         cols = client.get_collections().collections
         result = []
         total_vectors = 0
@@ -542,7 +786,7 @@ def stats_storage():
 
 @app.route('/collections/create', methods=['POST'])
 def create_collection():
-    global ACTIVE_COLLECTION
+    global ACTIVE_COLLECTION, _qdrant_client
     data = request.get_json()
     name     = data.get('name', '').strip().replace(' ', '_')
     vec_size = int(data.get('vector_size', 768))
@@ -559,7 +803,7 @@ def create_collection():
         dist_map = {"Cosine": Distance.COSINE, "Euclid": Distance.EUCLID, "Dot": Distance.DOT}
         dist = dist_map.get(distance, Distance.COSINE)
 
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         if client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' już istnieje"})
 
@@ -567,7 +811,8 @@ def create_collection():
 
         if switch:
             ACTIVE_COLLECTION = name
-            _suggestions_cache["data"] = None
+            _qdrant_client = None  # Reset połączenia po zmianie kolekcji
+            _suggestions_cache["data"] = None; _docs_cache["data"] = None
 
         return jsonify({"success": True, "name": name, "switched": switch, "active": ACTIVE_COLLECTION})
     except Exception as e:
@@ -575,24 +820,25 @@ def create_collection():
 
 @app.route('/collections/switch', methods=['POST'])
 def switch_collection():
-    global ACTIVE_COLLECTION
+    global ACTIVE_COLLECTION, _qdrant_client
     data = request.get_json()
     name = data.get('name', '').strip()
     if not name:
         return jsonify({"success": False, "error": "Brak nazwy"})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         if not client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' nie istnieje"})
         ACTIVE_COLLECTION = name
-        _suggestions_cache["data"] = None
+        _qdrant_client = None  # Reset połączenia po zmianie kolekcji
+        _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "active_collection": ACTIVE_COLLECTION})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 @app.route('/collections/delete', methods=['POST'])
 def delete_collection():
-    global ACTIVE_COLLECTION
+    global ACTIVE_COLLECTION, _qdrant_client
     data = request.get_json()
     name = data.get('name', '').strip()
     if not name:
@@ -600,8 +846,9 @@ def delete_collection():
     if name == ACTIVE_COLLECTION:
         return jsonify({"success": False, "error": "Nie można usunąć aktywnej kolekcji. Najpierw przełącz się na inną."})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         client.delete_collection(name)
+        _qdrant_client = None  # Reset połączenia po usunięciu kolekcji
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -609,26 +856,148 @@ def delete_collection():
 @app.route('/browse', methods=['GET'])
 def browse():
     raw = request.args.get('path', '/mnt').strip()
+    show_all = request.args.get('all', '0') == '1'   # ?all=1 → pokaż wszystkie pliki (nie tylko dokumenty)
     p = Path(raw)
+
     if not p.exists() or not p.is_dir():
         parent = p.parent
         if parent.exists() and parent.is_dir():
             p = parent
         else:
             p = Path('/mnt')
+
     try:
         entries = []
+        total_children = 0
+        permission_denied = 0
+
         for child in sorted(p.iterdir()):
+            total_children += 1
             try:
                 if child.is_dir():
                     entries.append({"name": child.name, "path": str(child), "type": "dir"})
-                elif child.suffix.lower() in ['.docx','.pdf','.xlsx','.xls','.csv','.md','.json','.txt']:
-                    entries.append({"name": child.name, "path": str(child), "type": "file"})
+                else:
+                    ext = child.suffix.lower().lstrip('.')
+                    is_doc = ext in ['docx','pdf','xlsx','xls','csv','md','json','txt']
+                    if show_all or is_doc:
+                        entries.append({
+                            "name": child.name,
+                            "path": str(child),
+                            "type": "file",
+                            "ext": ext
+                        })
             except PermissionError:
+                permission_denied += 1
                 pass
-        return jsonify({"success": True, "current": str(p), "parent": str(p.parent) if p != p.parent else None, "entries": entries})
+
+        # Lepsza diagnostyka dla pustych / problematycznych dysków (np. /mnt/g w WSL)
+        is_empty = (total_children == 0) or (len(entries) == 0 and permission_denied == 0)
+        has_hidden_or_other = (total_children > 0) and (len(entries) == 0) and (permission_denied == 0)
+
+        return jsonify({
+            "success": True,
+            "current": str(p),
+            "parent": str(p.parent) if p != p.parent else None,
+            "entries": entries,
+            "is_empty": is_empty,
+            "total_children": total_children,
+            "permission_denied": permission_denied,
+            "has_unlisted_items": has_hidden_or_other or permission_denied > 0,
+            "show_all": show_all
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
+# AUTOMATYCZNE MAPOWANIE DYSKÓW LOKALNYCH (dla zakładki Import)
+# ============================================================
+
+def _discover_local_drives():
+    """Zwraca listę sensownych punktów startowych (dysków/mountów) bez dodatkowych zależności."""
+    import string
+    drives = []
+    sysname = platform.system()
+    home = str(Path.home())
+
+    try:
+        if sysname == "Windows":
+            for letter in string.ascii_uppercase:
+                p = Path(f"{letter}:\\")
+                if p.exists():
+                    drives.append({
+                        "path": str(p),
+                        "label": f"{letter}:",
+                        "kind": "drive",
+                        "icon": "💾"
+                    })
+        else:
+            # Linux / WSL / macOS
+            candidates = ['/', home, '/mnt', '/media', '/data']
+            for c in candidates:
+                pp = Path(c)
+                if pp.exists() and pp.is_dir():
+                    label = "🏠 Home" if c == home else c
+                    drives.append({"path": str(pp), "label": label, "kind": "dir", "icon": "📁" if c != home else "🏠"})
+
+            # WSL — dyski Windows widoczne jako /mnt/c, /mnt/d itd.
+            mnt = Path("/mnt")
+            if mnt.exists():
+                for child in sorted(mnt.iterdir()):
+                    if child.is_dir() and len(child.name) == 1:
+                        letter = child.name.upper()
+                        drives.append({
+                            "path": str(child),
+                            "label": f"{letter}: (Windows)",
+                            "kind": "wsl",
+                            "icon": "🪟"
+                        })
+
+            # Spróbuj wyciągnąć prawdziwe montowania z /proc/mounts (najlepszy wysiłek)
+            try:
+                with open("/proc/mounts") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) < 3:
+                            continue
+                        dev, mp, fstype = parts[0], parts[1], parts[2]
+                        # Tylko sensowne systemy plików dyskowych
+                        if fstype in ("ext4", "ext3", "xfs", "btrfs", "ntfs", "fuseblk", "vfat") and \
+                           mp not in ("/", "/boot", "/boot/efi", "/proc", "/sys", "/dev", "/run"):
+                            if len(mp) <= 24 and not any(x in mp for x in ("/snap/", "/docker/", "/tmp/")):
+                                if not any(d["path"] == mp for d in drives):
+                                    drives.append({"path": mp, "label": mp, "kind": "mount", "icon": "💿"})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Zawsze dodaj Home jeśli nie ma
+    if not any(d["path"] == home for d in drives):
+        drives.insert(0, {"path": home, "label": "🏠 Home", "kind": "dir", "icon": "🏠"})
+
+    # Deduplikacja + limit
+    seen = set()
+    out = []
+    for d in drives:
+        if d["path"] not in seen:
+            seen.add(d["path"])
+            out.append(d)
+    return out[:14]
+
+
+@app.route('/api/drives')
+def api_drives():
+    try:
+        drives = _discover_local_drives()
+        return jsonify({
+            "success": True,
+            "platform": platform.system(),
+            "drives": drives
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 
 @app.route('/import/stream')
 def import_stream():
@@ -656,7 +1025,7 @@ def import_stream():
 
         yield sse("start", {"total": len(files)})
 
-        qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        qdrant = get_qdrant_client()
         imported = 0
         skipped = 0
         total_chunks = 0
@@ -693,9 +1062,19 @@ def import_stream():
                     batch_texts  = [item[1] for item in batch_items]
                     batch_ids    = [item[0] for item in batch_items]
                     vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                    file_meta = extract_file_metadata(f_path)
+
                     points  = [
-                        PointStruct(id=cid, vector=vec,
-                                    payload={"file": f_path.name, "text": txt, "full_path": str(f_path)})
+                        PointStruct(
+                            id=cid,
+                            vector=vec,
+                            payload={
+                                "file": f_path.name,
+                                "text": txt,
+                                "full_path": str(f_path),
+                                "metadata": file_meta
+                            }
+                        )
                         for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
                         if vec and any(v != 0.0 for v in vec)
                     ]
@@ -731,16 +1110,18 @@ def import_stream():
 @app.route('/collection/clear', methods=['POST'])
 def clear_collection():
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         info = client.get_collection(ACTIVE_COLLECTION)
         count_before = info.points_count
+        # Pobierz aktualny wymiar wektora zanim usuniesz kolekcję
+        vsize = info.config.params.vectors.size if info.config.params.vectors else 768
         from qdrant_client.models import VectorParams, Distance
         client.delete_collection(ACTIVE_COLLECTION)
         client.create_collection(
             ACTIVE_COLLECTION,
-            vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            vectors_config=VectorParams(size=vsize, distance=Distance.COSINE)
         )
-        _suggestions_cache["data"] = None
+        _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "deleted": count_before})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -751,10 +1132,9 @@ def import_folder():
     return jsonify({"success": False, "error": "Użyj /import/stream (SSE)"})
 
 def wsl_to_win(path: str) -> str:
-    """Konwertuje sciezke WSL /mnt/g/... na Windows G:\\..."""
+    """Konwertuje ścieżkę WSL /mnt/g/... na Windows G:\\..."""
     if not path:
         return ""
-    import re
     m = re.match(r'^/mnt/([a-zA-Z])/(.*)', path)
     if m:
         drive = m.group(1).upper()
@@ -762,20 +1142,214 @@ def wsl_to_win(path: str) -> str:
         return f"{drive}:\\{rest}"
     return path
 
+
+def open_file_safely(win_path: str) -> bool:
+    """
+    Bezpiecznie otwiera plik za pomocą domyślnej aplikacji systemowej.
+    Unika shell injection (w przeciwieństwie do poprzedniego os.popen).
+    """
+    if not win_path:
+        return False
+
+    try:
+        if platform.system() == "Windows":
+            # Najbezpieczniejsza metoda na Windows
+            os.startfile(win_path)
+            logger.info(f"Otwarto plik: {win_path}")
+            return True
+        else:
+            # Fallback dla Linux/macOS (przydatne przy testach z WSL)
+            subprocess.run(["xdg-open", win_path], check=False)
+            logger.info(f"Otwarto plik (xdg-open): {win_path}")
+            return True
+    except Exception as e:
+        logger.warning(f"Nie udało się otworzyć pliku '{win_path}': {e}")
+        return False
+
 @app.route('/file/open', methods=['POST'])
 def file_open():
     data = request.get_json()
     wsl_path = data.get('path', '').strip()
     if not wsl_path:
         return jsonify({"success": False, "error": "Brak ścieżki"})
+
     win_path = wsl_to_win(wsl_path)
     if not win_path:
         return jsonify({"success": False, "error": "Nie można skonwertować ścieżki"})
-    try:
-        os.popen(f'cmd.exe /c start "" "{win_path}"')
+
+    success = open_file_safely(win_path)
+
+    if success:
         return jsonify({"success": True, "win_path": win_path})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    else:
+        return jsonify({"success": False, "error": "Nie udało się otworzyć pliku"})
+
+@app.route('/hybrid/stream', methods=['POST'])
+def hybrid_stream():
+    """Wyszukiwanie hybrydowe: RAG + SQL równolegle — SSE."""
+    data       = request.get_json()
+    query_text = data.get('query', '').strip()
+    conn_cfg   = data.get('conn', {})
+    schema_str = data.get('schema', '')
+    limit      = min(int(data.get('limit', 5)), 20)
+    mode       = data.get('mode', 'normal')
+    file_filter= data.get('file_filter', None)
+
+    if not query_text:
+        return jsonify({"success": False, "error": "Zapytanie puste"}), 400
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+
+        try:
+            # 1. RAG — Qdrant query
+            client = get_qdrant_client()
+            vector = get_embedding(query_text)
+
+            if file_filter:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
+                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
+                                          limit=limit, query_filter=qfilter)
+            else:
+                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
+
+            rag_contexts = []
+            rag_results = []
+            for point in res.points:
+                p = point.payload
+                rag_contexts.append({"file": p.get("file",""), "text": p.get("text","")})
+                rag_results.append({
+                    "file": p.get("file","Nieznany"),
+                    "score": f"{point.score:.4f}",
+                    "text": highlight_backend(p.get("text",""), query_text),
+                    "full_path": p.get("full_path",""),
+                    "win_path": wsl_to_win(p.get("full_path",""))
+                })
+
+            yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
+
+            # 2. SQL — jeśli konfiguracja dostępna
+            sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
+            sql_query = ""
+
+            if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
+                try:
+                    system_sql = (
+                        "Jesteś ekspertem T-SQL (MS SQL Server). "
+                        "Na podstawie schematu bazy generujesz zapytania SELECT. "
+                        "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+                    )
+                    prompt_sql = (
+                        f"SCHEMAT BAZY:\n{schema_str}\n\n"
+                        f"PYTANIE: {query_text}\n\n"
+                        "Wygeneruj SELECT:"
+                    )
+                    payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
+                               "stream": False, "options": {"num_ctx": 4096}}
+                    req = urllib.request.Request(
+                        OLLAMA_URL + "/api/generate",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}, method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=90) as r:
+                        sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+
+                    sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+                    sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+
+                    first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+                    if first_word not in ("SELECT", "WITH"):
+                        sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
+                    else:
+                        conn = _get_sql_conn(conn_cfg)
+                        cur  = conn.cursor(as_dict=True)
+                        cur.execute(sql_query)
+                        rows = cur.fetchmany(200)
+                        cols = list(rows[0].keys()) if rows else []
+
+                        result_rows = []
+                        for row in rows:
+                            result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+
+                        sql_data = {
+                            "success": True,
+                            "table": "wynik SQL",
+                            "columns": cols,
+                            "rows": result_rows,
+                            "sql": sql_query[:120],
+                            "total": len(result_rows)
+                        }
+                        conn.close()
+
+                except Exception as e:
+                    sql_data["error"] = str(e)[:100]
+
+            yield sse("sql_results", {"sql_results": sql_data})
+
+            # 3. LLM synteza — łączy RAG + SQL
+            if not rag_contexts:
+                yield sse("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
+                return
+
+            cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
+
+            # Buduj prompt syntezy
+            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in rag_contexts[:5]])
+            sql_preview = ""
+            if sql_data.get("success") and sql_data.get("rows"):
+                rows_str = "\n".join([
+                    " | ".join([f"{k}={v}" for k, v in zip(sql_data["columns"],
+                             [r.get(col, "") for col in sql_data["columns"]])])
+                    for r in sql_data["rows"][:10]
+                ])
+                sql_preview = f"\nDANE Z BAZY (tabela SQL):\n{rows_str}"
+
+            prompt = (
+                f"DOKUMENTY:\n{rag_preview}"
+                f"{sql_preview}\n\n"
+                f"PYTANIE: {query_text}\n\n"
+                f"{cfg['prompt_suffix']}\n"
+                "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski."
+            )
+            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
+                       "stream": True, "options": {"num_ctx": 8192}}
+
+            # Używamy requests zamiast urllib — lepiej wykrywa rozłączenie klienta (przeglądarka)
+            full_answer = ""
+            try:
+                with requests.post(
+                    OLLAMA_URL + "/api/generate",
+                    json=payload,
+                    stream=True,
+                    timeout=240
+                ) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk_data = json.loads(line)
+                            token = chunk_data.get("response", "")
+                            if token:
+                                full_answer += token
+                                yield sse("token", {"token": token})
+                            if chunk_data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"LLM stream przerwany (klient rozłączony lub błąd): {e}")
+                yield sse("error", {"error": "Połączenie z modelem zostało przerwane."})
+
+            yield sse("done", {"ai_answer": full_answer})
+
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.route('/search/stream', methods=['POST'])
 def search_stream():
@@ -795,7 +1369,7 @@ def search_stream():
             return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
 
         try:
-            client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+            client = get_qdrant_client()
             vector = get_embedding(query_text)
 
             if file_filter:
@@ -831,29 +1405,34 @@ def search_stream():
             cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
             context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1400]}" for c in raw_contexts])
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
-            payload = {"model": "llama3", "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
+            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
 
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
+            # requests zamiast urllib — lepsza obsługa rozłączenia klienta
             full_answer = ""
-            with urllib.request.urlopen(req, timeout=240) as r:
-                for line in r:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk_data = json.loads(line)
-                        token = chunk_data.get("response", "")
-                        if token:
-                            full_answer += token
-                            yield sse("token", {"token": token})
-                        if chunk_data.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                with requests.post(
+                    OLLAMA_URL + "/api/generate",
+                    json=payload,
+                    stream=True,
+                    timeout=240
+                ) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk_data = json.loads(line)
+                            token = chunk_data.get("response", "")
+                            if token:
+                                full_answer += token
+                                yield sse("token", {"token": token})
+                            if chunk_data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"LLM stream przerwany w search_stream: {e}")
+                yield sse("error", {"error": "Połączenie z modelem zostało przerwane."})
 
             yield sse("done", {"ai_answer": full_answer})
 
@@ -875,7 +1454,7 @@ def search():
         mode = 'normal'
 
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         vector = get_embedding(query_text)
 
         if file_filter:
@@ -915,9 +1494,6 @@ def search():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
-_suggestions_cache = {"data": None, "ts": 0}
-SUGGESTIONS_TTL = 1800  # 30 minut
-
 @app.route('/suggestions', methods=['GET'])
 def get_suggestions():
     force = request.args.get('force', '0') == '1'
@@ -925,7 +1501,7 @@ def get_suggestions():
     if not force and _suggestions_cache["data"] and (now - _suggestions_cache["ts"]) < SUGGESTIONS_TTL:
         return jsonify({"success": True, "suggestions": _suggestions_cache["data"], "cached": True})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         # Losowa próbka: pobierz ~300 chunków, wybierz 25 z różnych plików
         records, _ = client.scroll(
             collection_name=ACTIVE_COLLECTION,
@@ -956,14 +1532,14 @@ def get_suggestions():
             f"DOKUMENTY:\n{context}"
         )
         url = OLLAMA_URL + "/api/generate"
-        payload = {"model": "llama3", "prompt": prompt, "stream": False,
+        payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False,
                    "system": "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań.",
                    "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
             url, data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST"
         )
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:
             raw = json.loads(r.read().decode("utf-8"))["response"]
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]
@@ -1003,7 +1579,7 @@ def _is_noise(fname: str) -> str:
 @app.route('/documents/scan-noise', methods=['GET'])
 def scan_noise():
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         file_chunks = {}
         offset = None
         while True:
@@ -1036,42 +1612,38 @@ def delete_documents():
     if not files_to_delete:
         return jsonify({"success": False, "error": "Brak listy plików"})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
-        files_set = set(files_to_delete)
-        ids_to_delete = []
-        offset = None
-        while True:
-            records, offset = client.scroll(
-                collection_name=ACTIVE_COLLECTION, limit=250, offset=offset,
-                with_payload=["file"], with_vectors=False
+        from qdrant_client.models import Filter, FieldCondition, MatchAny
+        client = get_qdrant_client()
+        # Skasuj wszystkie punkty gdzie payload.file znajduje się na liście do usunięcia
+        client.delete(
+            collection_name=ACTIVE_COLLECTION,
+            points_selector=Filter(
+                must=[FieldCondition(key="file", match=MatchAny(any=files_to_delete))]
             )
-            for r in records:
-                if r.payload.get("file") in files_set:
-                    ids_to_delete.append(r.id)
-            if offset is None:
-                break
-
-        for i in range(0, len(ids_to_delete), 100):
-            client.delete(collection_name=ACTIVE_COLLECTION,
-                          points_selector=ids_to_delete[i:i+100])
-        _suggestions_cache["data"] = None
-        return jsonify({"success": True, "deleted_chunks": len(ids_to_delete)})
+        )
+        _suggestions_cache["data"] = None; _docs_cache["data"] = None
+        return jsonify({"success": True, "files_count": len(files_to_delete)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 @app.route('/documents', methods=['GET'])
 def get_documents():
+    force = request.args.get('force', '0') == '1'
+    now = time.time()
+    if not force and _docs_cache["data"] and (now - _docs_cache["ts"]) < DOCS_CACHE_TTL:
+        return jsonify({"success": True, "documents": _docs_cache["data"],
+                        "total": len(_docs_cache["data"]), "cached": True})
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         file_chunks = {}
-        file_paths  = {}   # fname → full_path (pierwsza znaleziona)
+        file_paths  = {}
+        file_meta   = {}
         offset = None
         while True:
             records, offset = client.scroll(
                 collection_name=ACTIVE_COLLECTION,
-                limit=250,
-                offset=offset,
-                with_payload=["file", "full_path"],
+                limit=250, offset=offset,
+                with_payload=["file", "full_path", "metadata"],
                 with_vectors=False
             )
             for r in records:
@@ -1080,16 +1652,114 @@ def get_documents():
                     file_chunks[fname] = file_chunks.get(fname, 0) + 1
                     if fname not in file_paths and r.payload.get("full_path"):
                         file_paths[fname] = r.payload["full_path"]
+                    if fname not in file_meta and r.payload.get("metadata"):
+                        file_meta[fname] = r.payload["metadata"]
             if offset is None:
                 break
         docs = sorted(
-            [{"file": f, "chunks": c, "full_path": file_paths.get(f, "")}
+            [{
+                "file": f,
+                "chunks": c,
+                "full_path": file_paths.get(f, ""),
+                "metadata": file_meta.get(f)
+            }
              for f, c in file_chunks.items()],
             key=lambda x: -x["chunks"]
         )
-        return jsonify({"success": True, "documents": docs, "total": len(docs)})
+        _docs_cache["data"] = docs
+        _docs_cache["ts"]   = now
+        return jsonify({"success": True, "documents": docs, "total": len(docs), "cached": False})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/export/metadata_report', methods=['POST'])
+def export_metadata_report_docx():
+    """Generuje raport DOCX z metadanymi wybranych dokumentów (dla śledczych)."""
+    data = request.get_json() or {}
+    selected = data.get('files', [])  # lista obiektów z file, full_path, metadata
+
+    if not selected:
+        return jsonify({"success": False, "error": "Brak wybranych plików"}), 400
+
+    try:
+        import docx as _docx
+        from docx.shared import Pt, RGBColor, Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+
+        doc = _docx.Document()
+
+        style = doc.styles['Normal']
+        style.font.name = 'Calibri'
+        style.font.size = Pt(11)
+
+        # Nagłówek
+        h = doc.add_heading('Raport Metadanych Wybranych Dokumentów', 0)
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        doc.add_paragraph(f'Wygenerowano: {time.strftime("%d.%m.%Y %H:%M")}')
+        doc.add_paragraph(f'Liczba plików: {len(selected)}')
+        doc.add_paragraph()
+
+        # Podsumowanie
+        doc.add_heading('Podsumowanie', level=1)
+        doc.add_paragraph('Poniżej znajdują się metadane systemowe oraz wbudowane dla wybranych dokumentów. '
+                          'Dane pochodzą z oryginalnych plików w momencie importu.')
+
+        # Dla każdego pliku
+        for idx, f in enumerate(selected, 1):
+            doc.add_heading(f'{idx}. {f.get("file", "Nieznany plik")}', level=1)
+
+            meta = f.get('metadata') or {}
+
+            # Metadane systemowe
+            doc.add_heading('Metadane systemowe', level=2)
+            table = doc.add_table(rows=1, cols=2)
+            table.style = 'Table Grid'
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Pole'
+            hdr_cells[1].text = 'Wartość'
+
+            for key in ['size_human', 'created', 'modified', 'accessed']:
+                if meta.get(key):
+                    row_cells = table.add_row().cells
+                    row_cells[0].text = key.replace('_', ' ').title()
+                    row_cells[1].text = str(meta[key])
+
+            # Metadane wbudowane
+            if meta.get('embedded'):
+                doc.add_heading('Metadane wbudowane w plik', level=2)
+                for fmt, emb in meta['embedded'].items():
+                    p = doc.add_paragraph()
+                    p.add_run(f'{fmt.upper()}: ').bold = True
+                    p.add_run(str(emb))
+
+            # Pełna ścieżka
+            if meta.get('full_path'):
+                p = doc.add_paragraph()
+                p.add_run('Pełna ścieżka: ').bold = True
+                p.add_run(meta['full_path'])
+
+            doc.add_paragraph()  # odstęp
+
+        # Stopka
+        doc.add_paragraph('─' * 70)
+        p = doc.add_paragraph()
+        run = p.add_run('Wygenerowano przez AI Analiza Dokumentów | Narzędzie wspomagające analizę śledczą')
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0x6c, 0x75, 0x7d)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+
+        fname = f'raport_metadanych_{time.strftime("%Y%m%d_%H%M")}.docx'
+        return send_file(buf, as_attachment=True, download_name=fname,
+                         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/export/docx', methods=['POST'])
 def export_docx():
@@ -1155,7 +1825,7 @@ def export_docx():
 
         # Stopka
         doc.add_paragraph('─' * 60)
-        doc.add_paragraph('Wygenerowano przez RAG System | Llama3 + Qdrant Cloud').runs[0].font.size = Pt(8)
+        doc.add_paragraph('Wygenerowano przez AI Analiza Dokumentów | Llama3 + Qdrant Cloud').runs[0].font.size = Pt(8)
 
         buf = io.BytesIO()
         doc.save(buf)
@@ -1173,12 +1843,13 @@ def build_network():
     data    = request.get_json()
     query   = data.get('query', '').strip()
     limit   = min(int(data.get('limit', 10)), 20)
+    raw = ""
 
     if not query:
         return jsonify({"success": False, "error": "Brak zapytania"})
 
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
+        client = get_qdrant_client()
         vector = get_embedding(query)
         res    = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
 
@@ -1186,35 +1857,40 @@ def build_network():
         context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in contexts])
 
         system = (
-            "Jesteś ekspertem śledczym ds. wykrywania korupcji i powiązań finansowych. "
-            "Z dokumentów wyciągasz SIEĆ POWIĄZAŃ składającą się z węzłów i krawędzi. "
-            "\n\nTYPY WĘZŁÓW:"
-            "\n- osoba: imię i nazwisko (np. 'Jan Kowalski')"
-            "\n- firma: nazwa firmy lub instytucji (np. 'REFUNDA Sp. z o.o.', 'Przykład Sp. z o.o.')"
-            "\n- kwota: kwota pieniężna z kontekstem (np. '92 247 144 zł rekompensata')"
-            "\n- dokument: umowa, uchwała, przetarg, raport (np. 'Umowa nr 12/2023')"
-            "\n- inne: daty, adresy, inne ważne encje"
-            "\n\nTYPY RELACJI (label krawędzi) — bądź precyzyjny:"
-            "\n- przepływ finansowy: 'zapłacił Xzł', 'przelał Xzł', 'faktura Xzł'"
-            "\n- zatrudnienie: 'prezes', 'dyrektor', 'pracownik'"
-            "\n- własność/udziały: 'właściciel', 'udziałowiec', 'wspólnik'"
-            "\n- kontrakt: 'podpisał umowę', 'zlecił', 'wykonawca'"
-            "\n- decyzja: 'zatwierdził', 'podpisał', 'uchwalił', 'anulował'"
-            "\n- powiązanie osobiste: 'znajomy', 'rodzina', 'współpracownik'"
-            "\n- przetarg: 'wygrał przetarg', 'złożył ofertę', 'wykluczony'"
-            "\n\nZwróć WYŁĄCZNIE poprawny JSON (bez komentarzy, bez markdown):\n"
-            '{"nodes":[{"id":"unikalny_id","type":"osoba|firma|kwota|dokument|inne","label":"wyswietlana nazwa"}],'
-            '"edges":[{"source":"id_zrodla","target":"id_celu","label":"typ relacji"}]}'
-            "\n\nWAŻNE: id musi być unikalny i taki sam w nodes i edges. Bez polskich znaków w id."
+            "Jesteś ekspertem analityki śledczej. Twoim zadaniem jest wyciągnięcie jak najbogatszej sieci powiązań z dokumentów.\n\n"
+            "ZASADY BEZWZGLĘDNE:\n"
+            "1. Używaj WYŁĄCZNIE prawdziwych nazw, kwot, dat i faktów z dokumentów.\n"
+            "2. NIGDY nie używaj placeholderów typu 'nazwa', 'firma', 'X', 'osoba A'.\n"
+            "3. Każdy label musi być rzeczywistą wartością z tekstu.\n\n"
+            "FORMAT JSON (zwracaj tylko poprawny JSON):\n"
+            '{\n'
+            '  "nodes": [ {"id": "jan_kowalski", "type": "osoba", "label": "Jan Kowalski"}, ... ],\n'
+            '  "edges": [ {"source": "jan_kowalski", "target": "abc_spolka", "label": "prezes zarządu", "doc": "umowa_2023.pdf", "evidence": "Podpisał umowę 12.03.2023", "date": "2023-03-12", "strength": 3}, ... ]\n'
+            '}\n\n'
+            "Typy węzłów (type): osoba, firma, kwota, dokument, przetarg, umowa, inne\n\n"
+            "Bogate typy relacji (label krawędzi) — używaj precyzyjnych:\n"
+            "- prezes / członek zarządu / dyrektor\n"
+            "- podpisał umowę / aneks\n"
+            "- zapłacił / wystawił fakturę / otrzymał płatność\n"
+            "- wygrał przetarg / złożył ofertę\n"
+            "- zlecił / wykonał usługę\n"
+            "- jest właścicielem / beneficjentem\n"
+            "- zatwierdził / skontrolował\n\n"
+            "W polu 'evidence' wstaw krótki, dosłowny cytat z dokumentu.\n"
+            "Jeśli w tekście pojawia się data (nawet przybliżona) — dodaj ją w polu 'date' w formacie YYYY-MM-DD lub YYYY-MM.\n"
+            "W polu 'strength' (opcjonalnie 1-5) podaj jak silne jest to powiązanie na podstawie liczby i jakości dowodów w tym dokumencie.\n"
+            "Jeśli ta sama relacja pojawia się w wielu dokumentach — LLM może zwrócić kilka krawędzi; my je później zsumujemy.\n"
+            "Staraj się wyciągać jak najwięcej dat, ról, numerów dokumentów i konkretnych kwot.\n\n"
+            "id: snake_case, bez polskich znaków, max 40 znaków."
         )
         prompt = (
-            f"DOKUMENTY ŚLEDCZE:\n{context_str}\n\n"
-            f"ZAPYTANIE: {query}\n\n"
-            "Wyciągnij kompletną sieć powiązań: osoby, firmy, kwoty, przepływy finansowe, decyzje.\n"
-            "Skup się na: kto komu płacił, kto co podpisał, kto z kim jest powiązany.\n"
-            "Zwróć JSON:"
+            f"DOKUMENTY DO ANALIZY:\n{context_str}\n\n"
+            f"ZADANIE: {query}\n\n"
+            "Wyciągnij sieć powiązań używając PRAWDZIWYCH nazw, kwot i danych z powyższych dokumentów.\n"
+            "NIE używaj placeholderów. Każdy label = prawdziwa wartość z tekstu.\n"
+            "JSON:"
         )
-        payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
             OLLAMA_URL + "/api/generate",
             data=json.dumps(payload).encode("utf-8"),
@@ -1243,19 +1919,61 @@ def build_network():
                     "label": n.get("label", nid)[:40]
                 })
 
-        seen_edges = set()
-        clean_edges = []
+        # Agregacja powiązań — liczymy SIŁĘ POWIĄZANIA (ile dowodów na daną relację)
+        # Zamiast odrzucać duplikaty, grupujemy je i sumujemy
+        edge_groups = defaultdict(list)  # key=(src,tgt) -> lista krawędzi
+
         for e in graph.get("edges", []):
-            src = str(e.get("source","")).strip()
-            tgt = str(e.get("target","")).strip()
-            key = f"{src}|{tgt}"
-            if src and tgt and src in seen_nodes and tgt in seen_nodes and key not in seen_edges:
-                seen_edges.add(key)
-                clean_edges.append({
-                    "source": src,
-                    "target": tgt,
-                    "label": e.get("label","")[:30]
-                })
+            src = str(e.get("source", "")).strip()
+            tgt = str(e.get("target", "")).strip()
+            if not src or not tgt or src not in seen_nodes or tgt not in seen_nodes:
+                continue
+            key = (src, tgt)
+            edge_groups[key].append({
+                "label":    (e.get("label") or "")[:40],
+                "doc":      (e.get("doc") or "")[:90],
+                "evidence": (e.get("evidence") or "")[:180],
+                "date":     (e.get("date") or "")[:20],
+                "strength": max(1, min(5, int(e.get("strength", 1))))
+            })
+
+        clean_edges = []
+        for (src, tgt), items in edge_groups.items():
+            # Wybierz najbardziej powtarzający się label jako główny
+            labels = [it["label"] for it in items if it["label"]]
+            main_label = max(set(labels), key=labels.count) if labels else items[0]["label"]
+
+            # Zbierz wszystkie unikalne dowody (max 6)
+            seen_ev = set()
+            evidences = []
+            for it in items:
+                ev_key = (it["doc"], it["evidence"][:80])
+                if ev_key not in seen_ev:
+                    seen_ev.add(ev_key)
+                    evidences.append({
+                        "doc": it["doc"],
+                        "evidence": it["evidence"],
+                        "date": it["date"]
+                    })
+                if len(evidences) >= 6:
+                    break
+
+            total_strength = sum(it["strength"] for it in items) + (len(items) - 1)  # bonus za powtarzalność
+
+            clean_edges.append({
+                "source": src,
+                "target": tgt,
+                "label": main_label,
+                "doc": items[0]["doc"],           # pierwszy dokument dla kompatybilności
+                "evidence": items[0]["evidence"], # pierwszy dowód
+                "date": items[0]["date"],
+                "strength": max(1, min(12, total_strength)),  # cap
+                "evidence_count": len(evidences),
+                "evidences": evidences
+            })
+
+        # Sortuj krawędzie malejąco po sile (najmocniejsze relacje na wierzchu)
+        clean_edges.sort(key=lambda e: e.get("strength", 1), reverse=True)
 
         return jsonify({
             "success": True,
@@ -1488,10 +2206,9 @@ def analyze_excel():
             if p.exists():
                 path = p
 
-    # 3. Szukaj po nazwie rekurencyjnie w /mnt/g i /mnt/c/Users
+    # 3. Szukaj po nazwie rekurencyjnie
     if not path and fname:
-        search_roots = ["/mnt/g", "/mnt/c/Users/Marcin/Documents", "/mnt/c/Users/Marcin/Desktop"]
-        for root in search_roots:
+        for root in SEARCH_ROOTS:
             rp = Path(root)
             if not rp.exists():
                 continue
@@ -1517,7 +2234,7 @@ def analyze_excel():
             "Co to oznacza w kontekście śledztwa finansowego? Odpowiedz po polsku, krótko."
         )
         system = "Jesteś biegłym rewidentem śledczym. Analizujesz anomalie w plikach Excel pod kątem fałszowania dokumentów finansowych."
-        payload = {"model": "llama3", "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
         try:
             req = urllib.request.Request(
                 OLLAMA_URL + "/api/generate",
@@ -1532,5 +2249,616 @@ def analyze_excel():
     return jsonify(result)
 
 
+@app.route('/compare', methods=['POST'])
+def compare_documents():
+    """Porównanie dwóch konkretnych plików — pobiera wszystkie ich chunki i wysyła do LLM."""
+    data   = request.get_json()
+    file_a = data.get('file_a', '').strip()
+    file_b = data.get('file_b', '').strip()
+    focus  = data.get('focus', 'Porównaj te dokumenty — wskaż różnice, sprzeczności i podobieństwa.').strip()
+
+    if not file_a or not file_b:
+        return jsonify({"success": False, "error": "Podaj dwa pliki do porównania"})
+
+    try:
+        client = get_qdrant_client()
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        def get_chunks(fname, max_chunks=12):
+            qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
+            # Wektor zerowy = pobierz dowolne chunki (scroll z filtrem)
+            records, _ = client.scroll(
+                collection_name=ACTIVE_COLLECTION, limit=max_chunks,
+                query_filter=qfilter, with_payload=["text"], with_vectors=False
+            )
+            return [r.payload.get("text", "") for r in records]
+
+        chunks_a = get_chunks(file_a)
+        chunks_b = get_chunks(file_b)
+
+        if not chunks_a:
+            return jsonify({"success": False, "error": f"Brak danych dla pliku: {file_a}"})
+        if not chunks_b:
+            return jsonify({"success": False, "error": f"Brak danych dla pliku: {file_b}"})
+
+        text_a = "\n\n".join(chunks_a[:10])[:4000]
+        text_b = "\n\n".join(chunks_b[:10])[:4000]
+
+        system = (
+            "Jesteś analitykiem śledczym porównującym dokumenty. "
+            "Wskazujesz różnice, sprzeczności, brakujące informacje i podejrzane rozbieżności. "
+            "Odpowiadaj zawsze po polsku, konkretnie, z cytatami."
+        )
+        prompt = (
+            f"DOKUMENT A: {file_a}\n{text_a}\n\n"
+            f"---\n\n"
+            f"DOKUMENT B: {file_b}\n{text_b}\n\n"
+            f"ZADANIE: {focus}\n\n"
+            "Porównanie (wskaż konkretne różnice z cytatami):"
+        )
+        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system,
+                   "stream": False, "options": {"num_ctx": 8192}}
+        req = urllib.request.Request(
+            OLLAMA_URL + "/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=300) as r:
+            answer = json.loads(r.read().decode("utf-8"))["response"]
+
+        return jsonify({
+            "success": True,
+            "file_a": file_a, "chunks_a": len(chunks_a),
+            "file_b": file_b, "chunks_b": len(chunks_b),
+            "comparison": answer
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/export/csv', methods=['POST'])
+def export_csv():
+    """Konwertuje tabelę Markdown z trybu extract → plik CSV."""
+    data     = request.get_json()
+    md_table = data.get('table', '')
+    if not md_table:
+        return jsonify({"success": False, "error": "Brak tabeli"}), 400
+    try:
+        import csv, io as _io
+        lines = [l.strip() for l in md_table.splitlines() if l.strip()]
+        rows  = []
+        for line in lines:
+            if re.match(r'^\s*\|[-| ]+\|\s*$', line):
+                continue  # separator
+            if line.startswith('|'):
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+                rows.append(cells)
+
+        buf = _io.StringIO()
+        writer = csv.writer(buf, quoting=csv.QUOTE_ALL)
+        for row in rows:
+            writer.writerow(row)
+
+        output = buf.getvalue().encode('utf-8-sig')  # BOM dla Excela
+        fname  = f"ekstrakcja_{time.strftime('%Y%m%d_%H%M')}.csv"
+        return send_file(
+            _io.BytesIO(output), as_attachment=True,
+            download_name=fname, mimetype='text/csv; charset=utf-8'
+        )
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/cache/stats', methods=['GET'])
+def cache_stats():
+    try:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
+            count = cursor.fetchone()[0]
+    except Exception:
+        count = 0
+
+    size_mb = round(_CACHE_DB_PATH.stat().st_size / 1_048_576, 2) if _CACHE_DB_PATH.exists() else 0
+    return jsonify({"entries": count, "size_mb": size_mb})
+
+
+# ============================================================
+# MODUŁ SQL — MS SQL Server 2016
+# ============================================================
+
+SQL_CONFIG_PATH = Path(__file__).parent / ".sql_config.json"
+
+def _load_sql_config() -> dict:
+    """Załaduj zapisaną konfigurację SQL Server."""
+    if SQL_CONFIG_PATH.exists():
+        try:
+            return json.loads(SQL_CONFIG_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_sql_config(cfg: dict):
+    """Zapisz konfigurację SQL Server do pliku."""
+    try:
+        SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    except Exception as e:
+        logger.warning(f"Błąd zapisu config: {e}")
+
+def _get_sql_conn(cfg: dict):
+    """Tworzy połączenie z MS SQL Server przez pymssql.
+    Format server '127.0.0.1:1433' omija weryfikację SSL (SQL Server 2025+)."""
+    import pymssql
+    server = cfg.get("server", "127.0.0.1")
+    port   = str(cfg.get("port", 1433))
+    # Jeśli serwer nie zawiera portu — dołącz
+    if ":" not in server and "\\" not in server:
+        server = f"{server}:{port}"
+    db = cfg.get("database", "")
+    return pymssql.connect(
+        server   = server,
+        user     = cfg.get("user", ""),
+        password = cfg.get("password", ""),
+        database = db if db else None,
+        timeout  = 15,
+        charset  = "UTF-8"
+    )
+
+@app.route('/sql/config', methods=['GET', 'POST'])
+def sql_config():
+    """Zapisz/załaduj konfigurację SQL Server."""
+    if request.method == 'GET':
+        cfg = _load_sql_config()
+        return jsonify({
+            "success": True,
+            "config": cfg if cfg else None,
+            "has_config": bool(cfg)
+        })
+
+    # POST — zapisz nową config
+    data = request.get_json()
+    cfg = {
+        "server": data.get("server", "").strip(),
+        "port": int(data.get("port", 1433)),
+        "database": data.get("database", "").strip(),
+        "user": data.get("user", "").strip(),
+        "password": data.get("password", "")
+    }
+    _save_sql_config(cfg)
+    return jsonify({"success": True, "message": "Konfiguracja zapisana"})
+
+@app.route('/sql/test', methods=['POST'])
+def sql_test():
+    """Test połączenia z bazą SQL."""
+    cfg = request.get_json()
+    try:
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor()
+        cur.execute("SELECT @@VERSION")
+        version = cur.fetchone()[0]
+        # Lista tabel użytkownika
+        cur.execute("""
+            SELECT TABLE_NAME, TABLE_TYPE
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY TABLE_NAME
+        """)
+        tables = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"success": True, "version": version[:120], "tables": tables})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+def _validate_table_name(table_name: str) -> bool:
+    """Walidacja nazwy tabeli — zabezpieczenie przed SQL Injection."""
+    if not table_name or not isinstance(table_name, str):
+        return False
+    return bool(re.match(r'^[\w\-\.]+$', table_name))
+
+def _validate_column_names(col_names: list) -> bool:
+    """Walidacja listy nazw kolumn."""
+    if not col_names or not isinstance(col_names, list):
+        return True
+    for col in col_names:
+        if not isinstance(col, str) or not re.match(r'^[\w\-\.]+$', col.strip()):
+            return False
+    return True
+
+@app.route('/sql/schema', methods=['POST'])
+def sql_schema():
+    """Pobiera schemat wybranej tabeli."""
+    data  = request.get_json()
+    cfg   = data.get("conn", {})
+    table = data.get("table", "").strip()
+
+    if not _validate_table_name(table):
+        return jsonify({"success": False, "error": f"Niepoprawna nazwa tabeli: '{table}'"})
+
+    try:
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor()
+        cur.execute(f"""
+            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+        """, (table,))
+        cols = [{"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
+                for r in cur.fetchall()]
+        cur.execute(f"SELECT COUNT(*) FROM [{table}]")
+        row_count = cur.fetchone()[0]
+        conn.close()
+        return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/sql/ask', methods=['POST'])
+def sql_ask():
+    """Text-to-SQL: pytanie po polsku → LLM generuje SQL → wykonaj → zwróć wyniki."""
+    data     = request.get_json()
+    cfg      = data.get("conn", {})
+    question = data.get("question", "").strip()
+    schema   = data.get("schema", "")   # opis tabel przesłany z frontendu
+
+    if not question:
+        return jsonify({"success": False, "error": "Brak pytania"})
+
+    sql_query = ""
+    cols = []
+    try:
+        system_sql = (
+            "Jesteś ekspertem T-SQL (MS SQL Server 2016). "
+            "Na podstawie schematu bazy danych generujesz zapytania SQL. "
+            "ZASADY: używaj tylko SELECT (nigdy DELETE/UPDATE/DROP). "
+            "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
+            "Jeśli pytanie jest niejasne — zgadnij najbardziej sensowne zapytanie."
+        )
+        prompt_sql = (
+            f"SCHEMAT BAZY:\n{schema}\n\n"
+            f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
+            "Wygeneruj zapytanie T-SQL:"
+        )
+        payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
+                   "stream": False, "options": {"num_ctx": 8192}}
+        req = urllib.request.Request(
+            OLLAMA_URL + "/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+
+        sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+        sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        if first_word not in ("SELECT", "WITH"):
+            return jsonify({"success": False, "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
+                            "sql": sql_query})
+
+        conn = _get_sql_conn(cfg)
+        cur  = conn.cursor(as_dict=True)
+        cur.execute(sql_query)
+        rows = cur.fetchmany(500)
+        cols = list(rows[0].keys()) if rows else []
+        result_rows = []
+        for row in rows:
+            result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+        conn.close()
+
+        result_preview = "\n".join([", ".join([f"{k}={v}" for k, v in r.items()]) for r in result_rows[:10]])
+        prompt_interp = (
+            f"Pytanie użytkownika: {question}\n"
+            f"Wykonane zapytanie SQL: {sql_query}\n"
+            f"Liczba wyników: {len(result_rows)}\n"
+            f"Przykładowe wyniki:\n{result_preview}\n\n"
+            "Odpowiedz po polsku: co wynika z tych danych? Podaj konkretne liczby i wnioski."
+        )
+        payload2 = {"model": LLM_MODEL, "prompt": prompt_interp,
+                    "system": "Jesteś analitykiem danych. Interpretujesz wyniki SQL po polsku.",
+                    "stream": False, "options": {"num_ctx": 4096}}
+        req2 = urllib.request.Request(
+            OLLAMA_URL + "/api/generate",
+            data=json.dumps(payload2).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req2, timeout=120) as r2:
+            interpretation = json.loads(r2.read().decode("utf-8"))["response"]
+
+        return jsonify({
+            "success":    True,
+            "sql":        sql_query,
+            "columns":    cols,
+            "rows":       result_rows,
+            "total":      len(result_rows),
+            "truncated":  len(result_rows) == 500,
+            "interpretation": interpretation
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e),
+                        "sql": sql_query})
+
+
+@app.route('/sql/write', methods=['POST'])
+def sql_write():
+    """Generuje i wykonuje zapytanie INSERT/UPDATE/DELETE po potwierdzeniu przez użytkownika."""
+    data      = request.get_json()
+    cfg       = data.get("conn", {})
+    question  = data.get("question", "").strip()
+    schema    = data.get("schema", "")
+    confirmed = data.get("confirmed", False)   # True = użytkownik potwierdził wykonanie
+    sql_query = data.get("sql", "")            # Przy potwierdzeniu — SQL z poprzedniego kroku
+
+    if not question and not sql_query:
+        return jsonify({"success": False, "error": "Brak pytania lub zapytania SQL"})
+
+    try:
+        # Krok 1: generuj SQL (tylko jeśli nie przyszło gotowe)
+        if not sql_query:
+            system_sql = (
+                "Jesteś ekspertem T-SQL (MS SQL Server). "
+                "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE, CREATE TABLE. "
+                "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
+                "Bądź precyzyjny — podaj konkretne wartości i warunki WHERE."
+            )
+            prompt_sql = (
+                f"SCHEMAT BAZY:\n{schema}\n\n"
+                f"ZADANIE: {question}\n\n"
+                "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
+            )
+            payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
+                       "stream": False, "options": {"num_ctx": 4096}}
+            req = urllib.request.Request(
+                OLLAMA_URL + "/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+            sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+            sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+
+        # Sprawdź typ polecenia
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        allowed_write = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "MERGE")
+        if first_word not in allowed_write and first_word not in ("SELECT", "WITH"):
+            return jsonify({"success": False, "error": f"Nieznane polecenie: {first_word}", "sql": sql_query})
+
+        # Krok 2: jeśli nie potwierdzone — zwróć SQL do podglądu
+        if not confirmed:
+            # UWAGA: Szacowanie wpływu dla UPDATE/DELETE zostało wyłączone ze względów bezpieczeństwa
+            # (WHERE clause pochodzące z LLM mogą zawierać SQL injection)
+            impact_warning = ""
+            if first_word in ("UPDATE", "DELETE"):
+                impact_warning = f"⚠️ {first_word} polecenie — sprawdź WHERE warunek przed potwierdzeniem!"
+
+            return jsonify({
+                "success": True,
+                "preview": True,   # sygnał dla frontendu — pokaż przycisk Potwierdź
+                "sql": sql_query,
+                "impact": impact_warning,
+                "first_word": first_word
+            })
+
+        # Krok 3: wykonaj po potwierdzeniu (z bezpiecznym zamykaniem zasobów)
+        conn = None
+        cur = None
+        try:
+            conn = _get_sql_conn(cfg)
+            cur = conn.cursor()
+            cur.execute(sql_query)
+            rows_affected = cur.rowcount
+            conn.commit()
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+
+        # Log audytu
+        logger.debug(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
+
+        return jsonify({
+            "success":       True,
+            "executed":      True,
+            "sql":           sql_query,
+            "rows_affected": rows_affected,
+            "message":       f"Wykonano. Zmieniono/dodano {rows_affected} wierszy."
+        })
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "sql": locals().get("sql_query", "")})
+
+
+@app.route('/sql/vectorize', methods=['POST'])
+def sql_vectorize():
+    """Wektoryzuje dane z tabeli SQL do Qdrant (SSE)."""
+    data  = request.get_json()
+    cfg   = data.get("conn", {})
+    table = data.get("table", "").strip()
+    cols  = data.get("columns", [])  # kolumny do wektoryzacji
+    label_col = data.get("label_col", "").strip()  # kolumna jako tytuł chunka
+
+    if not _validate_table_name(table):
+        return Response(f"event: error\ndata: {json.dumps({'error': f'Niepoprawna nazwa tabeli: {table}'}, ensure_ascii=False)}\n\n")
+
+    if not _validate_column_names(cols):
+        return Response(f"event: error\ndata: {json.dumps({'error': 'Niepoprawne nazwy kolumn'}, ensure_ascii=False)}\n\n")
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+        try:
+            import pymssql
+            conn = _get_sql_conn(cfg)
+            cur  = conn.cursor(as_dict=True)
+
+            # Ustal kolumny — użyj osobnej zmiennej lokalnej żeby uniknąć konfliktu zakresu
+            if cols:
+                active_cols = list(cols)
+            else:
+                cur.execute("""
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_NAME=%s AND DATA_TYPE IN
+                    ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
+                    ORDER BY ORDINAL_POSITION
+                """, (table,))
+                active_cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
+            col_list = ", ".join(f"[{c}]" for c in active_cols)
+
+            cur.execute(f"SELECT COUNT(*) as cnt FROM [{table}]")
+            total = cur.fetchone()["cnt"]
+            yield sse("start", {"total": total, "table": table, "columns": active_cols})
+
+            cur.execute(f"SELECT {col_list} FROM [{table}]")
+            qdrant = get_qdrant_client()
+            done = 0
+
+            BATCH = 50
+            rows_buf = []
+            while True:
+                batch_rows = cur.fetchmany(BATCH)
+                if not batch_rows:
+                    break
+                for row in batch_rows:
+                    # Zbuduj tekst z wiersza
+                    label = str(row.get(label_col, "")) if label_col else ""
+                    parts = [f"{k}: {v}" for k, v in row.items() if v is not None and str(v).strip()]
+                    text  = (f"[{table}] {label}\n" if label else f"[{table}]\n") + " | ".join(parts)
+                    rows_buf.append(text)
+
+                # Batch embeddings
+                vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                points = []
+                for txt, vec in zip(rows_buf, vecs):
+                    cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
+                    points.append(PointStruct(
+                        id=cid, vector=vec,
+                        payload={"file": f"[SQL] {table}", "text": txt, "full_path": ""}
+                    ))
+                if points:
+                    qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                done += len(rows_buf)
+                rows_buf = []
+                yield sse("progress", {"done": done, "total": total,
+                                       "pct": round(done/total*100) if total else 0})
+
+            conn.close()
+            _docs_cache["data"] = None
+            yield sse("done", {"done": done, "total": total,
+                                "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route('/sql/vectorize-all', methods=['POST'])
+def sql_vectorize_all():
+    """Wektoryzuje wszystkie tabele SQL do Qdrant (SSE)."""
+    data = request.get_json()
+    cfg  = data.get("conn", {})
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+        try:
+            import pymssql
+            conn = _get_sql_conn(cfg)
+            cur  = conn.cursor(as_dict=True)
+
+            # Pobierz wszystkie tabele
+            cur.execute("""
+                SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY TABLE_NAME
+            """)
+            tables = [r["TABLE_NAME"] for r in cur.fetchall()]
+            yield sse("start", {"total_tables": len(tables), "tables": tables})
+
+            qdrant = get_qdrant_client()
+            total_rows = 0
+
+            for table_idx, table in enumerate(tables):
+                try:
+                    yield sse("table_start", {"table": table, "table_idx": table_idx, "total_tables": len(tables)})
+
+                    # Auto-detect kolumny tekstowe
+                    cur.execute("""
+                        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_NAME=%s AND DATA_TYPE IN
+                        ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
+                        ORDER BY ORDINAL_POSITION
+                    """, (table,))
+                    active_cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
+                    if not active_cols:
+                        yield sse("table_done", {"table": table, "rows": 0, "table_idx": table_idx})
+                        continue
+
+                    col_list = ", ".join(f"[{c}]" for c in active_cols)
+                    cur.execute(f"SELECT COUNT(*) as cnt FROM [{table}]")
+                    table_total = cur.fetchone()["cnt"]
+
+                    if table_total == 0:
+                        yield sse("table_done", {"table": table, "rows": 0, "table_idx": table_idx})
+                        continue
+
+                    cur.execute(f"SELECT {col_list} FROM [{table}]")
+                    table_done = 0
+
+                    BATCH = 50
+                    rows_buf = []
+                    while True:
+                        batch_rows = cur.fetchmany(BATCH)
+                        if not batch_rows:
+                            break
+                        for row in batch_rows:
+                            parts = [f"{k}: {v}" for k, v in row.items() if v is not None and str(v).strip()]
+                            text  = f"[{table}] " + " | ".join(parts)
+                            rows_buf.append(text)
+
+                        # Batch embeddings
+                        vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                        points = []
+                        for txt, vec in zip(rows_buf, vecs):
+                            cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
+                            points.append(PointStruct(
+                                id=cid, vector=vec,
+                                payload={"file": f"[SQL] {table}", "text": txt, "full_path": ""}
+                            ))
+                        if points:
+                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+
+                        table_done += len(rows_buf)
+                        total_rows += len(rows_buf)
+                        rows_buf = []
+                        pct = round(table_done/table_total*100) if table_total else 0
+                        yield sse("progress", {
+                            "table": table, "done": table_done, "total": table_total, "pct": pct,
+                            "tables_done": table_idx, "total_rows": total_rows
+                        })
+
+                    yield sse("table_done", {"table": table, "rows": table_done, "table_idx": table_idx})
+
+                    # Mała przerwa między tabelami (tymczasowe odciążenie serwera podczas Vectorize All)
+                    time.sleep(0.8)
+
+                except Exception as e:
+                    yield sse("table_error", {"table": table, "error": str(e)})
+                    time.sleep(0.5)  # krótka przerwa nawet przy błędzie
+
+            conn.close()
+            _docs_cache["data"] = None
+            yield sse("done", {
+                "total_rows": total_rows, "total_tables": len(tables),
+                "msg": f"Zwektoryzowano {total_rows} wierszy z {len(tables)} tabel"
+            })
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, threaded=True)
