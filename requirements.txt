@@ -14,3 +14,6 @@ Pillow>=10.0.0   # do bezpośredniego odczytu obrazów w OCR
 
 # Produkcyjny serwer WSGI (zastępuje Flask dev server)
 waitress>=3.0.0
+
+# MS SQL Server (moduł SQL w aplikacji)
+pymssql>=2.3.0

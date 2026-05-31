@@ -59,6 +59,12 @@ cd /workspace && ./venv/bin/python app.py
 
 Health check: `curl -s http://127.0.0.1:5000/health`
 
+### Security defaults
+
+- App binds to **`127.0.0.1`** by default (`APP_HOST`). Set `APP_HOST=0.0.0.0` only behind a trusted reverse proxy.
+- Optional **`APP_API_KEY`**: when set, all API routes require header `X-API-Key` (SSE import uses `?api_key=`). The UI prompts once and stores the key in `sessionStorage`.
+- File import/browse/open are limited to **`SEARCH_ROOTS`** (or `~`, `/mnt`, repo root if unset).
+
 ### Common commands
 
 | Task | Command |

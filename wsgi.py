@@ -3,14 +3,16 @@
 Produkcyjny entry point dla waitress.
 """
 
-from app import app
+import os
+
+from app import app, APP_HOST
 
 if __name__ == "__main__":
     from waitress import serve
     serve(
         app,
-        host="0.0.0.0",
-        port=5000,
+        host=APP_HOST,
+        port=int(os.environ.get("APP_PORT", "5000")),
         threads=8,
         url_scheme="http"
     )

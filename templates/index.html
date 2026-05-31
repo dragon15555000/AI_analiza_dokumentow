@@ -863,6 +863,40 @@
 </div>
 
 <script>
+window.API_KEY_REQUIRED = {{ 'true' if api_key_required else 'false' }};
+
+function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function apiKeyParam() {
+    if (!window.API_KEY_REQUIRED) return '';
+    const k = sessionStorage.getItem('app_api_key') || '';
+    return k ? '&api_key=' + encodeURIComponent(k) : '';
+}
+
+(function installFetchApiKey() {
+    if (!window.API_KEY_REQUIRED) return;
+    const orig = window.fetch.bind(window);
+    window.fetch = function(url, opts) {
+        opts = opts || {};
+        const headers = new Headers(opts.headers || {});
+        const k = sessionStorage.getItem('app_api_key');
+        if (k) headers.set('X-API-Key', k);
+        return orig(url, Object.assign({}, opts, { headers }));
+    };
+})();
+
+if (window.API_KEY_REQUIRED && !sessionStorage.getItem('app_api_key')) {
+    const k = prompt('Podaj klucz API (APP_API_KEY z pliku .env):');
+    if (k) sessionStorage.setItem('app_api_key', k.trim());
+}
+
 let activeFileFilter = null;
 let allDocs = [];
 let maxChunks = 1;
@@ -1215,7 +1249,7 @@ function deleteSelected() {
         renderDocTable(allDocs);
         updateStats();
         // Przywróć pasek
-        bar.innerHTML = `<span class="small text-success fw-bold">✅ Usunięto ${d.deleted_chunks} chunków z ${files.length} pliku(ów)</span>
+        bar.innerHTML = `<span class="small text-success fw-bold">✅ Usunięto wpisy dla ${d.files_count ?? files.length} pliku(ów)</span>
             <button class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('deleteBar').classList.add('d-none')">✕</button>`;
         bar.classList.remove('d-none');
     })
@@ -1383,7 +1417,7 @@ function executeSearch() {
                             if (typeof ev.error === 'string' && (ev.error.includes('RATE_LIMIT') || ev.error.includes('429') || ev.error.includes('Too Many'))) {
                                 handleRateLimitError(ev.error, container, loader, btn, stopBtn, query, mode);
                             } else {
-                                container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                                container.innerHTML = `<div class="alert alert-danger">${escapeHtml(ev.error)}</div>`;
                             }
                             btn.disabled = false; return;
                         }
@@ -1404,7 +1438,7 @@ function executeSearch() {
         loader.classList.add('d-none');
         if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
-        container.innerHTML = `<div class="alert alert-danger">Błąd: ${err}</div>`;
+        container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(err)}</div>`;
     });
     return;
 
@@ -1415,7 +1449,7 @@ function executeSearch() {
         loader.classList.add('d-none');
         btn.disabled = false;
         if (!data.success) {
-            container.innerHTML = `<div class="alert alert-danger">Błąd: ${data.error}</div>`;
+            container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(data.error)}</div>`;
             return;
         }
 
@@ -1487,7 +1521,7 @@ function executeSearch() {
     .catch(err => {
         loader.classList.add('d-none');
         btn.disabled = false;
-        container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${err}</div>`;
+        container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${escapeHtml(err)}</div>`;
     });
 }
 
@@ -1599,7 +1633,7 @@ function compareDocuments() {
     .then(r=>r.json())
     .then(d => {
         btn.disabled = false; st.classList.add('d-none');
-        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${d.error}</div>`; return; }
+        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`; return; }
         res.innerHTML = `
             <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
                 <div class="d-flex gap-3 small">
@@ -1613,7 +1647,7 @@ function compareDocuments() {
                 <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
             </div>`;
     })
-    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e)}</div>`; });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
@@ -1641,7 +1675,7 @@ function runVerification(query, answer, contexts) {
     .then(r => r.json())
     .then(d => {
         if (!d.success) {
-            vc.innerHTML = `<div class="verify-box warn"><strong>Błąd weryfikacji:</strong> ${d.error}</div>`;
+            vc.innerHTML = `<div class="verify-box warn"><strong>Błąd weryfikacji:</strong> ${escapeHtml(d.error)}</div>`;
             return;
         }
         const v = d.verdict || '';
@@ -1667,7 +1701,7 @@ function runVerification(query, answer, contexts) {
             </div>`;
     })
     .catch(e => {
-        vc.innerHTML = `<div class="verify-box warn">Błąd połączenia z LLM: ${e}</div>`;
+        vc.innerHTML = `<div class="verify-box warn">Błąd połączenia z LLM: ${escapeHtml(e)}</div>`;
     });
 }
 
@@ -1962,7 +1996,7 @@ function executeImport() {
 
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
-    const es = new EventSource('/import/stream?' + params.toString());
+    const es = new EventSource('/import/stream?' + params.toString() + apiKeyParam());
 
     // Stop button handler
     const stopHandler = () => {
@@ -2308,7 +2342,7 @@ function buildNetwork() {
         document.getElementById('networkLoader').classList.add('d-none');
         document.getElementById('networkBtn').disabled = false;
         document.getElementById('networkPlaceholder').classList.remove('d-none');
-        document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${e}</div>`;
+        document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${escapeHtml(e)}</div>`;
     });
 }
 
@@ -3016,7 +3050,7 @@ function scanNoise() {
     .then(d => {
         btn.disabled = false;
         btn.textContent = '🔍 Skanuj szum';
-        if (!d.success) { list.innerHTML = `<span class="text-danger">${d.error}</span>`; return; }
+        if (!d.success) { list.innerHTML = `<span class="text-danger">${escapeHtml(d.error)}</span>`; return; }
         detectedNoise = d.noise;
         if (!d.noise.length) {
             list.innerHTML = '<span class="text-success fw-bold">✅ Brak wykrytych śmieci w bazie.</span>';
@@ -3035,7 +3069,7 @@ function scanNoise() {
     .catch(e => {
         btn.disabled = false;
         btn.textContent = '🔍 Skanuj szum';
-        list.innerHTML = `<span class="text-danger">Błąd: ${e}</span>`;
+        list.innerHTML = `<span class="text-danger">Błąd: ${escapeHtml(e)}</span>`;
     });
 }
 
@@ -3055,7 +3089,7 @@ function deleteNoise() {
     .then(r => r.json())
     .then(d => {
         if (!d.success) { alert('Błąd: ' + d.error); return; }
-        list.innerHTML = `<span class="text-success fw-bold">✅ Usunięto ${d.deleted_chunks} chunków z ${checked.length} pliku(ów).</span>`;
+        list.innerHTML = `<span class="text-success fw-bold">✅ Usunięto wpisy dla ${d.files_count ?? checked.length} pliku(ów).</span>`;
         allDocs = allDocs.filter(doc => !checked.includes(doc.file));
         maxChunks = allDocs.length ? allDocs[0].chunks : 1;
         document.getElementById('tabDocsCount').textContent = allDocs.length;
@@ -3194,7 +3228,7 @@ function sqlConnect() {
         btn.disabled = false;
         if (!d.success) {
             st.className = 'small alert alert-danger mt-2';
-            st.innerHTML = `❌ ${d.error}`;
+            st.innerHTML = `❌ ${escapeHtml(d.error)}`;
             return;
         }
         st.className = 'small alert alert-success mt-2';
@@ -3292,7 +3326,7 @@ function sqlAsk() {
         loader.classList.add('d-none');
         btn.disabled = false;
         if (!d.success) {
-            result.innerHTML = `<div class="alert alert-danger small">${d.error}</div>`
+            result.innerHTML = `<div class="alert alert-danger small">${escapeHtml(d.error)}</div>`
                 + (d.sql ? `<pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>` : '');
             return;
         }
@@ -3343,7 +3377,7 @@ function sqlConfirmWrite(sql) {
     .then(r=>r.json())
     .then(d => {
         if (!d.success) {
-            result.innerHTML = `<div class="alert alert-danger">${d.error}</div>`;
+            result.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`;
             return;
         }
         result.innerHTML = `
@@ -3425,7 +3459,7 @@ function sqlVectorize() {
                         bar.style.width = ev.pct + '%';
                         log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
                     } else if (ev.error) {
-                        log.innerHTML += `<br><span style="color:red;">❌ ${ev.error}</span>`;
+                        log.innerHTML += `<br><span style="color:red;">❌ ${escapeHtml(ev.error)}</span>`;
                         if (stopBtn) stopBtn.style.display = 'none';
                     }
                 } catch(e) {}
@@ -3507,7 +3541,7 @@ function sqlVectorizeAll() {
                         log.innerHTML += `✅ ${t} (${ev.rows || 0} wierszy)<br>`;
                     } else if (ev.table_error !== undefined) {
                         const t = ev.table || 'unknown';
-                        log.innerHTML += `❌ ${t}: ${ev.error}<br>`;
+                        log.innerHTML += `❌ ${escapeHtml(t)}: ${escapeHtml(ev.error)}<br>`;
                     } else if (ev.done !== undefined) {
                         bar.style.width = '100%';
                         bar.classList.remove('progress-bar-animated');
