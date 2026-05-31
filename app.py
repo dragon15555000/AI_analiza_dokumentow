@@ -395,6 +395,22 @@ def _init_embed_cache():
 
 _init_embed_cache()
 
+def _ensure_collection_exists():
+    """Tworzy ACTIVE_COLLECTION jeśli nie istnieje (np. świeży lokalny Qdrant)."""
+    try:
+        from qdrant_client.models import VectorParams, Distance
+        client = get_qdrant_client()
+        if not client.collection_exists(ACTIVE_COLLECTION):
+            client.create_collection(
+                ACTIVE_COLLECTION,
+                vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            )
+            logger.info(f"Kolekcja '{ACTIVE_COLLECTION}' utworzona automatycznie")
+    except Exception as e:
+        logger.warning(f"Nie udało się sprawdzić/utworzyć kolekcji '{ACTIVE_COLLECTION}': {e}")
+
+_ensure_collection_exists()
+
 def get_embedding(text: str) -> list:
     import hashlib as _hl
     key = _hl.sha256(text[:1500].encode('utf-8', errors='replace')).hexdigest()
