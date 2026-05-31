@@ -26,12 +26,17 @@ Optional OCR (not required for core RAG): `tesseract-ocr`, `tesseract-ocr-pol`, 
 
 **Ollama:** install via https://ollama.ai/ then `ollama serve` (tmux session) and `ollama pull nomic-embed-text` + `ollama pull llama3`.
 
-**Local Qdrant (dev without cloud):** standalone binary can live under `.local/` (gitignored pattern: add manually). Example:
+**Local Qdrant (dev without cloud):** standalone binary can live under `.local/` (gitignored). Example one-time download (x86_64 Linux):
 
 ```bash
-# download once, then in tmux:
-/workspace/.local/qdrant
+mkdir -p /workspace/.local && cd /workspace/.local
+curl -fsSL -o qdrant.tar.gz "https://github.com/qdrant/qdrant/releases/download/v1.13.6/qdrant-x86_64-unknown-linux-gnu.tar.gz"
+tar -xzf qdrant.tar.gz && rm qdrant.tar.gz && chmod +x qdrant
+# then in tmux from /workspace/.local:
+./qdrant
 ```
+
+For local Qdrant, `QDRANT_KEY` in `.env` can be any non-empty string (e.g. `dev-local-key`).
 
 `.env` for local stack (copy from `.env.example`):
 
