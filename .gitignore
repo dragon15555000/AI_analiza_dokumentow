@@ -71,6 +71,9 @@ desktop.ini
 .docker/
 docker-compose.override.yml
 
+# === Local dev binaries (Qdrant standalone, etc.) ===
+.local/
+
 # === Misc ===
 .sql_config.json
 *.pid
