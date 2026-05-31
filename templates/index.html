@@ -129,6 +129,19 @@
         .vs-ok   { background:#dcfce7; color:#166534; }
         .vs-warn { background:#fef9c3; color:#854d0e; }
         .vs-bad  { background:#fee2e2; color:#991b1b; }
+
+        /* Status dots */
+        .status-dot { font-size:0.65rem; vertical-align:middle; transition:color 0.4s; }
+        .dot-ok   { color:#48bb78; }
+        .dot-err  { color:#fc8181; }
+        .dot-warn { color:#f6ad55; }
+        .dot-pending { color:#a0aec0; }
+
+        /* Context suggestion banner */
+        #contextBanner { background:#eff6ff; border-left:4px solid #3b82f6; padding:10px 16px; display:none; align-items:center; gap:10px; flex-wrap:wrap; font-size:0.85rem; color:#1e3a5f; }
+        #contextBanner .ctx-icon { font-size:1.1rem; flex-shrink:0; }
+        #contextBanner .ctx-text { flex:1; min-width:200px; }
+        #contextBanner .ctx-actions { display:flex; gap:6px; flex-shrink:0; }
     </style>
 </head>
 <body>
@@ -137,6 +150,10 @@
     <h1>AI Analiza Dokumentów</h1>
     <div class="badge-stat">Wektory: <span id="statVectors">...</span></div>
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
+    <div class="badge-stat" title="Status połączeń">
+        <span id="dotQdrant" class="status-dot dot-pending" title="Qdrant">⬤</span> Qdrant &nbsp;
+        <span id="dotLlm"    class="status-dot dot-pending" title="LLM">⬤</span> LLM
+    </div>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
 
@@ -192,6 +209,16 @@
         <a class="nav-link" href="#" onclick="showTab('import'); setTimeout(()=> { if (!window.quickDrivesLoaded) loadQuickDrives(); window.quickDrivesLoaded=true; }, 80); return false;">Import</a>
     </li>
 </ul>
+
+<!-- Baner adaptacyjnej sugestii trybu analizy -->
+<div id="contextBanner">
+    <span class="ctx-icon" id="contextBannerIcon">📊</span>
+    <span class="ctx-text" id="contextBannerText"></span>
+    <div class="ctx-actions">
+        <button class="btn btn-sm btn-primary" onclick="applyContextSuggestion()">Zastosuj tryb</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="dismissContextBanner()">✕</button>
+    </div>
+</div>
 
 <!-- TAB: WYSZUKIWANIE -->
 <div id="tabSearch" class="main-wrap">
@@ -3487,11 +3514,65 @@ function sqlVectorizeAll() {
     });
 }
 
+// --- Health check & status dots ---
+function setStatusDot(id, state) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'status-dot ' + ({ok:'dot-ok', error:'dot-err', no_key:'dot-warn'}[state] || 'dot-pending');
+    el.title = {ok:'Połączono', error:'Brak połączenia', no_key:'Brak klucza API'}[state] || state;
+}
+
+function checkHealth() {
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => {
+            setStatusDot('dotQdrant', d.qdrant);
+            setStatusDot('dotLlm',    d.llm);
+        })
+        .catch(() => {
+            setStatusDot('dotQdrant', 'error');
+            setStatusDot('dotLlm',    'error');
+        });
+}
+
+// --- Adaptive context detection ---
+let _contextSuggestedMode = null;
+const _contextIcons = { numerical:'📊', textual:'📄', mixed:'🗂️' };
+
+function loadCollectionProfile() {
+    fetch('/api/collection/profile')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success || d.profile === 'empty' || !d.suggestion_text) return;
+            // Don't show if user already picked a non-default mode
+            if (document.getElementById('searchMode').value !== 'normal' &&
+                document.getElementById('searchMode').value !== d.suggestion_mode) return;
+            _contextSuggestedMode = d.suggestion_mode;
+            document.getElementById('contextBannerIcon').textContent = _contextIcons[d.profile] || '📋';
+            document.getElementById('contextBannerText').textContent = d.suggestion_text;
+            document.getElementById('contextBanner').style.display = 'flex';
+        })
+        .catch(() => {});
+}
+
+function applyContextSuggestion() {
+    if (_contextSuggestedMode) {
+        document.getElementById('searchMode').value = _contextSuggestedMode;
+    }
+    dismissContextBanner();
+}
+
+function dismissContextBanner() {
+    document.getElementById('contextBanner').style.display = 'none';
+}
+
 window.onload = function() {
     updateStats();
     sqlLoadSavedConn();
-    // Sugestie ładuj z opóźnieniem — nie blokuj strony przy starcie
+    checkHealth();
+    setInterval(checkHealth, 30000);
     setTimeout(() => loadSuggestions(false), 2000);
+    setTimeout(() => loadCollectionProfile(), 3000);
 };
 </script>
 </body>

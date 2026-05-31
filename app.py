@@ -3187,5 +3187,92 @@ def sql_vectorize_all():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Sprawdza łączność z Qdrant i LLM — dla paska statusu w UI."""
+    result = {
+        "qdrant": "error",
+        "llm": "error",
+        "llm_provider": DEFAULT_LLM_PROVIDER,
+        "collection": ACTIVE_COLLECTION,
+    }
+    try:
+        get_qdrant_client().get_collections()
+        result["qdrant"] = "ok"
+    except Exception as e:
+        result["qdrant_error"] = str(e)
+
+    if DEFAULT_LLM_PROVIDER == "openrouter":
+        result["llm"] = "ok" if OPENROUTER_API_KEY else "no_key"
+    else:
+        try:
+            import urllib.request as _ur
+            _ur.urlopen(_ur.Request(OLLAMA_URL + "/api/tags"), timeout=3)
+            result["llm"] = "ok"
+        except Exception:
+            pass
+
+    return jsonify(result)
+
+
+@app.route('/api/collection/profile', methods=['GET'])
+def collection_profile():
+    """Liczy typy plików w kolekcji i sugeruje optymalny tryb analizy."""
+    try:
+        docs = _docs_cache.get("data") or []
+        if not docs:
+            client = get_qdrant_client()
+            seen: set = set()
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=ACTIVE_COLLECTION,
+                    limit=500, offset=offset,
+                    with_payload=["file"],
+                    with_vectors=False,
+                )
+                for r in records:
+                    f = r.payload.get("file", "")
+                    if f:
+                        seen.add(f)
+                if offset is None:
+                    break
+            docs = [{"file": f} for f in seen]
+
+        ext_counts: dict = {}
+        for d in docs:
+            fname = d.get("file", "")
+            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else "other"
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+        total = sum(ext_counts.values())
+        if total == 0:
+            return jsonify({"success": True, "profile": "empty", "ext_counts": {}, "total_files": 0})
+
+        num_count = sum(ext_counts.get(e, 0) for e in ("xlsx", "xls", "csv"))
+        txt_count = sum(ext_counts.get(e, 0) for e in ("pdf", "docx", "doc", "txt", "md"))
+
+        if num_count / total > 0.5:
+            profile, mode = "numerical", "extract"
+            hint = "Baza zawiera głównie arkusze i dane liczbowe — tryb Ekstrakcja danych da najlepsze wyniki. Tryb Detektyw przyda się do szukania anomalii."
+        elif txt_count / total > 0.5:
+            profile, mode = "textual", "detective"
+            hint = "Baza zawiera głównie dokumenty tekstowe — tryby Detektyw lub Prawny będą skuteczne."
+        else:
+            profile, mode = "mixed", "normal"
+            hint = "Mieszana baza danych — tryb Standardowy sprawdzi się jako punkt wyjścia."
+
+        return jsonify({
+            "success": True,
+            "profile": profile,
+            "suggestion_mode": mode,
+            "suggestion_text": hint,
+            "ext_counts": ext_counts,
+            "total_files": total,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
