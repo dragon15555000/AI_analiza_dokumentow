@@ -1,33 +1,86 @@
-# Sekrety — nigdy nie commituj
+# === Sekrety ===
 .env
+*.key
+*.pem
 
-# Python
+# === Python ===
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
-*.egg-info/
-dist/
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === Virtual environments ===
 .venv/
 venv/
 env/
+ENV/
+env.bak/
+venv.bak/
 
-# System
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Logi
-*.log
-logs/
-
-# IDE
+# === IDE / Editors ===
 .vscode/
 .idea/
 *.swp
+<<<<<<< HEAD
 .sql_config.json
 
 # Embedding cache — SQLite (nie commituj)
 embedding_cache.db
+=======
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# === Logs & temporary files ===
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+
+# === Project specific caches ===
+embedding_cache.db
+embedding_cache.json
+*.sqlite
+*.sqlite3
+instance/
+
+# === OS generated files ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# === Docker / Deployment ===
+.docker/
+docker-compose.override.yml
+
+# === Local dev binaries (Qdrant standalone, etc.) ===
+.local/
+
+# === Misc ===
+.sql_config.json
+*.pid
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b

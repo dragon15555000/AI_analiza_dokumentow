@@ -9,9 +9,17 @@ import hashlib
 import time
 import sqlite3
 import threading
+<<<<<<< HEAD
+=======
+import subprocess
+import platform
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 from pathlib import Path
+from collections import defaultdict
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
+import logging
+import requests   # ← dodane dla lepszej obsługi rozłączeń klienta w streamach SSE
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -31,14 +39,35 @@ try: import pdfplumber
 except ImportError: pdfplumber = None
 try: import openpyxl
 except ImportError: openpyxl = None
+try: import pytesseract
+except ImportError: pytesseract = None
+try: from pdf2image import convert_from_path
+except ImportError: convert_from_path = None
 
 app = Flask(__name__)
+
+# === Podstawowe logowanie ===
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("ai_analiza")
+
+# === Walidacja wymaganych zmiennych środowiskowych ===
+required_env = ["QDRANT_URL", "QDRANT_KEY"]
+missing = [key for key in required_env if not os.environ.get(key)]
+if missing:
+    logger.critical(f"Brak wymaganych zmiennych środowiskowych: {missing}")
+    logger.critical("Upewnij się, że plik .env istnieje i zawiera poprawne wartości.")
+    raise RuntimeError(f"Brakujące zmienne środowiskowe: {missing}")
 
 QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
+<<<<<<< HEAD
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
 # ---- Qdrant Client (reuse connection) ----
@@ -74,6 +103,478 @@ def _init_embed_cache():
     except Exception as e:
         print(f"⚠️ Błąd inicjalizacji cache: {e}")
 
+=======
+
+# OpenRouter
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_MODEL_VERIFY = os.environ.get("OPENROUTER_MODEL_VERIFY", "google/gemini-2.0-flash-exp:free")
+OPENROUTER_FALLBACK_TO_OLLAMA = os.environ.get("OPENROUTER_FALLBACK_TO_OLLAMA", "true").lower() in ("1", "true", "yes")
+OPENROUTER_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
+
+DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # ollama | openrouter
+
+SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
+
+
+# ============================================================
+# LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
+# ============================================================
+
+def get_llm_provider(request_provider: str | None = None) -> str:
+    """Zwraca aktywny provider: 'ollama' lub 'openrouter'."""
+    if request_provider:
+        p = request_provider.lower()
+        if p in ("ollama", "openrouter"):
+            return p
+    return DEFAULT_LLM_PROVIDER
+
+
+# ---- Rate limit helpers (OpenRouter) ----
+
+# ============================================================
+# HEALTH / STATUS DASHBOARD
+# ============================================================
+
+def _check_ollama_health() -> dict:
+    """Sprawdza czy Ollama działa i czy modele są dostępne."""
+    try:
+        url = OLLAMA_URL + "/api/tags"
+        with urllib.request.urlopen(url, timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            models = [m["name"] for m in data.get("models", [])]
+            has_llm = any(LLM_MODEL in m for m in models)
+            has_embed = any("nomic-embed-text" in m for m in models)
+            return {
+                "ok": True,
+                "url": OLLAMA_URL,
+                "models_available": len(models),
+                "has_llm": has_llm,
+                "has_embedding": has_embed,
+                "error": None
+            }
+    except Exception as e:
+        return {"ok": False, "url": OLLAMA_URL, "error": str(e)[:120]}
+
+
+def _check_openrouter_health() -> dict:
+    """Lekkie sprawdzenie OpenRouter (czy klucz działa)."""
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "Brak OPENROUTER_API_KEY"}
+
+    try:
+        # Używamy lekkiego endpointu (list models jest darmowy i szybki)
+        url = "https://openrouter.ai/api/v1/models"
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            return {
+                "ok": True,
+                "models_available": len(data.get("data", [])),
+                "error": None
+            }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def _sanitize_for_prompt(text: str, max_len: int = 1400) -> str:
+    """
+    Podstawowa ochrona przed Prompt Injection.
+    Usuwa/redaguje próby przejęcia kontroli nad LLM przez złośliwą treść w dokumentach.
+    """
+    if not text:
+        return ""
+
+    text = str(text)
+
+    # 1. Usuwamy / redagujemy typowe frazy jailbreak / prompt injection
+    jailbreak_patterns = [
+        r"(?i)(ignore|disregard|forget|override|disobey).*?(previous|above|all|earlier|prior).*?instructions?",
+        r"(?i)(you are now|act as|pretend to be|roleplay as).*?(different|new|another).*?(assistant|ai|model|character)",
+        r"(?i)from now on.*?(you must|you will|always|never)",
+        r"(?i)system prompt|initial instructions|hidden instructions",
+    ]
+
+    for pattern in jailbreak_patterns:
+        text = re.sub(pattern, "[INSTRUCTION REDACTED]", text)
+
+    # 2. Neutralizujemy bloki kodu markdown (często używane do ukrycia instrukcji)
+    text = re.sub(r"```[\s\S]*?```", "[CODE BLOCK REDACTED]", text)
+
+    # 3. Usuwamy nadmierne sekwencje backticków lub specjalnych znaków
+    text = re.sub(r"`{3,}", "``", text)
+
+    # 4. Ograniczamy długość (kontekst per chunk)
+    if len(text) > max_len:
+        text = text[:max_len] + " [TRUNCATED]"
+
+    return text
+
+
+def _check_qdrant_health() -> dict:
+    """Sprawdza połączenie z Qdrant i aktywną kolekcję."""
+    try:
+        client = get_qdrant_client()
+        collections = client.get_collections().collections
+        collection_names = [c.name for c in collections]
+
+        active_exists = ACTIVE_COLLECTION in collection_names
+
+        points = 0
+        if active_exists:
+            info = client.get_collection(ACTIVE_COLLECTION)
+            points = info.points_count or 0
+
+        return {
+            "ok": True,
+            "collections_count": len(collection_names),
+            "active_collection": ACTIVE_COLLECTION,
+            "active_collection_exists": active_exists,
+            "points_in_active": points,
+            "error": None
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:150]}
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Główny endpoint do Dashboardu statusu (używany przez frontend co 30s)."""
+    qdrant = _check_qdrant_health()
+
+    provider = get_llm_provider()
+    if provider == "openrouter":
+        llm = _check_openrouter_health()
+    else:
+        llm = _check_ollama_health()
+
+    # Sprawdzenie embeddingów (dla uproszczenia używamy tego samego co LLM)
+    embedding_ok = llm.get("has_embedding", False) if provider == "ollama" else True
+
+    overall_ok = qdrant.get("ok", False) and llm.get("ok", False)
+
+    return jsonify({
+        "success": True,
+        "timestamp": int(time.time()),
+        "overall": "ok" if overall_ok else "degraded",
+        "provider": provider,
+        "qdrant": qdrant,
+        "llm": llm,
+        "embedding": {
+            "ok": embedding_ok,
+            "model": "nomic-embed-text" if provider == "ollama" else "via OpenRouter"
+        },
+        "active_collection": {
+            "name": ACTIVE_COLLECTION,
+            "points": qdrant.get("points_in_active", 0)
+        }
+    })
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Sprawdza czy wyjątek to 429 Too Many Requests z OpenRouter."""
+    msg = str(exc).lower()
+    if "429" in msg or "too many requests" in msg or "rate limit" in msg:
+        return True
+    # requests HTTPError
+    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
+        try:
+            status = exc.response.status_code
+            if status == 429:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _get_retry_after(exc: Exception) -> float | None:
+    """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
+    try:
+        if hasattr(exc, "response") and exc.response is not None:
+            ra = exc.response.headers.get("Retry-After")
+            if ra:
+                return float(ra)
+    except Exception:
+        pass
+    return None
+
+
+def call_llm(prompt: str, system: str = "", stream: bool = False,
+             provider: str | None = None, model: str | None = None,
+             max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
+    """
+    Uniwersalna funkcja do wywoływania LLM.
+    Zwraca dict dla non-stream lub Response dla stream.
+    """
+    prov = get_llm_provider(provider)
+
+    if prov == "openrouter":
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
+        return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
+    else:
+        return _call_ollama(prompt, system, stream, model or LLM_MODEL)
+
+
+def stream_llm_tokens(prompt: str, system: str = "",
+                      provider: str | None = None, model: str | None = None,
+                      max_tokens: int = 2000, temperature: float = 0.2):
+    """
+    Generator zwracający kolejne tokeny tekstu z LLM (działa dla Ollama i OpenRouter).
+    Używany w streamingowych endpointach.
+    """
+    prov = get_llm_provider(provider)
+    effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
+
+    if prov == "openrouter":
+        if not OPENROUTER_API_KEY:
+            yield "Błąd: Brak klucza OPENROUTER_API_KEY"
+            return
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": effective_model,
+            "messages": messages,
+            "stream": True,
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        last_error = None
+        for attempt in range(OPENROUTER_MAX_RETRIES):
+            try:
+                with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        line = line.decode("utf-8")
+                        if line.startswith("data: "):
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                return
+                            try:
+                                chunk = json.loads(data_str)
+                                choice = chunk.get("choices", [{}])[0]
+                                delta = choice.get("delta", {})
+                                token = delta.get("content", "")
+                                if token:
+                                    yield token
+                                if choice.get("finish_reason"):
+                                    return
+                            except Exception:
+                                continue
+                return  # sukces
+            except Exception as e:
+                last_error = e
+                if _is_rate_limit_error(e):
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = min(wait, 12.0)
+                    logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+                else:
+                    # Inny błąd — nie retry'ujemy
+                    break
+
+        # Po wyczerpaniu prób
+        err_msg = str(last_error) if last_error else "nieznany błąd"
+
+        # Opcjonalny automatyczny fallback na Ollama przy rate limitach OpenRouter
+        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
+            logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+            # Przepuść przez ścieżkę Ollama
+            ollama_url = OLLAMA_URL + "/api/generate"
+            ollama_payload = {
+                "model": LLM_MODEL,
+                "prompt": prompt,
+                "system": system,
+                "stream": True,
+                "options": {"temperature": temperature or 0.2}
+            }
+            try:
+                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            tok = data.get("response", "")
+                            if tok:
+                                yield tok
+                            if data.get("done", False):
+                                return
+                        except Exception:
+                            continue
+                return
+            except Exception as fb_err:
+                yield f"[Błąd fallback na Ollama: {fb_err}]"
+                return
+
+        if _is_rate_limit_error(last_error):
+            friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
+            yield friendly
+        else:
+            yield f"[Błąd OpenRouter streaming: {err_msg}]"
+
+    else:
+        # Ollama streaming
+        url = OLLAMA_URL + "/api/generate"
+        payload = {
+            "model": effective_model,
+            "prompt": prompt,
+            "system": system,
+            "stream": True,
+            "options": {"temperature": temperature}
+        }
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            yield f"[Błąd Ollama streaming: {str(e)}]"
+
+
+def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
+    url = OLLAMA_URL + "/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "system": system,
+        "stream": stream,
+        "options": {"temperature": 0.2}
+    }
+    if stream:
+        return requests.post(url, json=payload, stream=True, timeout=300)
+    else:
+        r = requests.post(url, json=payload, timeout=180)
+        r.raise_for_status()
+        return r.json()
+
+
+def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
+                     max_tokens: int, temperature: float) -> dict | requests.Response:
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "http://localhost",  # opcjonalnie
+        "X-Title": "AI Analiza Dokumentów"
+    }
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+
+    if stream:
+        return requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
+
+    # Non-streaming with retry on 429
+    last_error = None
+    for attempt in range(OPENROUTER_MAX_RETRIES):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=180)
+            r.raise_for_status()
+            data = r.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"response": content, "raw": data}
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e):
+                wait = _get_retry_after(e) or (1.5 ** attempt)
+                wait = min(wait, 12.0)
+                logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                time.sleep(wait)
+                continue
+            else:
+                break
+
+    # Final failure — optional fallback na Ollama (np. generowanie SQL / synteza)
+    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
+        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+        if isinstance(result, dict):
+            return result
+        return {"response": str(result)}
+
+    raise last_error if last_error else RuntimeError("OpenRouter call failed")
+
+
+# ---- Qdrant Client (reuse connection) ----
+_qdrant_client = None
+_qdrant_lock = threading.Lock()
+
+def get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    with _qdrant_lock:
+        if _qdrant_client is None:
+            from httpx import Limits
+            _qdrant_client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=QDRANT_KEY,
+                timeout=30.0,
+                limits=Limits(
+                    max_keepalive_connections=5,
+                    max_connections=20,
+                    keepalive_expiry=30
+                )
+            )
+        return _qdrant_client
+
+# ---- Cache (dokumenty i sugestie) ----
+_docs_cache = {"data": None, "ts": 0}
+DOCS_CACHE_TTL = 300  # 5 minut
+_suggestions_cache = {"data": None, "ts": 0}
+SUGGESTIONS_TTL = 1800  # 30 minut
+
+# ---- Cache embeddingów (SQLite) ----
+_CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
+
+def _init_embed_cache():
+    """Inicjalizuje tabelę w bazie SQLite, jeśli nie istnieje."""
+    try:
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vector TEXT)")
+        # Policz istniejące wpisy
+        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
+            count = cursor.fetchone()[0]
+        logger.info(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
+    except Exception as e:
+        logger.warning(f"Błąd inicjalizacji cache embeddingów: {e}")
+
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 _init_embed_cache()
 
 def get_embedding(text: str) -> list:
@@ -88,6 +589,7 @@ def get_embedding(text: str) -> list:
             if row:
                 return json.loads(row[0])
     except Exception as e:
+<<<<<<< HEAD
         print(f"⚠️ Błąd odczytu cache: {e}")
 
     # 2. Jeśli nie ma w cache, odpytaj Ollamę
@@ -111,9 +613,46 @@ def get_embedding(text: str) -> list:
     except Exception as e:
         print(f"⚠️ Ollama Embedding Error: {e}")
         return [0.0] * 768
+=======
+        logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
-def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
-    """Batch embeddings — wysyła kilka tekstów równolegle, ~5x szybszy import."""
+    # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
+    url = OLLAMA_URL + "/api/embeddings"
+    payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
+
+    for attempt in range(4):  # max 4 próby
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=45) as r:
+                vec = json.loads(r.read().decode("utf-8"))["embedding"]
+
+            # 3. Zapisz nowy wektor natychmiast do bazy SQLite
+            try:
+                with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+                    conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
+                                 (key, json.dumps(vec)))
+            except Exception as e:
+                logger.warning(f"Błąd zapisu cache embeddingów: {e}")
+
+            return vec
+
+        except Exception as e:
+            if "Connection reset by peer" in str(e) or "104" in str(e):
+                wait = (2 ** attempt) * 0.4   # 0.4s, 0.8s, 1.6s, 3.2s
+                logger.warning(f"Ollama embedding reset (próba {attempt+1}/4) — czekam {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            else:
+                logger.error(f"Ollama Embedding Error: {e}")
+                return [0.0] * 768
+
+    logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
+    return [0.0] * 768
+
+def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
+    """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results = [None] * len(texts)
 
@@ -128,7 +667,7 @@ def get_embeddings_batch(texts: list, batch_size: int = 8) -> list:
                 idx, vec = fut.result()
                 results[idx] = vec
             except Exception as e:
-                print(f"⚠️ Batch embedding error: {e}")
+                logger.error(f"Batch embedding error: {e}")
                 results[futures[fut]] = [0.0] * 768
 
     return results
@@ -192,11 +731,18 @@ SEARCH_MODES = {
     }
 }
 
-def generate_answer(query: str, contexts: list, mode: str = "normal") -> str:
-    url = OLLAMA_URL + "/api/generate"
-    context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text'][:1400]}" for c in contexts])
+def generate_answer(query: str, contexts: list, mode: str = "normal",
+                    provider: str | None = None, model: str | None = None) -> str:
+    """Generuje odpowiedź używając wybranego providera (ollama lub openrouter)."""
+    # Ochrona przed Prompt Injection — sanitizujemy treść dokumentów
+    sanitized_contexts = [
+        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), 1400)}
+        for c in contexts
+    ]
+    context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text']}" for c in sanitized_contexts])
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
+<<<<<<< HEAD
     payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
@@ -205,11 +751,44 @@ def generate_answer(query: str, contexts: list, mode: str = "normal") -> str:
             return json.loads(r.read().decode("utf-8"))["response"]
     except Exception as e:
         return f"Błąd syntezy LLM: {e}"
+=======
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
-def verify_answer(answer: str, contexts: list, query: str) -> dict:
-    """Krytyk: weryfikuje każde twierdzenie odpowiedzi względem źródłowych dokumentów."""
-    url = OLLAMA_URL + "/api/generate"
-    context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1000]}" for c in contexts])
+    try:
+        result = call_llm(
+            prompt=prompt,
+            system=cfg["system"],
+            stream=False,
+            provider=provider,
+            model=model
+        )
+        if isinstance(result, dict):
+            return result.get("response", str(result))
+        return str(result)
+    except Exception as e:
+        prov = get_llm_provider(provider)
+        if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov == "openrouter":
+            logger.warning("generate_answer: OpenRouter 429 → fallback do Ollama")
+            try:
+                result = _call_ollama(prompt, cfg["system"], stream=False, model=LLM_MODEL)
+                if isinstance(result, dict):
+                    return result.get("response", str(result))
+                return str(result)
+            except Exception as fb_e:
+                return f"[RATE_LIMIT + Błąd fallback] {fb_e}"
+        logger.error(f"LLM error in generate_answer ({prov}): {e}")
+        if _is_rate_limit_error(e):
+            return "[RATE_LIMIT] Przekroczono limit OpenRouter. Spróbuj później lub użyj Ollama."
+        return f"Błąd syntezy LLM ({prov}): {e}"
+
+def verify_answer(answer: str, contexts: list, query: str, provider: str | None = None, model: str | None = None) -> dict:
+    """Krytyk — używa wybranego providera (call_llm)."""
+    # Ochrona przed Prompt Injection w weryfikacji
+    sanitized_contexts = [
+        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), 1000)}
+        for c in contexts
+    ]
+    context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_contexts])
     system = (
         "Jesteś rygorystycznym weryfikatorem faktów śledczych. Twoja rola to KRYTYCZNA OCENA odpowiedzi "
         "innego asystenta. Masz dostęp do oryginalnych dokumentów — to jedyne źródło prawdy. "
@@ -230,12 +809,18 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
         "UZASADNIENIE: <jedno zdanie>\n\n"
         "Weryfikacja:"
     )
+<<<<<<< HEAD
     payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+=======
+
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=240) as r:
-            raw = json.loads(r.read().decode("utf-8"))["response"]
+        # Używamy dedykowanego modelu do weryfikacji (jeśli ustawiony), żeby nie dobić limitu tego samego modelu co główna odpowiedź
+        effective_verify_model = model
+        if not effective_verify_model and get_llm_provider(provider) == "openrouter":
+            effective_verify_model = OPENROUTER_MODEL_VERIFY
+        result = call_llm(prompt=prompt, system=system, stream=False, provider=provider, model=effective_verify_model)
+        raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
         # Wyciągnij werdykt
         verdict = "NIEOKREŚLONY"
@@ -263,7 +848,11 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
             "hallucinations": hallucin,
             "confidence_pct": confidence_pct
         }
+    except urllib.error.URLError as e:
+        logger.error(f"LLM connection error (verify_answer): {e}")
+        return {"success": False, "error": "Błąd połączenia z weryfikatorem (Ollama)."}
     except Exception as e:
+        logger.error(f"LLM error in verify_answer: {e}")
         return {"success": False, "error": str(e)}
 
 @app.route('/verify', methods=['POST'])
@@ -272,9 +861,12 @@ def verify_endpoint():
     answer   = data.get('answer', '').strip()
     query    = data.get('query', '').strip()
     contexts = data.get('contexts', [])
+    llm_provider = data.get('llm_provider')
+    openrouter_model = data.get('openrouter_model')
     if not answer or not query or not contexts:
         return jsonify({"success": False, "error": "Brak danych do weryfikacji"})
-    result = verify_answer(answer, contexts, query)
+    # Przekazujemy provider, żeby weryfikacja też szła przez wybrany model (w tym osobny model_verify)
+    result = verify_answer(answer, contexts, query, provider=llm_provider, model=openrouter_model)
     return jsonify(result)
 
 def highlight_backend(text: str, query: str) -> str:
@@ -388,7 +980,7 @@ def _extract_xls(file_path: Path) -> str:
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
     except Exception as e:
-        print(f"⚠️ Błąd parsowania .xls {file_path.name}: {e}")
+        logger.warning(f"Błąd parsowania .xls {file_path.name}: {e}")
         return ""
 
 def _extract_excel(file_path: Path) -> str:
@@ -515,6 +1107,91 @@ def _extract_excel(file_path: Path) -> str:
 
     return "\n\n".join(parts)
 
+
+def extract_file_metadata(f_path: Path) -> dict:
+    """Zbiera bogate metadane pliku (systemowe + formatowe) do celów śledczych."""
+    meta = {
+        "file_name": f_path.name,
+        "full_path": str(f_path),
+        "size_bytes": None,
+        "size_human": None,
+        "created": None,
+        "modified": None,
+        "accessed": None,
+        "file_type": f_path.suffix.lower().lstrip('.'),
+        "embedded": {}
+    }
+
+    try:
+        stat = f_path.stat()
+        meta["size_bytes"] = stat.st_size
+        meta["size_human"] = f"{stat.st_size / 1024:.1f} KB" if stat.st_size < 10*1024*1024 else f"{stat.st_size / (1024*1024):.2f} MB"
+
+        # Czas modyfikacji jest wiarygodny wszędzie
+        meta["modified"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+
+        # Czas dostępu
+        if hasattr(stat, "st_atime"):
+            meta["accessed"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_atime))
+
+        # Czas utworzenia — Windows ma st_ctime jako creation time, Unix ma jako change time
+        if os.name == 'nt' and hasattr(stat, "st_ctime"):
+            meta["created"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_ctime))
+        else:
+            # Na Linux/WSL często nie mamy wiarygodnego created time z filesystemu
+            meta["created"] = None
+
+    except Exception as e:
+        logger.warning(f"Błąd pobierania stat dla {f_path.name}: {e}")
+
+    # === Metadane wbudowane w pliki ===
+    ext = f_path.suffix.lower()
+
+    # PDF
+    if ext == '.pdf' and pdfplumber:
+        try:
+            with pdfplumber.open(f_path) as pdf:
+                if pdf.metadata:
+                    meta["embedded"]["pdf"] = {k: str(v) for k, v in pdf.metadata.items() if v}
+        except Exception:
+            pass
+
+    # DOCX
+    if ext == '.docx' and docx:
+        try:
+            d = docx.Document(f_path)
+            core_props = d.core_properties
+            embedded = {}
+            if core_props.author: embedded["author"] = core_props.author
+            if core_props.title: embedded["title"] = core_props.title
+            if core_props.last_modified_by: embedded["last_modified_by"] = core_props.last_modified_by
+            if core_props.created: embedded["created"] = str(core_props.created)
+            if core_props.modified: embedded["modified"] = str(core_props.modified)
+            if embedded:
+                meta["embedded"]["docx"] = embedded
+        except Exception:
+            pass
+
+    # XLSX / XLS
+    if ext in ['.xlsx', '.xls'] and openpyxl:
+        try:
+            wb = openpyxl.load_workbook(f_path, data_only=True)
+            props = wb.properties
+            embedded = {}
+            if props.creator: embedded["author"] = props.creator
+            if props.title: embedded["title"] = props.title
+            if props.lastModifiedBy: embedded["last_modified_by"] = props.lastModifiedBy
+            if props.created: embedded["created"] = str(props.created)
+            if props.modified: embedded["modified"] = str(props.modified)
+            if embedded:
+                meta["embedded"]["excel"] = embedded
+            wb.close()
+        except Exception:
+            pass
+
+    return meta
+
+
 def extract_text(file_path: Path) -> str:
     ext = file_path.suffix.lower()
     try:
@@ -526,16 +1203,64 @@ def extract_text(file_path: Path) -> str:
                 return json.dumps(json.load(f), indent=2, ensure_ascii=False)
         elif ext == '.docx' and docx:
             return "\n".join([p.text for p in docx.Document(file_path).paragraphs])
-        elif ext == '.pdf' and pdfplumber:
-            with pdfplumber.open(file_path) as pdf:
-                return "\n".join([page.extract_text() or "" for page in pdf.pages])
+        
+        elif ext == '.pdf':
+            text = ""
+            # Próba 1: Zwykłe wyciągnięcie tekstu cyfrowego
+            if pdfplumber:
+                with pdfplumber.open(file_path) as pdf:
+                    text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+            
+            # Próba 2 (Fallback OCR): Jeżeli plik to skan (brak tekstu), uruchom Tesseract
+            if len(text.strip()) < 20 and pytesseract and convert_from_path:
+                logger.info(f"[OCR] Analiza wizualna pliku: {file_path.name}...")
+                try:
+                    pages = convert_from_path(file_path, dpi=200)
+                    ocr_text = []
+                    for page_img in pages:
+                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        ocr_text.append(page_text)
+                    text = "\n\n".join(ocr_text)
+                    logger.info(f"[OCR] Zakończono dla: {file_path.name} (Pobrano znaków: {len(text)})")
+                except Exception as ocr_err:
+                    logger.warning(f"Błąd OCR dla pliku {file_path.name}: {ocr_err}")
+            
+            return text
+
+        # Obsługa obrazów bezpośrednio (jpg, png, tiff itp.) przez OCR
+        elif ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'] and pytesseract:
+            if convert_from_path:
+                # pdf2image może obsłużyć niektóre obrazy, ale dla pewności używamy PIL jeśli dostępna
+                try:
+                    from PIL import Image
+                    img = Image.open(file_path)
+                    text = pytesseract.image_to_string(img, lang='pol')
+                    logger.info(f"[OCR] Przetworzono obraz: {file_path.name}")
+                    return text
+                except ImportError:
+                    pass  # fallback poniżej
+            # Fallback - spróbuj przez pdf2image jeśli PIL nie ma
+            if convert_from_path:
+                try:
+                    pages = convert_from_path(file_path, dpi=200)
+                    ocr_text = []
+                    for page_img in pages:
+                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        ocr_text.append(page_text)
+                    text = "\n\n".join(ocr_text)
+                    logger.info(f"[OCR] Przetworzono obraz przez pdf2image: {file_path.name}")
+                    return text
+                except Exception as ocr_err:
+                    logger.warning(f"Błąd OCR obrazu {file_path.name}: {ocr_err}")
+            return ""
+
         elif ext in ['.xlsx', '.xls'] and openpyxl:
             return _extract_excel(file_path)
         elif ext == '.csv':
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read()
     except Exception as e:
-        print(f"⚠️ Błąd parsowania pliku {file_path.name}: {e}")
+        logger.warning(f"Błąd parsowania pliku {file_path.name}: {e}")
     return ""
 
 @app.route('/')
@@ -678,26 +1403,148 @@ def delete_collection():
 @app.route('/browse', methods=['GET'])
 def browse():
     raw = request.args.get('path', '/mnt').strip()
+    show_all = request.args.get('all', '0') == '1'   # ?all=1 → pokaż wszystkie pliki (nie tylko dokumenty)
     p = Path(raw)
+
     if not p.exists() or not p.is_dir():
         parent = p.parent
         if parent.exists() and parent.is_dir():
             p = parent
         else:
             p = Path('/mnt')
+
     try:
         entries = []
+        total_children = 0
+        permission_denied = 0
+
         for child in sorted(p.iterdir()):
+            total_children += 1
             try:
                 if child.is_dir():
                     entries.append({"name": child.name, "path": str(child), "type": "dir"})
-                elif child.suffix.lower() in ['.docx','.pdf','.xlsx','.xls','.csv','.md','.json','.txt']:
-                    entries.append({"name": child.name, "path": str(child), "type": "file"})
+                else:
+                    ext = child.suffix.lower().lstrip('.')
+                    is_doc = ext in ['docx','pdf','xlsx','xls','csv','md','json','txt']
+                    if show_all or is_doc:
+                        entries.append({
+                            "name": child.name,
+                            "path": str(child),
+                            "type": "file",
+                            "ext": ext
+                        })
             except PermissionError:
+                permission_denied += 1
                 pass
-        return jsonify({"success": True, "current": str(p), "parent": str(p.parent) if p != p.parent else None, "entries": entries})
+
+        # Lepsza diagnostyka dla pustych / problematycznych dysków (np. /mnt/g w WSL)
+        is_empty = (total_children == 0) or (len(entries) == 0 and permission_denied == 0)
+        has_hidden_or_other = (total_children > 0) and (len(entries) == 0) and (permission_denied == 0)
+
+        return jsonify({
+            "success": True,
+            "current": str(p),
+            "parent": str(p.parent) if p != p.parent else None,
+            "entries": entries,
+            "is_empty": is_empty,
+            "total_children": total_children,
+            "permission_denied": permission_denied,
+            "has_unlisted_items": has_hidden_or_other or permission_denied > 0,
+            "show_all": show_all
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
+# AUTOMATYCZNE MAPOWANIE DYSKÓW LOKALNYCH (dla zakładki Import)
+# ============================================================
+
+def _discover_local_drives():
+    """Zwraca listę sensownych punktów startowych (dysków/mountów) bez dodatkowych zależności."""
+    import string
+    drives = []
+    sysname = platform.system()
+    home = str(Path.home())
+
+    try:
+        if sysname == "Windows":
+            for letter in string.ascii_uppercase:
+                p = Path(f"{letter}:\\")
+                if p.exists():
+                    drives.append({
+                        "path": str(p),
+                        "label": f"{letter}:",
+                        "kind": "drive",
+                        "icon": "💾"
+                    })
+        else:
+            # Linux / WSL / macOS
+            candidates = ['/', home, '/mnt', '/media', '/data']
+            for c in candidates:
+                pp = Path(c)
+                if pp.exists() and pp.is_dir():
+                    label = "🏠 Home" if c == home else c
+                    drives.append({"path": str(pp), "label": label, "kind": "dir", "icon": "📁" if c != home else "🏠"})
+
+            # WSL — dyski Windows widoczne jako /mnt/c, /mnt/d itd.
+            mnt = Path("/mnt")
+            if mnt.exists():
+                for child in sorted(mnt.iterdir()):
+                    if child.is_dir() and len(child.name) == 1:
+                        letter = child.name.upper()
+                        drives.append({
+                            "path": str(child),
+                            "label": f"{letter}: (Windows)",
+                            "kind": "wsl",
+                            "icon": "🪟"
+                        })
+
+            # Spróbuj wyciągnąć prawdziwe montowania z /proc/mounts (najlepszy wysiłek)
+            try:
+                with open("/proc/mounts") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) < 3:
+                            continue
+                        dev, mp, fstype = parts[0], parts[1], parts[2]
+                        # Tylko sensowne systemy plików dyskowych
+                        if fstype in ("ext4", "ext3", "xfs", "btrfs", "ntfs", "fuseblk", "vfat") and \
+                           mp not in ("/", "/boot", "/boot/efi", "/proc", "/sys", "/dev", "/run"):
+                            if len(mp) <= 24 and not any(x in mp for x in ("/snap/", "/docker/", "/tmp/")):
+                                if not any(d["path"] == mp for d in drives):
+                                    drives.append({"path": mp, "label": mp, "kind": "mount", "icon": "💿"})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Zawsze dodaj Home jeśli nie ma
+    if not any(d["path"] == home for d in drives):
+        drives.insert(0, {"path": home, "label": "🏠 Home", "kind": "dir", "icon": "🏠"})
+
+    # Deduplikacja + limit
+    seen = set()
+    out = []
+    for d in drives:
+        if d["path"] not in seen:
+            seen.add(d["path"])
+            out.append(d)
+    return out[:14]
+
+
+@app.route('/api/drives')
+def api_drives():
+    try:
+        drives = _discover_local_drives()
+        return jsonify({
+            "success": True,
+            "platform": platform.system(),
+            "drives": drives
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 
 @app.route('/import/stream')
 def import_stream():
@@ -742,6 +1589,9 @@ def import_stream():
                 chunks = make_chunks(text)
                 file_new = 0
 
+                # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
+                file_meta = extract_file_metadata(f_path)
+
                 # Deduplikacja — sprawdź które chunki już są w bazie
                 chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
                 existing_ids = set()
@@ -755,16 +1605,25 @@ def import_stream():
                                    if cid not in existing_ids]
                 total_chunks += len(chunks)
 
-                # Batch embeddings — 8 równolegle
-                BATCH = 8
+                # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
+                BATCH = 6
                 for b in range(0, len(new_chunks_data), BATCH):
                     batch_items = new_chunks_data[b:b+BATCH]
                     batch_texts  = [item[1] for item in batch_items]
                     batch_ids    = [item[0] for item in batch_items]
                     vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+
                     points  = [
-                        PointStruct(id=cid, vector=vec,
-                                    payload={"file": f_path.name, "text": txt, "full_path": str(f_path)})
+                        PointStruct(
+                            id=cid,
+                            vector=vec,
+                            payload={
+                                "file": f_path.name,
+                                "text": txt,
+                                "full_path": str(f_path),
+                                "metadata": file_meta
+                            }
+                        )
                         for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
                         if vec and any(v != 0.0 for v in vec)
                     ]
@@ -822,10 +1681,9 @@ def import_folder():
     return jsonify({"success": False, "error": "Użyj /import/stream (SSE)"})
 
 def wsl_to_win(path: str) -> str:
-    """Konwertuje sciezke WSL /mnt/g/... na Windows G:\\..."""
+    """Konwertuje ścieżkę WSL /mnt/g/... na Windows G:\\..."""
     if not path:
         return ""
-    import re
     m = re.match(r'^/mnt/([a-zA-Z])/(.*)', path)
     if m:
         drive = m.group(1).upper()
@@ -833,20 +1691,212 @@ def wsl_to_win(path: str) -> str:
         return f"{drive}:\\{rest}"
     return path
 
+
+def open_file_safely(win_path: str) -> bool:
+    """
+    Bezpiecznie otwiera plik za pomocą domyślnej aplikacji systemowej.
+    Unika shell injection (w przeciwieństwie do poprzedniego os.popen).
+    """
+    if not win_path:
+        return False
+
+    try:
+        if platform.system() == "Windows":
+            # Najbezpieczniejsza metoda na Windows
+            os.startfile(win_path)
+            logger.info(f"Otwarto plik: {win_path}")
+            return True
+        else:
+            # Fallback dla Linux/macOS (przydatne przy testach z WSL)
+            subprocess.run(["xdg-open", win_path], check=False)
+            logger.info(f"Otwarto plik (xdg-open): {win_path}")
+            return True
+    except Exception as e:
+        logger.warning(f"Nie udało się otworzyć pliku '{win_path}': {e}")
+        return False
+
 @app.route('/file/open', methods=['POST'])
 def file_open():
     data = request.get_json()
     wsl_path = data.get('path', '').strip()
     if not wsl_path:
         return jsonify({"success": False, "error": "Brak ścieżki"})
+
     win_path = wsl_to_win(wsl_path)
     if not win_path:
         return jsonify({"success": False, "error": "Nie można skonwertować ścieżki"})
-    try:
-        os.popen(f'cmd.exe /c start "" "{win_path}"')
+
+    success = open_file_safely(win_path)
+
+    if success:
         return jsonify({"success": True, "win_path": win_path})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    else:
+        return jsonify({"success": False, "error": "Nie udało się otworzyć pliku"})
+
+@app.route('/hybrid/stream', methods=['POST'])
+def hybrid_stream():
+    """Wyszukiwanie hybrydowe: RAG + SQL równolegle — SSE."""
+    data       = request.get_json()
+    query_text = data.get('query', '').strip()
+    conn_cfg   = data.get('conn', {})
+    schema_str = data.get('schema', '')
+    limit      = min(int(data.get('limit', 5)), 20)
+    mode       = data.get('mode', 'normal')
+    file_filter= data.get('file_filter', None)
+    llm_provider = data.get('llm_provider')
+    openrouter_model = data.get('openrouter_model')
+
+    if not query_text:
+        return jsonify({"success": False, "error": "Zapytanie puste"}), 400
+
+    def generate():
+        def sse(event, d):
+            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
+
+        try:
+            # 1. RAG — Qdrant query
+            client = get_qdrant_client()
+            vector = get_embedding(query_text)
+
+            if file_filter:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
+                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
+                                          limit=limit, query_filter=qfilter)
+            else:
+                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
+
+            rag_contexts = []
+            rag_results = []
+            for point in res.points:
+                p = point.payload
+                rag_contexts.append({"file": p.get("file",""), "text": p.get("text","")})
+                rag_results.append({
+                    "file": p.get("file","Nieznany"),
+                    "score": f"{point.score:.4f}",
+                    "text": highlight_backend(p.get("text",""), query_text),
+                    "full_path": p.get("full_path",""),
+                    "win_path": wsl_to_win(p.get("full_path",""))
+                })
+
+            yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
+
+            # 2. SQL — jeśli konfiguracja dostępna
+            sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
+            sql_query = ""
+
+            if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
+                try:
+                    effective_schema, known_tables = _resolve_sql_schema(conn_cfg, schema_str)
+                    system_sql = (
+                        "Jesteś ekspertem T-SQL (MS SQL Server). "
+                        "Na podstawie schematu bazy generujesz zapytania SELECT. "
+                        "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
+                        "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+                    )
+                    prompt_sql = (
+                        f"SCHEMAT BAZY:\n{effective_schema}\n\n"
+                        f"PYTANIE: {query_text}\n\n"
+                        "Wygeneruj SELECT:"
+                    )
+                    sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+
+                    first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+                    if first_word not in ("SELECT", "WITH"):
+                        sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
+                    else:
+                        is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+                        if not is_safe:
+                            sql_data["error"] = safe_err or "Niedozwolone zapytanie SQL"
+                        else:
+                            ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+                            if not ok_tables:
+                                sql_data["error"] = table_err or "Nieznane tabele w SQL"
+                            else:
+                                conn = _get_sql_conn(conn_cfg)
+                                cur  = conn.cursor(as_dict=True)
+                                cur.execute(sql_query)
+                                rows = cur.fetchmany(200)
+                                cols = list(rows[0].keys()) if rows else []
+
+                                result_rows = []
+                                for row in rows:
+                                    result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+
+                                sql_data = {
+                                    "success": True,
+                                    "table": "wynik SQL",
+                                    "columns": cols,
+                                    "rows": result_rows,
+                                    "sql": sql_query[:120],
+                                    "total": len(result_rows)
+                                }
+                                conn.close()
+
+                except Exception as e:
+                    sql_data["error"] = str(e)[:200]
+
+            yield sse("sql_results", {"sql_results": sql_data})
+
+            # 3. LLM synteza — łączy RAG + SQL
+            if not rag_contexts:
+                yield sse("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
+                return
+
+            cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
+
+            # Buduj prompt syntezy (z ochroną przed Prompt Injection)
+            sanitized_rag = [
+                {"file": c["file"], "text": _sanitize_for_prompt(c["text"], 800)}
+                for c in rag_contexts[:5]
+            ]
+            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_rag])
+            sql_preview = ""
+            if sql_data.get("success") and sql_data.get("rows"):
+                rows_str = "\n".join([
+                    " | ".join([f"{k}={v}" for k, v in zip(sql_data["columns"],
+                             [r.get(col, "") for col in sql_data["columns"]])])
+                    for r in sql_data["rows"][:10]
+                ])
+                sql_preview = f"\nDANE Z BAZY (tabela SQL):\n{rows_str}"
+
+            prompt = (
+                f"DOKUMENTY:\n{rag_preview}"
+                f"{sql_preview}\n\n"
+                f"PYTANIE: {query_text}\n\n"
+                f"{cfg['prompt_suffix']}\n"
+                "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski."
+            )
+            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
+                       "stream": True, "options": {"num_ctx": 8192}}
+
+            # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
+            full_answer = ""
+
+            try:
+                for token in stream_llm_tokens(
+                    prompt=prompt,
+                    system=cfg["system"],
+                    provider=llm_provider,
+                    model=openrouter_model
+                ):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                        logger.warning(f"LLM stream error (hybrid): {token[:120]}")
+                        yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
+                        return
+                    full_answer += token
+                    yield sse("token", {"token": token})
+            except Exception as e:
+                logger.warning(f"LLM stream error: {e}")
+                yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
+
+            yield sse("done", {"ai_answer": full_answer})
+
+        except Exception as e:
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.route('/hybrid/stream', methods=['POST'])
 def hybrid_stream():
@@ -1020,6 +2070,7 @@ def search_stream():
     limit      = min(int(data.get('limit', 5)), 20)
     file_filter = data.get('file_filter', None)
     mode        = data.get('mode', 'normal')
+    llm_provider = data.get('llm_provider')
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -1062,31 +2113,36 @@ def search_stream():
 
             # Streaming LLM
             cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
-            context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1400]}" for c in raw_contexts])
+            # Ochrona przed Prompt Injection
+            sanitized = [{"file": c["file"], "text": _sanitize_for_prompt(c["text"], 1400)} for c in raw_contexts]
+            context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized])
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
+<<<<<<< HEAD
             payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
+=======
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
+            # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
-            with urllib.request.urlopen(req, timeout=240) as r:
-                for line in r:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk_data = json.loads(line)
-                        token = chunk_data.get("response", "")
-                        if token:
-                            full_answer += token
-                            yield sse("token", {"token": token})
-                        if chunk_data.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+            openrouter_model = data.get("openrouter_model")
+
+            try:
+                for token in stream_llm_tokens(
+                    prompt=prompt,
+                    system=cfg["system"],
+                    provider=llm_provider,
+                    model=openrouter_model
+                ):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                        # Czysty błąd zamiast zaśmiecania odpowiedzi
+                        logger.warning(f"LLM stream error (search): {token[:120]}")
+                        yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
+                        return
+                    full_answer += token
+                    yield sse("token", {"token": token})
+            except Exception as e:
+                logger.warning(f"LLM stream error w search_stream: {e}")
+                yield sse("error", {"error": "Błąd streamingu modelu językowego."})
 
             yield sse("done", {"ai_answer": full_answer})
 
@@ -1104,6 +2160,7 @@ def search():
     limit = min(int(data.get('limit', 5)), 20)
     file_filter = data.get('file_filter', None)
     mode = data.get('mode', 'normal')
+    llm_provider = data.get('llm_provider')  # 'ollama' lub 'openrouter' z UI
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -1136,7 +2193,8 @@ def search():
                 "win_path": wsl_to_win(full_path)
             })
 
-        ai_answer = generate_answer(query_text, raw_contexts, mode) if raw_contexts else "Brak dokumentów."
+        openrouter_model = data.get("openrouter_model")
+        ai_answer = generate_answer(query_text, raw_contexts, mode, provider=llm_provider, model=openrouter_model) if raw_contexts else "Brak dokumentów."
         return jsonify({
             "success": True,
             "results": results,
@@ -1291,12 +2349,13 @@ def get_documents():
         client = get_qdrant_client()
         file_chunks = {}
         file_paths  = {}
+        file_meta   = {}
         offset = None
         while True:
             records, offset = client.scroll(
                 collection_name=ACTIVE_COLLECTION,
                 limit=250, offset=offset,
-                with_payload=["file", "full_path"],
+                with_payload=["file", "full_path", "metadata"],
                 with_vectors=False
             )
             for r in records:
@@ -1305,10 +2364,17 @@ def get_documents():
                     file_chunks[fname] = file_chunks.get(fname, 0) + 1
                     if fname not in file_paths and r.payload.get("full_path"):
                         file_paths[fname] = r.payload["full_path"]
+                    if fname not in file_meta and r.payload.get("metadata"):
+                        file_meta[fname] = r.payload["metadata"]
             if offset is None:
                 break
         docs = sorted(
-            [{"file": f, "chunks": c, "full_path": file_paths.get(f, "")}
+            [{
+                "file": f,
+                "chunks": c,
+                "full_path": file_paths.get(f, ""),
+                "metadata": file_meta.get(f)
+            }
              for f, c in file_chunks.items()],
             key=lambda x: -x["chunks"]
         )
@@ -1317,6 +2383,95 @@ def get_documents():
         return jsonify({"success": True, "documents": docs, "total": len(docs), "cached": False})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/export/metadata_report', methods=['POST'])
+def export_metadata_report_docx():
+    """Generuje raport DOCX z metadanymi wybranych dokumentów (dla śledczych)."""
+    data = request.get_json() or {}
+    selected = data.get('files', [])  # lista obiektów z file, full_path, metadata
+
+    if not selected:
+        return jsonify({"success": False, "error": "Brak wybranych plików"}), 400
+
+    try:
+        import docx as _docx
+        from docx.shared import Pt, RGBColor, Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+
+        doc = _docx.Document()
+
+        style = doc.styles['Normal']
+        style.font.name = 'Calibri'
+        style.font.size = Pt(11)
+
+        # Nagłówek
+        h = doc.add_heading('Raport Metadanych Wybranych Dokumentów', 0)
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        doc.add_paragraph(f'Wygenerowano: {time.strftime("%d.%m.%Y %H:%M")}')
+        doc.add_paragraph(f'Liczba plików: {len(selected)}')
+        doc.add_paragraph()
+
+        # Podsumowanie
+        doc.add_heading('Podsumowanie', level=1)
+        doc.add_paragraph('Poniżej znajdują się metadane systemowe oraz wbudowane dla wybranych dokumentów. '
+                          'Dane pochodzą z oryginalnych plików w momencie importu.')
+
+        # Dla każdego pliku
+        for idx, f in enumerate(selected, 1):
+            doc.add_heading(f'{idx}. {f.get("file", "Nieznany plik")}', level=1)
+
+            meta = f.get('metadata') or {}
+
+            # Metadane systemowe
+            doc.add_heading('Metadane systemowe', level=2)
+            table = doc.add_table(rows=1, cols=2)
+            table.style = 'Table Grid'
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Pole'
+            hdr_cells[1].text = 'Wartość'
+
+            for key in ['size_human', 'created', 'modified', 'accessed']:
+                if meta.get(key):
+                    row_cells = table.add_row().cells
+                    row_cells[0].text = key.replace('_', ' ').title()
+                    row_cells[1].text = str(meta[key])
+
+            # Metadane wbudowane
+            if meta.get('embedded'):
+                doc.add_heading('Metadane wbudowane w plik', level=2)
+                for fmt, emb in meta['embedded'].items():
+                    p = doc.add_paragraph()
+                    p.add_run(f'{fmt.upper()}: ').bold = True
+                    p.add_run(str(emb))
+
+            # Pełna ścieżka
+            if meta.get('full_path'):
+                p = doc.add_paragraph()
+                p.add_run('Pełna ścieżka: ').bold = True
+                p.add_run(meta['full_path'])
+
+            doc.add_paragraph()  # odstęp
+
+        # Stopka
+        doc.add_paragraph('─' * 70)
+        p = doc.add_paragraph()
+        run = p.add_run('Wygenerowano przez AI Analiza Dokumentów | Narzędzie wspomagające analizę śledczą')
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0x6c, 0x75, 0x7d)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+
+        fname = f'raport_metadanych_{time.strftime("%Y%m%d_%H%M")}.docx'
+        return send_file(buf, as_attachment=True, download_name=fname,
+                         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/export/docx', methods=['POST'])
 def export_docx():
@@ -1400,6 +2555,10 @@ def build_network():
     data    = request.get_json()
     query   = data.get('query', '').strip()
     limit   = min(int(data.get('limit', 10)), 20)
+<<<<<<< HEAD
+=======
+    llm_provider = data.get('llm_provider')
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     raw = ""
 
     if not query:
@@ -1411,30 +2570,39 @@ def build_network():
         res    = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
 
         contexts = [{"file": p.payload.get("file",""), "text": p.payload.get("text","")} for p in res.points]
-        context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in contexts])
+        # Ochrona przed Prompt Injection przy budowie grafu
+        sanitized_contexts = [
+            {"file": c["file"], "text": _sanitize_for_prompt(c["text"], 800)}
+            for c in contexts
+        ]
+        context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_contexts])
 
         system = (
-            "Jesteś ekspertem śledczym. Wyciągasz sieć powiązań z dokumentów. "
-            "ZASADA BEZWZGLĘDNA: używasz WYŁĄCZNIE prawdziwych wartości z dokumentów. "
-            "NIGDY nie piszesz: 'nazwa', 'firma', 'osoba', 'kwota', 'X', 'id_A', 'plik.docx' — "
-            "to są PRZYKŁADY schematu, nie wartości do wstawienia. "
-            "Każdy węzeł label to PRAWDZIWA nazwa z tekstu (np. 'Jan Kowalski', 'ABC Sp. z o.o.', '50 000 zł'). "
-            "\n\nFORMAT JSON (wypełnij prawdziwymi danymi):\n"
-            '{"nodes":['
-            '{"id":"jan_kowalski","type":"osoba","label":"Jan Kowalski"},'
-            '{"id":"abc_spolka","type":"firma","label":"ABC Sp. z o.o."},'
-            '{"id":"kwota_50k","type":"kwota","label":"50 000 zł za usługę IT"}'
-            '],'
-            '"edges":['
-            '{"source":"jan_kowalski","target":"abc_spolka","label":"prezes zarządu",'
-            '"doc":"umowa_nr5_2023.docx","evidence":"Jan Kowalski podpisał jako prezes w dniu 12.03.2023"},'
-            '{"source":"abc_spolka","target":"kwota_50k","label":"faktura FV/2023/05",'
-            '"doc":"faktury_2023.xlsx","evidence":"ABC wystawiło fakturę na 50 000 zł za usługi IT"}'
-            ']}'
-            "\n\nTypy węzłów: osoba, firma, kwota, dokument, inne"
-            "\nTypy relacji w label: prezes/dyrektor, podpisał umowę, zapłacił Xzł, właściciel, "
-            "wygrał przetarg, zlecił, zatwierdził, aneks nr X, wykonawca"
-            "\nid: małe litery, bez spacji, bez polskich znaków (snake_case)"
+            "Jesteś ekspertem analityki śledczej. Twoim zadaniem jest wyciągnięcie jak najbogatszej sieci powiązań z dokumentów.\n\n"
+            "ZASADY BEZWZGLĘDNE:\n"
+            "1. Używaj WYŁĄCZNIE prawdziwych nazw, kwot, dat i faktów z dokumentów.\n"
+            "2. NIGDY nie używaj placeholderów typu 'nazwa', 'firma', 'X', 'osoba A'.\n"
+            "3. Każdy label musi być rzeczywistą wartością z tekstu.\n\n"
+            "FORMAT JSON (zwracaj tylko poprawny JSON):\n"
+            '{\n'
+            '  "nodes": [ {"id": "jan_kowalski", "type": "osoba", "label": "Jan Kowalski"}, ... ],\n'
+            '  "edges": [ {"source": "jan_kowalski", "target": "abc_spolka", "label": "prezes zarządu", "doc": "umowa_2023.pdf", "evidence": "Podpisał umowę 12.03.2023", "date": "2023-03-12", "strength": 3}, ... ]\n'
+            '}\n\n'
+            "Typy węzłów (type): osoba, firma, kwota, dokument, przetarg, umowa, inne\n\n"
+            "Bogate typy relacji (label krawędzi) — używaj precyzyjnych:\n"
+            "- prezes / członek zarządu / dyrektor\n"
+            "- podpisał umowę / aneks\n"
+            "- zapłacił / wystawił fakturę / otrzymał płatność\n"
+            "- wygrał przetarg / złożył ofertę\n"
+            "- zlecił / wykonał usługę\n"
+            "- jest właścicielem / beneficjentem\n"
+            "- zatwierdził / skontrolował\n\n"
+            "W polu 'evidence' wstaw krótki, dosłowny cytat z dokumentu.\n"
+            "Jeśli w tekście pojawia się data (nawet przybliżona) — dodaj ją w polu 'date' w formacie YYYY-MM-DD lub YYYY-MM.\n"
+            "W polu 'strength' (opcjonalnie 1-5) podaj jak silne jest to powiązanie na podstawie liczby i jakości dowodów w tym dokumencie.\n"
+            "Jeśli ta sama relacja pojawia się w wielu dokumentach — LLM może zwrócić kilka krawędzi; my je później zsumujemy.\n"
+            "Staraj się wyciągać jak najwięcej dat, ról, numerów dokumentów i konkretnych kwot.\n\n"
+            "id: snake_case, bez polskich znaków, max 40 znaków."
         )
         prompt = (
             f"DOKUMENTY DO ANALIZY:\n{context_str}\n\n"
@@ -1443,14 +2611,24 @@ def build_network():
             "NIE używaj placeholderów. Każdy label = prawdziwa wartość z tekstu.\n"
             "JSON:"
         )
+<<<<<<< HEAD
         payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
             OLLAMA_URL + "/api/generate",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST"
+=======
+        openrouter_model = data.get("openrouter_model")
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            stream=False,
+            provider=llm_provider,
+            model=openrouter_model,
+            max_tokens=3000
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
         )
-        with urllib.request.urlopen(req, timeout=180) as r:
-            raw = json.loads(r.read().decode("utf-8"))["response"]
+        raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
         # Wyciągnij JSON z odpowiedzi
         json_match = re.search(r'\{[\s\S]*\}', raw)
@@ -1472,21 +2650,61 @@ def build_network():
                     "label": n.get("label", nid)[:40]
                 })
 
-        seen_edges = set()
-        clean_edges = []
+        # Agregacja powiązań — liczymy SIŁĘ POWIĄZANIA (ile dowodów na daną relację)
+        # Zamiast odrzucać duplikaty, grupujemy je i sumujemy
+        edge_groups = defaultdict(list)  # key=(src,tgt) -> lista krawędzi
+
         for e in graph.get("edges", []):
-            src = str(e.get("source","")).strip()
-            tgt = str(e.get("target","")).strip()
-            key = f"{src}|{tgt}"
-            if src and tgt and src in seen_nodes and tgt in seen_nodes and key not in seen_edges:
-                seen_edges.add(key)
-                clean_edges.append({
-                    "source":   src,
-                    "target":   tgt,
-                    "label":    e.get("label","")[:35],
-                    "doc":      e.get("doc","")[:80],
-                    "evidence": e.get("evidence","")[:150]
-                })
+            src = str(e.get("source", "")).strip()
+            tgt = str(e.get("target", "")).strip()
+            if not src or not tgt or src not in seen_nodes or tgt not in seen_nodes:
+                continue
+            key = (src, tgt)
+            edge_groups[key].append({
+                "label":    (e.get("label") or "")[:40],
+                "doc":      (e.get("doc") or "")[:90],
+                "evidence": (e.get("evidence") or "")[:180],
+                "date":     (e.get("date") or "")[:20],
+                "strength": max(1, min(5, int(e.get("strength", 1))))
+            })
+
+        clean_edges = []
+        for (src, tgt), items in edge_groups.items():
+            # Wybierz najbardziej powtarzający się label jako główny
+            labels = [it["label"] for it in items if it["label"]]
+            main_label = max(set(labels), key=labels.count) if labels else items[0]["label"]
+
+            # Zbierz wszystkie unikalne dowody (max 6)
+            seen_ev = set()
+            evidences = []
+            for it in items:
+                ev_key = (it["doc"], it["evidence"][:80])
+                if ev_key not in seen_ev:
+                    seen_ev.add(ev_key)
+                    evidences.append({
+                        "doc": it["doc"],
+                        "evidence": it["evidence"],
+                        "date": it["date"]
+                    })
+                if len(evidences) >= 6:
+                    break
+
+            total_strength = sum(it["strength"] for it in items) + (len(items) - 1)  # bonus za powtarzalność
+
+            clean_edges.append({
+                "source": src,
+                "target": tgt,
+                "label": main_label,
+                "doc": items[0]["doc"],           # pierwszy dokument dla kompatybilności
+                "evidence": items[0]["evidence"], # pierwszy dowód
+                "date": items[0]["date"],
+                "strength": max(1, min(12, total_strength)),  # cap
+                "evidence_count": len(evidences),
+                "evidences": evidences
+            })
+
+        # Sortuj krawędzie malejąco po sile (najmocniejsze relacje na wierzchu)
+        clean_edges.sort(key=lambda e: e.get("strength", 1), reverse=True)
 
         return jsonify({
             "success": True,
@@ -1881,6 +3099,51 @@ def cache_stats():
 
 SQL_CONFIG_PATH = Path(__file__).parent / ".sql_config.json"
 
+<<<<<<< HEAD
+=======
+
+# ============================================================
+# BEZPIECZEŃSTWO SQL — Walidacja zapytań generowanych przez LLM
+# ============================================================
+
+DANGEROUS_SQL_KEYWORDS = {
+    "EXEC", "EXECUTE", "XP_", "SP_", "OPENROWSET", "OPENQUERY",
+    "INTO OUTFILE", "INTO DUMPFILE", "LOAD_FILE", "BENCHMARK",
+    "SLEEP(", "WAITFOR", "SHUTDOWN"
+}
+
+def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str | None]:
+    """
+    Rygorystyczna walidacja bezpieczeństwa zapytań SQL generowanych przez LLM.
+    Zwraca (is_safe, error_message).
+    """
+    if not sql_query or not sql_query.strip():
+        return False, "Puste zapytanie SQL"
+
+    sql_upper = sql_query.strip().upper()
+
+    # 1. Sprawdź pierwsze słowo kluczowe
+    first_token = sql_upper.split()[0] if sql_upper.split() else ""
+    if first_token not in allowed_first_words:
+        return False, f"Niedozwolone polecenie: {first_token}"
+
+    # 2. Odrzuć wielokrotne instrukcje (bardzo częsty wektor ataku)
+    semicolon_count = sql_upper.count(";")
+    if semicolon_count > 1:
+        return False, "Wykryto wiele instrukcji SQL (potencjalne SQL Injection)"
+
+    # 3. Szukaj niebezpiecznych słów kluczowych
+    for dangerous in DANGEROUS_SQL_KEYWORDS:
+        if dangerous in sql_upper:
+            return False, f"Wykryto zabronione słowo kluczowe: {dangerous}"
+
+    # 4. Podstawowa ochrona przed komentowaniem reszty zapytania
+    if "--" in sql_query or "/*" in sql_query:
+        return False, "Wykryto komentarze SQL — potencjalne obejście walidacji"
+
+    return True, None
+
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 def _load_sql_config() -> dict:
     """Załaduj zapisaną konfigurację SQL Server."""
     if SQL_CONFIG_PATH.exists():
@@ -1895,7 +3158,11 @@ def _save_sql_config(cfg: dict):
     try:
         SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
     except Exception as e:
+<<<<<<< HEAD
         print(f"⚠️ Błąd zapisu config: {e}")
+=======
+        logger.warning(f"Błąd zapisu config: {e}")
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
 def _get_sql_conn(cfg: dict):
     """Tworzy połączenie z MS SQL Server przez pymssql.
@@ -1916,6 +3183,148 @@ def _get_sql_conn(cfg: dict):
         charset  = "UTF-8"
     )
 
+<<<<<<< HEAD
+=======
+
+def _format_table_key(schema_name: str, table_name: str) -> str:
+    if schema_name and schema_name.lower() != "dbo":
+        return f"{schema_name}.{table_name}"
+    return table_name
+
+
+def _fetch_sql_known_tables(cfg: dict) -> set[str]:
+    """Zwraca znane nazwy tabel (z i bez schematu) — do walidacji SQL z LLM."""
+    known: set[str] = set()
+    conn = _get_sql_conn(cfg)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT TABLE_SCHEMA, TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+        """)
+        for schema_name, table_name in cur.fetchall():
+            key = _format_table_key(schema_name, table_name)
+            known.add(key.lower())
+            known.add(table_name.lower())
+    finally:
+        conn.close()
+    return known
+
+
+def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
+    """Buduje opis schematu z INFORMATION_SCHEMA gdy użytkownik nie załadował tabel ręcznie."""
+    conn = _get_sql_conn(cfg)
+    lines: list[str] = []
+    try:
+        cur = conn.cursor()
+        row_limit = max(100, min(max_tables * 40, 4000))
+        cur.execute(f"""
+            SELECT TOP {row_limit} c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            INNER JOIN INFORMATION_SCHEMA.TABLES t
+              ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+            WHERE t.TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
+        """)
+        grouped: dict[str, list[str]] = defaultdict(list)
+        tables_seen: set[str] = set()
+        for schema_name, table_name, col_name, data_type in cur.fetchall():
+            key = _format_table_key(schema_name, table_name)
+            if key not in tables_seen and len(tables_seen) >= max_tables:
+                continue
+            tables_seen.add(key)
+            grouped[key].append(f"{col_name} ({data_type})")
+
+        if not grouped:
+            cur.execute("""
+                SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY TABLE_NAME
+            """)
+            for schema_name, table_name, table_type in cur.fetchall()[:max_tables]:
+                key = _format_table_key(schema_name, table_name)
+                lines.append(f"Tabela: {key} ({table_type})")
+        else:
+            for key in sorted(grouped.keys()):
+                cols = ", ".join(grouped[key][:25])
+                extra = " …" if len(grouped[key]) > 25 else ""
+                lines.append(f"Tabela: {key}\nKolumny: {cols}{extra}")
+    finally:
+        conn.close()
+
+    header = (
+        "UWAGA: Używaj WYŁĄCZNIE poniższych tabel i kolumn. "
+        "Nie wymyślaj nazw (np. Budgets), jeśli ich nie ma na liście.\n"
+    )
+    return header + "\n".join(lines)
+
+
+def _resolve_sql_schema(cfg: dict, user_schema: str) -> tuple[str, set[str]]:
+    """Łączy schemat z UI z automatycznym pobraniem z bazy, gdy brak szczegółów."""
+    known = _fetch_sql_known_tables(cfg)
+    user_schema = (user_schema or "").strip()
+    if user_schema and "Kolumny:" in user_schema:
+        return user_schema, known
+    if user_schema:
+        auto = _build_auto_sql_schema(cfg)
+        merged = (
+            f"{user_schema}\n\n--- Pełny schemat z bazy (INFORMATION_SCHEMA) ---\n{auto}"
+        )
+        return merged, known
+    return _build_auto_sql_schema(cfg), known
+
+
+def _clean_llm_sql_response(raw: str) -> str:
+    sql_query = (raw or "").strip()
+    sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+    sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+    return sql_query
+
+
+def _extract_sql_table_refs(sql_query: str) -> set[str]:
+    """Wyciąga nazwy tabel z FROM / JOIN (bez aliasów)."""
+    refs: set[str] = set()
+    pattern = re.compile(
+        r'(?:FROM|JOIN)\s+'
+        r'(?:\[?([\w]+)\]?\.)?'
+        r'\[?([\w]+)\]?',
+        re.IGNORECASE
+    )
+    for schema_part, table_part in pattern.findall(sql_query):
+        if table_part:
+            refs.add(table_part.lower())
+        if schema_part and table_part:
+            refs.add(f"{schema_part}.{table_part}".lower())
+    return refs
+
+
+def _validate_sql_table_refs(sql_query: str, known_tables: set[str]) -> tuple[bool, str | None]:
+    if not known_tables:
+        return True, None
+    refs = _extract_sql_table_refs(sql_query)
+    if not refs:
+        return True, None
+    unknown = sorted(r for r in refs if r not in known_tables)
+    if unknown:
+        sample = ", ".join(sorted(known_tables)[:12])
+        return False, (
+            f"Nieznane tabele w zapytaniu: {', '.join(unknown)}. "
+            f"Dostępne m.in.: {sample}{'…' if len(known_tables) > 12 else ''}"
+        )
+    return True, None
+
+
+def _generate_sql_via_ollama(prompt_sql: str, system_sql: str) -> str:
+    """Text-to-SQL zawsze przez lokalny Ollama (bez limitów OpenRouter)."""
+    result = _call_ollama(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+    if isinstance(result, dict):
+        return _clean_llm_sql_response(result.get("response", ""))
+    return _clean_llm_sql_response(str(result))
+
+
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 @app.route('/sql/config', methods=['GET', 'POST'])
 def sql_config():
     """Zapisz/załaduj konfigurację SQL Server."""
@@ -1989,7 +3398,7 @@ def sql_schema():
     try:
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor()
-        cur.execute(f"""
+        cur.execute("""
             SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_NAME = %s
@@ -1997,7 +3406,10 @@ def sql_schema():
         """, (table,))
         cols = [{"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
                 for r in cur.fetchall()]
-        cur.execute(f"SELECT COUNT(*) FROM [{table}]")
+
+        # Bezpieczne zapytanie z escapowaniem nazwy tabeli
+        safe_table = table.replace("]", "]]")
+        cur.execute(f"SELECT COUNT(*) FROM [{safe_table}]")
         row_count = cur.fetchone()[0]
         conn.close()
         return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
@@ -2018,18 +3430,21 @@ def sql_ask():
     sql_query = ""
     cols = []
     try:
+        effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
         system_sql = (
             "Jesteś ekspertem T-SQL (MS SQL Server 2016). "
             "Na podstawie schematu bazy danych generujesz zapytania SQL. "
             "ZASADY: używaj tylko SELECT (nigdy DELETE/UPDATE/DROP). "
+            "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
             "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
             "Jeśli pytanie jest niejasne — zgadnij najbardziej sensowne zapytanie."
         )
         prompt_sql = (
-            f"SCHEMAT BAZY:\n{schema}\n\n"
+            f"SCHEMAT BAZY:\n{effective_schema}\n\n"
             f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
             "Wygeneruj zapytanie T-SQL:"
         )
+<<<<<<< HEAD
         payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
                    "stream": False, "options": {"num_ctx": 8192}}
         req = urllib.request.Request(
@@ -2039,14 +3454,19 @@ def sql_ask():
         )
         with urllib.request.urlopen(req, timeout=60) as r:
             sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
+=======
+        sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
-        sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
-        sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+        # === Wzmocniona walidacja bezpieczeństwa ===
+        is_safe, error_msg = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+        if not is_safe:
+            return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
+                            "sql": sql_query[:200]})
 
-        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
-        if first_word not in ("SELECT", "WITH"):
-            return jsonify({"success": False, "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
-                            "sql": sql_query})
+        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+        if not ok_tables:
+            return jsonify({"success": False, "error": table_err, "sql": sql_query[:200]})
 
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor(as_dict=True)
@@ -2105,19 +3525,23 @@ def sql_write():
         return jsonify({"success": False, "error": "Brak pytania lub zapytania SQL"})
 
     try:
+        effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
+
         # Krok 1: generuj SQL (tylko jeśli nie przyszło gotowe)
         if not sql_query:
             system_sql = (
                 "Jesteś ekspertem T-SQL (MS SQL Server). "
                 "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE, CREATE TABLE. "
+                "Używaj TYLKO tabel z podanego schematu. "
                 "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
                 "Bądź precyzyjny — podaj konkretne wartości i warunki WHERE."
             )
             prompt_sql = (
-                f"SCHEMAT BAZY:\n{schema}\n\n"
+                f"SCHEMAT BAZY:\n{effective_schema}\n\n"
                 f"ZADANIE: {question}\n\n"
                 "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
             )
+<<<<<<< HEAD
             payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
                        "stream": False, "options": {"num_ctx": 4096}}
             req = urllib.request.Request(
@@ -2129,12 +3553,22 @@ def sql_write():
                 sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
             sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
             sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+=======
+            sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
-        # Sprawdź typ polecenia
         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+
+        # === Wzmocniona walidacja bezpieczeństwa (nawet przy confirmed=True) ===
         allowed_write = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "MERGE")
-        if first_word not in allowed_write and first_word not in ("SELECT", "WITH"):
-            return jsonify({"success": False, "error": f"Nieznane polecenie: {first_word}", "sql": sql_query})
+        is_safe, error_msg = _is_sql_safe(sql_query, allowed_write + ("SELECT", "WITH"))
+        if not is_safe:
+            return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
+                            "sql": sql_query[:200]})
+
+        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+        if not ok_tables:
+            return jsonify({"success": False, "error": table_err, "sql": sql_query[:200]})
 
         # Krok 2: jeśli nie potwierdzone — zwróć SQL do podglądu
         if not confirmed:
@@ -2152,16 +3586,23 @@ def sql_write():
                 "first_word": first_word
             })
 
-        # Krok 3: wykonaj po potwierdzeniu
-        conn = _get_sql_conn(cfg)
-        cur  = conn.cursor()
-        cur.execute(sql_query)
-        rows_affected = cur.rowcount
-        conn.commit()
-        conn.close()
+        # Krok 3: wykonaj po potwierdzeniu (z bezpiecznym zamykaniem zasobów)
+        conn = None
+        cur = None
+        try:
+            conn = _get_sql_conn(cfg)
+            cur = conn.cursor()
+            cur.execute(sql_query)
+            rows_affected = cur.rowcount
+            conn.commit()
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 
         # Log audytu
-        print(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
+        logger.debug(f"[SQL WRITE] {first_word} | rows={rows_affected} | {sql_query[:100]}")
 
         return jsonify({
             "success":       True,
@@ -2233,7 +3674,7 @@ def sql_vectorize():
                     rows_buf.append(text)
 
                 # Batch embeddings
-                vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                vecs = get_embeddings_batch(rows_buf, batch_size=6)
                 points = []
                 for txt, vec in zip(rows_buf, vecs):
                     cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
@@ -2324,7 +3765,11 @@ def sql_vectorize_all():
                             rows_buf.append(text)
 
                         # Batch embeddings
+<<<<<<< HEAD
                         vecs = get_embeddings_batch(rows_buf, batch_size=8)
+=======
+                        vecs = get_embeddings_batch(rows_buf, batch_size=6)
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                         points = []
                         for txt, vec in zip(rows_buf, vecs):
                             cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
@@ -2346,8 +3791,17 @@ def sql_vectorize_all():
 
                     yield sse("table_done", {"table": table, "rows": table_done, "table_idx": table_idx})
 
+<<<<<<< HEAD
                 except Exception as e:
                     yield sse("table_error", {"table": table, "error": str(e)})
+=======
+                    # Mała przerwa między tabelami (tymczasowe odciążenie serwera podczas Vectorize All)
+                    time.sleep(0.8)
+
+                except Exception as e:
+                    yield sse("table_error", {"table": table, "error": str(e)})
+                    time.sleep(0.5)  # krótka przerwa nawet przy błędzie
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
             conn.close()
             _docs_cache["data"] = None

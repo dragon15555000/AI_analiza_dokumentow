@@ -1,0 +1,91 @@
+PROPRIETARY SOFTWARE LICENSE
+Copyright (c) 2025 Owner. All rights reserved.
+
+NINIEJSZE OPROGRAMOWANIE JEST WŁASNOŚCIĄ PRYWATNĄ I PRAWNIE CHRONIONĄ.
+
+1. DEFINICJE
+   „Oprogramowanie” oznacza cały kod źródłowy, pliki binarne, dokumentację,
+   skrypty, modele, dane oraz wszelkie pochodne utwory związane z projektem
+   „AI Analiza Dokumentów” (w tym aplikację Flask, moduły ekstrakcji,
+   interfejs użytkownika oraz wszelkie powiązane komponenty).
+
+2. PRAWA WŁASNOŚCI INTELEKTUALNEJ
+   Całość praw autorskich, praw własności intelektualnej oraz wszelkich
+   innych praw do Oprogramowania należy wyłącznie do Właściciela.
+   Oprogramowanie jest chronione prawem autorskim Rzeczypospolitej Polskiej,
+   prawem Unii Europejskiej oraz międzynarodowymi konwencjami (m.in. Konwencja
+   Berneńska, TRIPS, WIPO).
+
+3. ZAKAZANE DZIAŁANIA
+   Bez uprzedniej, pisemnej zgody Właściciela zabronione jest:
+   - kopiowanie, powielanie lub rozpowszechnianie Oprogramowania w jakiejkolwiek formie,
+   - modyfikowanie, dekompilacja, inżynieria wsteczna lub tworzenie dzieł pochodnych,
+   - wynajmowanie, dzierżawa, sublicencjonowanie, sprzedaż lub udostępnianie
+     osobom trzecim,
+   - wykorzystywanie Oprogramowania w celach komercyjnych bez ważnej licencji.
+
+4. BRAK LICENCJI OPEN SOURCE
+   Oprogramowanie NIE jest oprogramowaniem open source ani free software.
+   Nie stosuje się do niego żadnych licencji MIT, Apache, GPL, BSD ani
+   podobnych. Kod nie może być używany, kopiowany ani włączany do innych
+   projektów bez wyraźnej, pisemnej zgody autora.
+
+5. MOŻLIWOŚĆ LICENCJONOWANIA KOMERCYJNEGO
+   Właściciel rozważa udzielanie płatnych licencji komercyjnych, OEM,
+   integracyjnych lub wdrożeniowych. W sprawie warunków licencji prosimy
+   o kontakt.
+
+6. OGRANICZENIE ODPOWIEDZIALNOŚCI
+   Oprogramowanie dostarczane jest „TAK JAK JEST”, bez jakichkolwiek
+   gwarancji, wyraźnych ani dorozumianych. Właściciel nie ponosi
+   odpowiedzialności za jakiekolwiek szkody wynikające z użytkowania.
+
+7. OBOWIĄZUJĄCE PRAWO
+   Niniejsza umowa podlega prawu polskiemu. Wszelkie spory rozstrzygane
+   będą przez właściwe sądy w Polsce.
+
+────────────────────────────────────────────────────────────
+
+ENGLISH VERSION (for reference)
+
+PROPRIETARY AND CONFIDENTIAL
+
+Copyright (c) 2025 Owner. All rights reserved.
+
+This software and all associated files, documentation, and materials
+(hereinafter "the Software") constitute proprietary intellectual property
+of the Owner.
+
+The Software is protected by Polish copyright law, EU directives, and
+international treaties (Berne Convention, TRIPS Agreement, WIPO Copyright
+Treaty).
+
+NO PERMISSION IS GRANTED for any of the following without prior written
+consent from the Owner:
+- Copying, reproducing, or distributing the Software in any form
+- Modifying, reverse-engineering, decompiling, or creating derivative works
+- Renting, leasing, sublicensing, selling, or making the Software available
+  to third parties
+- Using the Software for any commercial purpose without a valid commercial license
+
+This is NOT open source software. No MIT, Apache, GPL, BSD or similar
+license applies. The source code may not be used, copied, or incorporated
+into any other project without explicit written authorization.
+
+COMMERCIAL LICENSING
+The Owner is open to discussing paid commercial, OEM, integration or
+deployment licenses. Please contact for terms.
+
+DISCLAIMER
+The Software is provided "AS IS", without warranty of any kind.
+The Owner shall not be liable for any damages arising from its use.
+
+GOVERNING LAW
+This agreement shall be governed by the laws of the Republic of Poland.
+
+────────────────────────────────────────────────────────────
+
+Właściciel / Owner: [Twoje imię i nazwisko / nazwa firmy]
+Kontakt w sprawie licencji: [adres e-mail / telefon]
+
+Data: 2025

@@ -19,6 +19,12 @@
 
         /* Wyszukiwarka */
         .search-card { background: #fff; border-radius: 10px; padding: 20px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 16px; }
+        #sqlVecProgress, #sqlVecAllProgress {
+            background: #fafafa;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
         .search-card h2 { font-size: 1.15rem; font-weight: 700; color: #1a1f36; margin-bottom: 16px; }
         .filter-badge { cursor: pointer; display: inline-block; padding: 3px 10px; border-radius: 20px; background: #e8f0fe; color: #1a73e8; font-size: 0.78rem; font-weight: 600; margin: 2px; border: 1px solid #c5d8fc; transition: all 0.15s; }
         .filter-badge:hover { background: #1a73e8; color: #fff; }
@@ -31,9 +37,58 @@
         .cat-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; color: #6c757d; margin: 12px 0 6px; }
 
         /* Wyniki */
-        .ai-box { background: #eef2ff; border-left: 5px solid #4f46e5; border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
-        .ai-box h5 { color: #4f46e5; font-weight: 700; font-size: 0.95rem; margin-bottom: 10px; }
-        .result-card { background: #fff; border-radius: 8px; border-left: 5px solid #0d6efd; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); overflow: hidden; }
+        .ai-box { 
+            background: #f0f4ff; 
+            border-left: 5px solid #6366f1; 
+            border-radius: 10px; 
+            padding: 20px 22px; 
+            margin-bottom: 18px; 
+            box-shadow: 0 2px 8px rgba(99, 102, 241, 0.1);
+        }
+        .ai-box h5 { 
+            color: #4338ca; 
+            font-weight: 700; 
+            font-size: 1rem; 
+            margin-bottom: 12px; 
+            display: flex; 
+            align-items: center; 
+            gap: 8px; 
+        }
+        .result-card { 
+            background: #fff; 
+            border-radius: 10px; 
+            border-left: 5px solid #3b82f6; 
+            margin-bottom: 14px; 
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06); 
+            overflow: hidden; 
+            transition: all 0.2s ease;
+        }
+        .result-card:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            transform: translateY(-1px);
+        }
+        .result-header {
+            padding: 12px 18px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8fafc;
+        }
+        .result-preview {
+            padding: 0 18px 12px;
+            font-size: 0.9rem;
+            color: #475569;
+            line-height: 1.5;
+        }
+        .result-body {
+            padding: 12px 18px;
+            background: #f8fafc;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            border-top: 1px solid #e2e8f0;
+            display: none;
+        }
         .result-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: #f8f9fa; cursor: pointer; user-select: none; }
         .result-header:hover { background: #f0f2f5; }
         .result-fname { font-weight: 700; font-size: 0.9rem; color: #0d6efd; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 10px; }
@@ -84,6 +139,31 @@
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
+
+    <!-- Prosty przełącznik LLM + wybór modelu -->
+    <div class="badge-stat" style="background:#2d3561; padding:2px 6px; border-radius:999px; display:flex; align-items:center; gap:6px; font-size:0.72rem;">
+        <select id="llmProviderSelect" onchange="onLlmProviderChange()" 
+                style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:999px; cursor:pointer;">
+            <option value="ollama">Lokalny</option>
+            <option value="openrouter">OpenRouter</option>
+        </select>
+
+        <select id="openrouterModelSelect" onchange="onOpenRouterModelSelectChange()"
+                style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:6px; cursor:pointer; font-size:0.7rem; max-width:260px;">
+            <option value="">-- wybierz model --</option>
+            <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★ najlepszy</option>
+            <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free) - szybki</option>
+            <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (free)</option>
+            <option value="qwen/qwen-2.5-7b-instruct:free">Qwen 2.5 7B (free) - niezawodny</option>
+            <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (free) - bardzo szybki</option>
+            <option value="custom">Własny model...</option>
+        </select>
+
+        <input id="openrouterModelInput" type="text" placeholder="lub wpisz model"
+               style="background:#1a1f36; color:#e2e8f0; border:1px solid #4a5568; font-size:0.7rem; padding:1px 6px; border-radius:6px; width:180px; display:none;"
+               onchange="onOpenRouterModelChange()"
+               title="Np: meta-llama/llama-3.3-70b-instruct:free">
+    </div>
 </div>
 
 <ul class="nav nav-tabs" id="mainTabs">
@@ -109,7 +189,7 @@
         <a class="nav-link" href="#" onclick="showTab('collections'); return false;">Bazy</a>
     </li>
     <li class="nav-item">
-        <a class="nav-link" href="#" onclick="showTab('import'); return false;">Import</a>
+        <a class="nav-link" href="#" onclick="showTab('import'); setTimeout(()=> { if (!window.quickDrivesLoaded) loadQuickDrives(); window.quickDrivesLoaded=true; }, 80); return false;">Import</a>
     </li>
 </ul>
 
@@ -127,6 +207,7 @@
                 <div class="input-group input-group-lg mb-2">
                     <input type="text" id="queryInput" class="form-control" placeholder="Wybierz szablon lub wpisz pytanie..." onkeydown="if(event.key==='Enter') executeSearch()">
                     <button class="btn btn-primary px-4" onclick="executeSearch()" id="searchBtn">Analizuj</button>
+                    <button class="btn btn-danger px-3" id="searchStopBtn" style="display:none;">⏹ Stop</button>
                 </div>
                 <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
                     <select class="form-select form-select-sm" id="searchMode" style="max-width:220px;">
@@ -168,7 +249,11 @@
 
             <div id="aiResponseContainer"></div>
             <div id="resultsContainer"></div>
+<<<<<<< HEAD
             <div id="sqlHybridResults" class="d-none mt-3" style="background:#f8f9fa;padding:12px;border-radius:8px;border-left:4px solid #0dcaf0;">
+=======
+            <div id="sqlHybridResults" class="d-none mt-3" style="background:#f0f9ff;padding:14px 16px;border-radius:10px;border-left:5px solid #0ea5e9;">
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
               <div class="d-flex align-items-center mb-2">
                 <span class="badge bg-info me-2">🗄 SQL Server</span>
                 <small id="sqlHybridInfo" class="text-muted" style="font-size:0.85rem;"></small>
@@ -249,6 +334,8 @@
             <div id="deleteBar" class="d-none d-flex align-items-center gap-2 ms-auto flex-shrink-0">
                 <span class="small fw-bold text-danger" id="selectedCount"></span>
                 <button class="btn btn-danger btn-sm" onclick="deleteSelected()">🗑 Usuń zaznaczone</button>
+                <button class="btn btn-primary btn-sm" onclick="generateSelectedMetadataReport()">📋 Raport (JSON)</button>
+                <button class="btn btn-info btn-sm" onclick="generateSelectedMetadataReportDocx()">📄 Raport (DOCX)</button>
                 <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">Odznacz</button>
             </div>
         </div>
@@ -364,6 +451,36 @@
         <input type="text" id="networkQuery" class="form-control" placeholder="Zapytanie do analizy..." onkeydown="if(event.key==='Enter') buildNetwork()">
         <button class="btn btn-primary" onclick="buildNetwork()" id="networkBtn">Buduj graf</button>
       </div>
+
+      <!-- FILTRY GRAFU - rozbudowane -->
+      <div id="networkFilters" class="mb-2" style="font-size:0.8rem;">
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-1">
+          <span class="text-muted small me-1">Węzły:</span>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="osoba" checked> Osoby</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="firma" checked> Firmy</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="kwota" checked> Kwoty</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="dokument" checked> Dokumenty</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="przetarg" checked> Przetargi</label>
+          <label class="form-check-label"><input type="checkbox" class="node-filter" value="umowa" checked> Umowy</label>
+        </div>
+
+        <div class="d-flex flex-wrap gap-3 align-items-center">
+          <!-- Siła powiązania -->
+          <div class="d-flex align-items-center gap-2">
+            <span class="text-muted small">Min. siła:</span>
+            <input type="range" id="networkMinStrength" min="1" max="10" step="1" value="1" style="width:110px;">
+            <span id="networkMinStrengthVal" class="fw-bold" style="min-width:18px;">1</span>
+          </div>
+
+          <!-- Typy relacji (dynamiczne) -->
+          <div class="flex-grow-1">
+            <span class="text-muted small me-1">Relacje:</span>
+            <span id="networkRelationFilters" class="d-inline-flex flex-wrap gap-1"></span>
+          </div>
+
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="resetNetworkFilters()" style="font-size:0.72rem;">Reset</button>
+        </div>
+      </div>
       <div class="mb-2">
         <select class="form-select form-select-sm" id="networkLimit">
           <option value="10">10 dokumentów</option>
@@ -416,7 +533,8 @@
           <span style="color:#1d4ed8;">━━ decyzja</span>
           <span style="color:#94a3b8;">╌╌ powiązanie</span>
         </div>
-        <div class="small text-muted">Przeciągnij węzły · Scroll = zoom · Hover = info</div>
+        <div class="small text-muted mb-1">Grubość krawędzi + badge <b>×N</b> = siła powiązania (liczba niezależnych dowodów)</div>
+        <div class="small text-muted">Filtry działają na bieżąco · Przeciągnij węzły · Scroll = zoom · Hover/click krawędzi = dowody</div>
       </div>
     </div>
   </div>
@@ -529,26 +647,58 @@
 
     <!-- Wektoryzacja -->
     <div class="search-card mt-3" id="sqlVectorCard" style="display:none;">
-      <h2 style="font-size:0.95rem;">Wektoryzuj tabelę do Qdrant</h2>
-      <p class="small text-muted mb-2">Eksportuje wiersze tabeli jako chunki tekstowe — potem możesz pytać o nie w zakładce Wyszukiwanie.</p>
-      <div class="row g-2 align-items-end mb-2">
+      <h5 class="mb-1" style="font-weight:700;color:#166534;">🗄 Wektoryzacja tabel SQL</h5>
+      <p class="small text-muted mb-3">Przenieś dane z wybranych tabel do wektorowej bazy. Dzięki temu będziesz mógł zadawać pytania łączące dokumenty i dane z bazy.</p>
+
+      <div class="row g-2 align-items-end mb-3">
         <div class="col">
-          <label class="form-label small fw-bold mb-1">Tabela</label>
+          <label class="form-label small fw-semibold mb-1">Tabela</label>
           <select id="sqlVecTable" class="form-select form-select-sm"></select>
         </div>
         <div class="col">
-          <label class="form-label small fw-bold mb-1">Kolumna tytułu (opcjonalna)</label>
+          <label class="form-label small fw-semibold mb-1">Kolumna jako tytuł (opcjonalna)</label>
           <input type="text" id="sqlVecLabelCol" class="form-control form-control-sm" placeholder="np. NumerSprawy">
         </div>
-        <div class="col-auto">
-          <button class="btn btn-success btn-sm" onclick="sqlVectorize()">Wektoryzuj</button>
+        <div class="col-auto d-flex gap-2">
+          <button class="btn btn-success btn-sm px-3" onclick="sqlVectorize()">Wektoryzuj tabelę</button>
+          <button class="btn btn-danger btn-sm" id="sqlVecStopBtn" style="display:none;">⏹ Stop</button>
         </div>
       </div>
-      <div id="sqlVecProgress" class="d-none">
-        <div class="progress mb-1" style="height:8px;">
-          <div id="sqlVecBar" class="progress-bar bg-success" style="width:0%;"></div>
+
+      <!-- Single table progress -->
+      <div id="sqlVecProgress" class="d-none mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <small class="fw-semibold text-success">Postęp wektoryzacji</small>
+          <small id="sqlVecPct" class="fw-bold text-success">0%</small>
         </div>
-        <div id="sqlVecLog" style="font-size:0.78rem;color:#6c757d;font-family:monospace;"></div>
+        <div class="progress" style="height:10px; background:#e6f4ea;">
+          <div id="sqlVecBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
+        </div>
+        <div id="sqlVecLog" class="mt-2 small text-muted" style="font-family:monospace; background:#f8f9fa; padding:6px 10px; border-radius:4px; max-height:90px; overflow-y:auto;"></div>
+      </div>
+
+      <hr class="my-3" style="border-color:#e5e7eb;">
+
+      <!-- Vectorize All -->
+      <div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-outline-warning flex-grow-1 py-2" onclick="sqlVectorizeAll()" id="sqlVecAllBtn">
+            <strong>🗄 Wektoryzuj całą bazę danych</strong>
+          </button>
+          <button class="btn btn-danger" id="sqlVecAllStopBtn" style="display:none;">⏹ Stop</button>
+        </div>
+        <small class="text-muted d-block mt-1" style="font-size:0.72rem;">(może trwać długo przy dużej bazie)</small>
+      </div>
+
+      <div id="sqlVecAllProgress" class="d-none mt-3">
+        <div class="d-flex justify-content-between mb-1">
+          <small id="sqlVecAllStatus" class="text-muted fw-semibold"></small>
+          <small id="sqlVecAllPct" class="fw-bold text-warning"></small>
+        </div>
+        <div class="progress" style="height:10px; background:#fef3c7;">
+          <div id="sqlVecAllBar" class="progress-bar bg-warning" style="width:0%; transition: width 0.3s;"></div>
+        </div>
+        <div id="sqlVecAllLog" class="mt-2 small" style="font-family:monospace; background:#fffbeb; padding:8px 10px; border-radius:6px; max-height:160px; overflow-y:auto; font-size:0.73rem;"></div>
       </div>
       <hr class="my-2" style="border:none;border-top:1px solid #ddd;">
       <div class="mt-2">
@@ -651,6 +801,16 @@
   <div class="col-lg-5">
     <div class="search-card">
       <h2>Przeglądarka folderów</h2>
+
+      <!-- AUTOMATYCZNE MAPOWANIE DYSKÓW LOKALNYCH -->
+      <div class="mb-2">
+        <div class="d-flex align-items-center justify-content-between mb-1">
+          <span class="small fw-bold text-muted">Szybki dostęp — dyski lokalne:</span>
+          <button class="btn btn-sm btn-link p-0" style="font-size:0.7rem;" onclick="loadQuickDrives()" title="Odśwież listę dysków">↻</button>
+        </div>
+        <div id="quickDrives" class="d-flex flex-wrap gap-1" style="min-height:28px;"></div>
+      </div>
+
       <div class="input-group input-group-sm mb-2">
         <input type="text" id="browsePathInput" class="form-control font-monospace" value="/mnt" placeholder="/mnt/...">
         <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
@@ -700,22 +860,23 @@
         <button class="btn btn-outline-danger" onclick="confirmReindex()" id="reindexBtn" title="Wyczyść kolekcję i importuj od nowa z nowym chunkingiem (overlap 200)">
           ↺ Pełny re-indeks
         </button>
+        <button class="btn btn-danger" id="importStopBtn" style="display:none;">⏹ Stop</button>
       </div>
       <div id="reindexStatus" class="alert alert-warning small d-none">
         Czyszczenie kolekcji...
       </div>
 
       <div id="importProgressWrap" style="display:none;">
-        <div class="d-flex justify-content-between small mb-1">
-          <span id="importProgressLabel" class="fw-bold"></span>
-          <span id="importProgressPct" class="text-muted"></span>
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <span id="importProgressLabel" class="fw-semibold text-success"></span>
+          <span id="importProgressPct" class="fw-bold text-success" style="font-size:0.9rem;"></span>
         </div>
-        <div class="progress mb-2" style="height:10px;">
-          <div id="importProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%"></div>
+        <div class="progress mb-3" style="height:12px; background:#e6f4ea; border-radius:6px;">
+          <div id="importProgressBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
         </div>
-        <div id="importLog" style="max-height:250px;overflow-y:auto;font-size:0.78rem;font-family:monospace;background:#1a1f36;color:#a0aec0;border-radius:6px;padding:10px;"></div>
+        <div id="importLog" style="max-height:220px;overflow-y:auto;font-size:0.75rem;font-family:monospace;background:#0f172a;color:#94a3b8;border-radius:8px;padding:10px 12px; line-height:1.4;"></div>
       </div>
-      <div id="importDone" class="alert alert-success mt-2 d-none small"></div>
+      <div id="importDone" class="alert alert-success mt-3 d-none small py-2"></div>
     </div>
   </div>
 </div>
@@ -746,14 +907,62 @@ function showTab(name) {
     if (name === 'sql') sqlLoadSavedConn();
 }
 
-// ---- STATS ----
+// ---- HEALTH DASHBOARD (nowy, bogatszy status) ----
+let healthInterval = null;
+
+function updateHealthStatus() {
+    if (typeof isHeavyVectorizing !== 'undefined' && isHeavyVectorizing) return;
+
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+
+            // Wektory
+            const vectorsEl = document.getElementById('statVectors');
+            if (vectorsEl) {
+                vectorsEl.textContent = (d.active_collection?.points || 0).toLocaleString('pl');
+            }
+
+            // Status ogólny
+            const statusEl = document.getElementById('statStatus');
+            if (statusEl) {
+                const overall = d.overall || 'unknown';
+                statusEl.textContent = overall.toUpperCase();
+                statusEl.className = overall === 'ok' ? 'text-success' : 'text-warning';
+            }
+
+            // Aktywna kolekcja
+            const colEl = document.getElementById('statActiveCol');
+            if (colEl && d.active_collection) {
+                colEl.textContent = d.active_collection.name;
+            }
+
+            // Opcjonalnie: można tu dodać więcej badge'y (np. LLM status)
+        })
+        .catch(() => {
+            const statusEl = document.getElementById('statStatus');
+            if (statusEl) {
+                statusEl.textContent = 'OFFLINE';
+                statusEl.className = 'text-danger';
+            }
+        });
+}
+
+function startHealthAutoRefresh() {
+    // Natychmiastowe pierwsze sprawdzenie
+    updateHealthStatus();
+
+    // Auto-refresh co 30 sekund
+    if (healthInterval) clearInterval(healthInterval);
+    healthInterval = setInterval(() => {
+        updateHealthStatus();
+    }, 30000);
+}
+
+// Zachowujemy starą funkcję dla kompatybilności (niektóre miejsca jej używają)
 function updateStats() {
-    fetch('/stats').then(r => r.json()).then(d => {
-        if (d.success) {
-            document.getElementById('statVectors').textContent = (d.vectors_count || 0).toLocaleString('pl');
-            document.getElementById('statStatus').textContent  = String(d.status).toUpperCase();
-        }
-    }).catch(() => {});
+    updateHealthStatus();
 }
 
 // ---- DOCS BROWSER ----
@@ -796,6 +1005,7 @@ function renderDocTable(docs) {
             <td class="text-end">
                 <button class="doc-row-btn" onclick="searchByFile('${safe}')">Szukaj</button>
                 ${d.file.match(/\.xlsx?$/i) ? `<button class="doc-row-btn" style="color:#d97706;border-color:#fde68a;background:#fffbeb;" onclick="analyzeExcel('${safe}')">🔬 Forensyka</button>` : ''}
+                <button class="doc-row-btn" onclick="showDocMetadata('${safe}', ${i})">📋 Metadane</button>
             </td>
         </tr>`;
     }).join('');
@@ -826,6 +1036,172 @@ function onDocCheck() {
     }
     sa.indeterminate = checked.length > 0 && checked.length < all.length;
     sa.checked = all.length > 0 && checked.length === all.length;
+}
+
+// --- Metadane dokumentów (dla śledczych) ---
+function showDocMetadata(fileName, index) {
+    const doc = allDocs[index];
+    if (!doc) return;
+
+    const meta = doc.metadata || {};
+
+    let html = `<h5 style="margin-bottom:12px;">📄 ${doc.file}</h5>`;
+
+    html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane systemowe</h6>`;
+    html += `<table style="width:100%;font-size:0.85rem;margin-bottom:12px;">`;
+    if (meta.size_human) html += `<tr><td style="width:140px;color:#64748b;">Rozmiar</td><td><strong>${meta.size_human}</strong></td></tr>`;
+    if (meta.created) html += `<tr><td style="color:#64748b;">Utworzono</td><td>${meta.created}</td></tr>`;
+    if (meta.modified) html += `<tr><td style="color:#64748b;">Zmodyfikowano</td><td>${meta.modified}</td></tr>`;
+    if (meta.accessed) html += `<tr><td style="color:#64748b;">Ostatni dostęp</td><td>${meta.accessed}</td></tr>`;
+    html += `</table>`;
+
+    if (meta.embedded && Object.keys(meta.embedded).length > 0) {
+        html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane wbudowane w plik</h6>`;
+        for (const [format, data] of Object.entries(meta.embedded)) {
+            html += `<div style="margin-bottom:10px;"><strong style="color:#0ea5e9;">${format.toUpperCase()}</strong><br>`;
+            for (const [k, v] of Object.entries(data)) {
+                html += `<span style="color:#64748b;">${k}:</span> <strong>${v}</strong><br>`;
+            }
+            html += `</div>`;
+        }
+    } else {
+        html += `<div class="text-muted small mt-2">Brak dodatkowych metadanych wbudowanych w plik.</div>`;
+    }
+
+    html += `<details class="mt-3"><summary style="cursor:pointer;font-size:0.8rem;color:#64748b;">Pokaż surowe metadane (JSON)</summary>`;
+    html += `<pre style="font-size:0.7rem;background:#f1f5f9;padding:8px;border-radius:4px;overflow:auto;max-height:220px;">${JSON.stringify(meta, null, 2)}</pre></details>`;
+
+    let modal = document.getElementById('metadataModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'metadataModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:99999;display:flex;align-items:center;justify-content:center;';
+        document.body.appendChild(modal);
+    }
+
+    modal.innerHTML = `
+        <div style="background:white;max-width:720px;width:95%;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+            <div style="padding:20px 24px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+                <strong style="font-size:1.05rem;">Metadane pliku — ${doc.file}</strong>
+                <button onclick="document.getElementById('metadataModal').remove()" style="background:none;border:none;font-size:1.4rem;line-height:1;cursor:pointer;">&times;</button>
+            </div>
+            <div style="padding:20px 24px;max-height:70vh;overflow:auto;">
+                ${html}
+            </div>
+            <div style="padding:14px 24px;border-top:1px solid #eee;display:flex;gap:8px;justify-content:flex-end;">
+                <button class="btn btn-outline-secondary btn-sm" onclick="copyMetadataToClipboard(${index})">📋 Kopiuj JSON</button>
+                <button class="btn btn-primary btn-sm" onclick="downloadMetadataReport(${index})">📄 Pobierz raport (JSON)</button>
+                <button class="btn btn-secondary btn-sm" onclick="document.getElementById('metadataModal').remove()">Zamknij</button>
+            </div>
+        </div>
+    `;
+    modal.style.display = 'flex';
+}
+
+function copyMetadataToClipboard(index) {
+    const doc = allDocs[index];
+    if (!doc || !doc.metadata) return;
+    navigator.clipboard.writeText(JSON.stringify(doc.metadata, null, 2)).then(() => {
+        alert('Metadane skopiowane do schowka');
+    });
+}
+
+function downloadMetadataReport(index) {
+    const doc = allDocs[index];
+    if (!doc || !doc.metadata) return;
+    const blob = new Blob([JSON.stringify(doc.metadata, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `metadata_${doc.file.replace(/[^a-z0-9]/gi, '_')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function generateSelectedMetadataReport() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    if (!checked.length) {
+        alert('Nie zaznaczono żadnych plików.');
+        return;
+    }
+
+    const selectedFiles = [];
+    checked.forEach(chk => {
+        const fileName = chk.value;
+        const doc = allDocs.find(d => d.file === fileName);
+        if (doc) {
+            selectedFiles.push({
+                file: doc.file,
+                full_path: doc.full_path || '',
+                chunks: doc.chunks || 0,
+                metadata: doc.metadata || null
+            });
+        }
+    });
+
+    const report = {
+        generated_at: new Date().toISOString(),
+        total_files: selectedFiles.length,
+        files: selectedFiles
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const date = new Date().toISOString().slice(0,10);
+    a.download = `raport_metadanych_${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    document.getElementById('deleteBar').classList.add('d-none');
+}
+
+function generateSelectedMetadataReportDocx() {
+    const checked = document.querySelectorAll('.doc-check:checked');
+    if (!checked.length) {
+        alert('Nie zaznaczono żadnych plików.');
+        return;
+    }
+
+    const selectedFiles = [];
+    checked.forEach(chk => {
+        const fileName = chk.value;
+        const doc = allDocs.find(d => d.file === fileName);
+        if (doc) {
+            selectedFiles.push({
+                file: doc.file,
+                full_path: doc.full_path || '',
+                chunks: doc.chunks || 0,
+                metadata: doc.metadata || null
+            });
+        }
+    });
+
+    fetch('/export/metadata_report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: selectedFiles })
+    })
+    .then(response => {
+        if (!response.ok) throw new Error('Błąd generowania raportu');
+        return response.blob();
+    })
+    .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const date = new Date().toISOString().slice(0,10);
+        a.download = `raport_metadanych_${date}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        document.getElementById('deleteBar').classList.add('d-none');
+    })
+    .catch(err => {
+        alert('Błąd podczas generowania raportu DOCX: ' + err.message);
+    });
 }
 
 function clearSelection() {
@@ -914,13 +1290,36 @@ function executeSearch() {
     const aiContainer = document.getElementById('aiResponseContainer');
     const sqlResultsContainer = document.getElementById('sqlHybridResults');
     const btn = document.getElementById('searchBtn');
+    const stopBtn = document.getElementById('searchStopBtn');
 
     loader.classList.remove('d-none');
     container.innerHTML = '';
     aiContainer.innerHTML = '';
     if (sqlResultsContainer) sqlResultsContainer.classList.add('d-none');
     btn.disabled = true;
+    if (stopBtn) stopBtn.style.display = '';
 
+<<<<<<< HEAD
+=======
+    const controller = new AbortController();
+
+    // Stop button
+    if (stopBtn) {
+        stopBtn.onclick = () => {
+            controller.abort();
+            if (stopBtn) stopBtn.style.display = 'none';
+            loader.classList.add('d-none');
+            const box = document.getElementById('aiStreamBox');
+            if (box) {
+                const sp = box.querySelector('.spinner-border');
+                if (sp) sp.remove();
+            }
+            container.innerHTML = `<div class="alert alert-warning">⏹ Wyszukiwanie anulowane przez użytkownika.</div>`;
+            btn.disabled = false;
+        };
+    }
+
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     // Wybierz endpoint na podstawie połączenia SQL
     const hasSQL = sqlConn && sqlConn.server && sqlConn.database;
     const endpoint = hasSQL ? '/hybrid/stream' : '/search/stream';
@@ -928,13 +1327,23 @@ function executeSearch() {
         query: query + getChatContext(),
         limit, mode,
         file_filter: activeFileFilter,
+<<<<<<< HEAD
+=======
+        llm_provider: getCurrentLlmProvider(),
+        openrouter_model: getCurrentOpenRouterModel(),
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
         ...(hasSQL ? {conn: sqlConn, schema: sqlSchema} : {})
     };
 
     fetch(endpoint, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
+<<<<<<< HEAD
         body: JSON.stringify(body)
+=======
+        body: JSON.stringify(body),
+        signal: controller.signal
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     })
     .then(async response => {
         const reader  = response.body.getReader();
@@ -942,12 +1351,14 @@ function executeSearch() {
         let buffer = '', resultsData = null, aiText = '';
 
         const readChunk = async () => {
-            const {done, value} = await reader.read();
-            if (done) { btn.disabled = false; return; }
-            buffer += decoder.decode(value, {stream: true});
-            const parts = buffer.split('\n\n');
-            buffer = parts.pop();
+            try {
+                const {done, value} = await reader.read();
+                if (done) { btn.disabled = false; return; }
+                buffer += decoder.decode(value, {stream: true});
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop();
 
+<<<<<<< HEAD
             for (const block of parts) {
                 const dataLine = block.split('\n').find(l => l.startsWith('data: '));
                 if (!dataLine) continue;
@@ -966,8 +1377,30 @@ function executeSearch() {
                                         <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
                         ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
                                         <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+=======
+                for (const block of parts) {
+                    const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+                    if (!dataLine) continue;
+                    try {
+                        const ev = JSON.parse(dataLine.slice(6));
+                        if (ev.results !== undefined) {
+                            resultsData = ev;
+                            loader.classList.add('d-none');
+                            const modeColor = {detective:'#b45309',legal:'#1d4ed8',inconsistency:'#7c3aed',extract:'#065f46',normal:'#4f46e5'}[ev.mode]||'#4f46e5';
+                            aiContainer.innerHTML = `
+                                <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
+                                        <div class="d-flex gap-2">
+                                            <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
+                            ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
+                                            <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                                        </div>
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                                     </div>
+                                    <div id="aiAnswerBody" style="font-size:0.96rem;line-height:1.65;color:#1e2937;white-space:pre-wrap;"></div>
                                 </div>
+<<<<<<< HEAD
                                 <div id="aiAnswerBody" style="font-size:0.95rem;line-height:1.7;font-weight:500;white-space:pre-wrap;"></div>
                             </div>
                             <div id="verifyContainer"></div>`;
@@ -992,21 +1425,62 @@ function executeSearch() {
                             // Dodaj do pamięci czatu
                             chatHistory.push({q: query, a: aiText});
                             if (chatHistory.length > 5) chatHistory.shift();
+=======
+                                <div id="verifyContainer"></div>`;
+                            renderDocResults(ev.results, query, container);
+                        } else if (ev.sql_results !== undefined) {
+                            renderSqlHybridTable(ev.sql_results);
+                        } else if (ev.token !== undefined) {
+                            // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
+                            const t = ev.token;
+                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter'))) {
+                                // Zamień na prawdziwy błąd z ładnym UI
+                                handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
+                                return;
+                            }
+                            aiText += t;
+                            const body = document.getElementById('aiAnswerBody');
+                            if (body) body.innerHTML = formatAiText(aiText, mode);
+                        } else if (ev.done !== undefined) {
+                            const box = document.getElementById('aiStreamBox');
+                            if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
+                            if (resultsData) {
+                                window._lastSearchData = {query, mode_label: resultsData.mode_label,
+                                    results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
+                                if (document.getElementById('verifyToggle').checked && resultsData.contexts?.length)
+                                    runVerification(query, aiText, resultsData.contexts);
+                                saveToHistory(query, aiText, resultsData.mode);
+                                chatHistory.push({q: query, a: aiText});
+                                if (chatHistory.length > 5) chatHistory.shift();
+                            }
+                            if (stopBtn) stopBtn.style.display = 'none';
+                            btn.disabled = false; return;
+                        } else if (ev.error) {
+                            loader.classList.add('d-none');
+                            if (typeof ev.error === 'string' && (ev.error.includes('RATE_LIMIT') || ev.error.includes('429') || ev.error.includes('Too Many'))) {
+                                handleRateLimitError(ev.error, container, loader, btn, stopBtn, query, mode);
+                            } else {
+                                container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                            }
+                            btn.disabled = false; return;
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                         }
-                        btn.disabled = false; return;
-                    } else if (ev.error) {
-                        loader.classList.add('d-none');
-                        container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
-                        btn.disabled = false; return;
-                    }
-                } catch(e) {}
+                    } catch(e) {}
+                }
+                await readChunk();
+            } catch (err) {
+                // Lepsza obsługa zerwania połączenia podczas streamingu wyszukiwania
+                loader.classList.add('d-none');
+                container.innerHTML = `<div class="alert alert-warning">Połączenie przerwane podczas wyszukiwania. Spróbuj ponownie.</div>`;
+                btn.disabled = false;
+                console.warn("Search stream interrupted:", err);
             }
-            await readChunk();
         };
         await readChunk();
     })
     .catch(err => {
         loader.classList.add('d-none');
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         container.innerHTML = `<div class="alert alert-danger">Błąd: ${err}</div>`;
     });
@@ -1236,7 +1710,11 @@ function runVerification(query, answer, contexts) {
     fetch('/verify', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, answer, contexts})
+        body: JSON.stringify({
+            query, answer, contexts,
+            llm_provider: getCurrentLlmProvider(),
+            openrouter_model: getCurrentOpenRouterModel()
+        })
     })
     .then(r => r.json())
     .then(d => {
@@ -1403,8 +1881,26 @@ function browseDir(path) {
             ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
             : `<span>${d.current}</span>`;
         const list = document.getElementById('browseList');
-        if (!d.entries.length) {
-            list.innerHTML = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
+
+        if (!d.entries || d.entries.length === 0) {
+            let msg = '';
+            if (d.is_empty) {
+                msg = `<div class="p-3 text-muted small">
+                    <strong>Ten folder jest pusty.</strong><br>
+                    <span style="font-size:0.7rem">/mnt/g w WSL często pokazuje się jako pusty, gdy dysk nie jest w pełni zamontowany lub nie ma uprawnień.</span>
+                </div>`;
+            } else if (d.has_unlisted_items) {
+                msg = `<div class="p-3">
+                    <div class="small text-warning">Brak plików dokumentów w tym folderze.</div>
+                    <div class="small text-muted mt-1">Na dysku są pliki, ale żaden nie pasuje do wybranych typów (PDF/DOCX/XLSX itp.).</div>
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="browseDirWithAll('${d.current.replace(/'/g,"\\'")}')">Pokaż wszystkie pliki i foldery</button>
+                </div>`;
+            } else if (d.permission_denied > 0) {
+                msg = `<div class="p-3 text-muted small">Brak uprawnień do odczytu zawartości (${d.permission_denied} elementów pominiętych).</div>`;
+            } else {
+                msg = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
+            }
+            list.innerHTML = msg;
             return;
         }
         list.innerHTML = d.entries.map(e => {
@@ -1428,9 +1924,94 @@ function browseDir(path) {
     });
 }
 
+function browseDirWithAll(path) {
+    if (!path) path = '/mnt';
+    fetch('/browse?path=' + encodeURIComponent(path) + '&all=1')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+            document.getElementById('browsePathInput').value = d.current;
+            const crumb = document.getElementById('browseCrumb');
+            crumb.innerHTML = d.parent
+                ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
+                : `<span>${d.current}</span>`;
+            const list = document.getElementById('browseList');
+            if (!d.entries || !d.entries.length) {
+                list.innerHTML = '<div class="p-3 text-muted small">Folder jest pusty lub brak uprawnień.</div>';
+                return;
+            }
+            list.innerHTML = d.entries.map(e => {
+                if (e.type === 'dir') {
+                    return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
+                        <span style="color:#f59e0b;">📁</span>
+                        <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                        <button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
+                            onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>
+                    </div>`;
+                } else {
+                    const ext = e.ext || (e.name.split('.').pop() || '').toLowerCase();
+                    return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.75;">
+                        <span style="font-size:0.7rem;color:#64748b;">📄</span>
+                        <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                        <span class="ext-badge">${ext}</span>
+                    </div>`;
+                }
+            }).join('');
+        });
+}
+
 function selectImportFolder(path) {
     document.getElementById('importPathInput').value = path;
 }
+
+// ---- AUTOMATYCZNE DYSKI LOKALNE (Import tab) ----
+let quickDrivesLoaded = false;
+
+function loadQuickDrives() {
+    const container = document.getElementById('quickDrives');
+    if (!container) return;
+    container.innerHTML = '<span class="text-muted small">ładowanie...</span>';
+
+    fetch('/api/drives')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success || !d.drives || !d.drives.length) {
+                container.innerHTML = '<span class="text-muted small">Nie wykryto dysków</span>';
+                return;
+            }
+            container.innerHTML = d.drives.map(drive => {
+                const safePath = drive.path.replace(/'/g, "\\'");
+                const title = drive.path;
+                return `<button class="btn btn-sm btn-outline-secondary py-0 px-2" 
+                            style="font-size:0.72rem; border-radius:999px;"
+                            title="${title}"
+                            onclick="quickDriveSelect('${safePath}')">
+                        ${drive.icon || '💾'} ${drive.label}
+                    </button>`;
+            }).join(' ');
+            quickDrivesLoaded = true;
+        })
+        .catch(() => {
+            container.innerHTML = '<span class="text-muted small">Błąd pobierania dysków</span>';
+        });
+    window.quickDrivesLoaded = true;
+}
+
+function quickDriveSelect(path) {
+    // Ustaw oba inputy + od razu otwórz przeglądarkę
+    document.getElementById('browsePathInput').value = path;
+    document.getElementById('importPathInput').value = path;
+    browseDir(path);
+}
+
+// Auto-ładuj dyski przy pierwszym wejściu do zakładki Import
+const _origShowTab = showTab;
+showTab = function(name) {
+    _origShowTab(name);
+    if (name === 'import' && !window.quickDrivesLoaded) {
+        setTimeout(() => { if (document.getElementById('quickDrives')) loadQuickDrives(); }, 120);
+    }
+};
 
 // ---- IMPORT SSE ----
 function executeImport() {
@@ -1446,8 +2027,10 @@ function executeImport() {
     const pct  = document.getElementById('importProgressPct');
     const log  = document.getElementById('importLog');
     const done = document.getElementById('importDone');
+    const stopBtn = document.getElementById('importStopBtn');
 
     btn.disabled = true;
+    if (stopBtn) stopBtn.style.display = '';
     wrap.style.display = '';
     done.classList.add('d-none');
     log.innerHTML = '';
@@ -1458,6 +2041,18 @@ function executeImport() {
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
     const es = new EventSource('/import/stream?' + params.toString());
+
+    // Stop button handler
+    const stopHandler = () => {
+        es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
+        btn.disabled = false;
+        lbl.textContent = 'Anulowano przez użytkownika';
+        log.innerHTML += `<div style="color:#f59e0b;">⏹ Operacja anulowana.</div>`;
+    };
+    if (stopBtn) {
+        stopBtn.onclick = stopHandler;
+    }
 
     es.addEventListener('start', e => {
         const d = JSON.parse(e.data);
@@ -1485,6 +2080,7 @@ function executeImport() {
     es.addEventListener('done', e => {
         const d = JSON.parse(e.data);
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         bar.style.width = '100%';
         bar.classList.remove('progress-bar-animated');
@@ -1503,12 +2099,14 @@ function executeImport() {
             log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg}</div>`;
         } catch(_) {}
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
     });
 
     es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) return;
         es.close();
+        if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         log.innerHTML += `<div style="color:#fc8181;">❌ Połączenie SSE przerwane.</div>`;
     };
@@ -1753,7 +2351,12 @@ function buildNetwork() {
     fetch('/network', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, limit})
+        body: JSON.stringify({
+            query,
+            limit,
+            llm_provider: getCurrentLlmProvider(),
+            openrouter_model: getCurrentOpenRouterModel()
+        })
     })
     .then(r => r.json())
     .then(d => {
@@ -1774,7 +2377,10 @@ function buildNetwork() {
         document.getElementById('networkStats').textContent =
             `${d.nodes.length} węzłów · ${d.edges.length} relacji · z ${d.sources} dokumentów`;
         document.getElementById('networkLegend').classList.remove('d-none');
-        renderNetwork(d.nodes, d.edges);
+
+        // Zapisz oryginalne dane grafu i włącz filtry
+        saveNetworkData(d.nodes, d.edges);
+        renderNetworkWithFilters();
     })
     .catch(e => {
         document.getElementById('networkLoader').classList.add('d-none');
@@ -1783,6 +2389,229 @@ function buildNetwork() {
         document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${e}</div>`;
     });
 }
+
+// Pomocnik do pokazywania panelu z dowodami (obsługuje wiele evidencji + siłę powiązania)
+function showEdgeEvidence(d, event) {
+    if (!d.evidence && !d.doc && (!d.evidences || !d.evidences.length)) return;
+
+    const panel = document.getElementById('evidencePanel');
+    const sLabel = (d.source && typeof d.source === 'object') ? d.source.label : (d.source || '?');
+    const tLabel = (d.target && typeof d.target === 'object') ? d.target.label : (d.target || '?');
+
+    let title = `${sLabel} → ${tLabel}: ${d.label || ''}`;
+    if (d.strength > 1) title += `  ×${d.strength}`;
+    document.getElementById('evidenceTitle').textContent = title;
+
+    // Nagłówek z licznikiem
+    let header = '';
+    const cnt = d.evidence_count || (d.evidences ? d.evidences.length : 1);
+    if (cnt > 1) header = `📎 ${cnt} dowodów powiązania`;
+    else if (d.doc) header = `📄 ${d.doc}`;
+    if (d.date) header = (header ? header + '  •  ' : '') + `📅 ${d.date}`;
+    document.getElementById('evidenceDoc').textContent = header || (d.doc || '');
+
+    // Treść — jeśli mamy tablicę evidences pokazujemy listę
+    const evBox = document.getElementById('evidenceText');
+    if (d.evidences && d.evidences.length > 1) {
+        let html = `<div style="font-size:0.8rem;margin-bottom:4px;color:#4f46e5;">Najważniejsze dowody:</div>`;
+        d.evidences.slice(0, 5).forEach((ev, i) => {
+            html += `<div style="margin:3px 0;padding:4px 6px;background:#f8f9ff;border-radius:3px;border-left:2px solid #64748b;font-size:0.82rem;">`;
+            if (ev.date) html += `<span style="color:#16a34a;">📅 ${ev.date}</span> `;
+            if (ev.doc) html += `<span style="color:#64748b;">${ev.doc}</span><br>`;
+            html += `<span style="font-style:italic;">${(ev.evidence||'').slice(0,140)}</span>`;
+            html += `</div>`;
+        });
+        if (d.evidences.length > 5) html += `<div class="small text-muted">… i ${d.evidences.length-5} więcej</div>`;
+        evBox.innerHTML = html;
+    } else {
+        evBox.textContent = d.evidence || '(brak cytatu)';
+    }
+
+    panel.style.display = '';
+    if (event) event.stopPropagation();
+}
+
+// ============================================================
+// FILTRY DO SIECI POWIĄZAŃ (nowe rozbudowane filtrowanie)
+// ============================================================
+let networkOriginalNodes = [];
+let networkOriginalEdges = [];
+let networkRelationCheckboxes = {}; // label -> checkbox element
+
+function saveNetworkData(nodes, edges) {
+    networkOriginalNodes = JSON.parse(JSON.stringify(nodes)); // głęboka kopia
+    networkOriginalEdges = JSON.parse(JSON.stringify(edges));
+
+    // Wygeneruj dynamiczne checkboxy dla typów relacji
+    generateRelationFilterCheckboxes(edges);
+}
+
+function generateRelationFilterCheckboxes(edges) {
+    const container = document.getElementById('networkRelationFilters');
+    if (!container) return;
+
+    container.innerHTML = '';
+    networkRelationCheckboxes = {};
+
+    // Zbierz unikalne etykiety relacji + policz ile razy występują
+    const counts = {};
+    edges.forEach(e => {
+        const label = e.label || '(bez etykiety)';
+        counts[label] = (counts[label] || 0) + 1;
+    });
+
+    // Posortuj po liczbie wystąpień malejąco, weź max 12
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+    sorted.forEach(([label, count]) => {
+        const id = 'rel-' + label.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+        const labelEl = document.createElement('label');
+        labelEl.className = 'form-check-label';
+        labelEl.style.fontSize = '0.72rem';
+        labelEl.innerHTML = `
+            <input type="checkbox" id="${id}" class="relation-filter" checked>
+            <span title="${label} (${count})">${label.length > 18 ? label.slice(0,17)+'…' : label}</span>
+        `;
+        container.appendChild(labelEl);
+
+        const cb = labelEl.querySelector('input');
+        cb.onchange = renderNetworkWithFilters;
+        networkRelationCheckboxes[label] = cb;
+    });
+
+    // Jeśli jest więcej relacji niż pokazujemy
+    if (Object.keys(counts).length > 12) {
+        const more = document.createElement('span');
+        more.className = 'text-muted small ms-1';
+        more.textContent = `+${Object.keys(counts).length - 12} więcej`;
+        container.appendChild(more);
+    }
+
+    // Na wszelki wypadek dołącz listenery jeszcze raz
+    initNetworkFilterListeners();
+}
+
+function getActiveNetworkFilters() {
+    // Typy węzłów
+    const nodeTypes = {};
+    document.querySelectorAll('.node-filter').forEach(cb => {
+        nodeTypes[cb.value] = cb.checked;
+    });
+
+    // Minimalna siła
+    const minStrengthEl = document.getElementById('networkMinStrength');
+    const minStrength = minStrengthEl ? parseInt(minStrengthEl.value) : 1;
+
+    // Aktywne typy relacji
+    const activeRelations = new Set();
+    Object.entries(networkRelationCheckboxes).forEach(([label, cb]) => {
+        if (cb.checked) activeRelations.add(label);
+    });
+
+    return { nodeTypes, minStrength, activeRelations };
+}
+
+function applyNetworkFilters(nodes, edges) {
+    const filters = getActiveNetworkFilters();
+    const { nodeTypes, minStrength, activeRelations } = filters;
+
+    // 1. Filtruj węzły po typie
+    let filteredNodes = nodes.filter(n => {
+        const type = n.type || 'inne';
+        return nodeTypes[type] !== false; // domyślnie pokazuj jeśli nie ma checkboxa
+    });
+
+    const visibleNodeIds = new Set(filteredNodes.map(n => n.id));
+
+    // 2. Filtruj krawędzie: siła + relacja + tylko między widocznymi węzłami
+    let filteredEdges = edges.filter(e => {
+        const sId = (e.source && e.source.id) ? e.source.id : e.source;
+        const tId = (e.target && e.target.id) ? e.target.id : e.target;
+
+        if (!visibleNodeIds.has(sId) || !visibleNodeIds.has(tId)) return false;
+
+        const strength = Number(e.strength || e.evidence_count || 1);
+        if (strength < minStrength) return false;
+
+        const relLabel = e.label || '(bez etykiety)';
+        if (activeRelations.size > 0 && !activeRelations.has(relLabel)) return false;
+
+        return true;
+    });
+
+    // 3. Po odfiltrowaniu krawędzi — zostaw tylko węzły, które mają choć jedną krawędź (opcjonalnie można wyłączyć)
+    // Dla czytelności zostawiamy wszystkie pasujące węzły nawet jeśli zostały bez krawędzi po filtrach relacji
+    return { nodes: filteredNodes, edges: filteredEdges };
+}
+
+function renderNetworkWithFilters() {
+    if (!networkOriginalNodes.length) return;
+
+    const { nodes, edges } = applyNetworkFilters(networkOriginalNodes, networkOriginalEdges);
+
+    // Zaktualizuj statystyki
+    const statsEl = document.getElementById('networkStats');
+    if (statsEl) {
+        const totalNodes = networkOriginalNodes.length;
+        const totalEdges = networkOriginalEdges.length;
+        if (nodes.length !== totalNodes || edges.length !== totalEdges) {
+            statsEl.textContent = `Wyświetlono ${nodes.length}/${totalNodes} węzłów · ${edges.length}/${totalEdges} relacji (po filtrach)`;
+        }
+    }
+
+    // Przerenderuj graf
+    renderNetwork(nodes, edges);
+}
+
+function resetNetworkFilters() {
+    // Zaznacz wszystkie node-type
+    document.querySelectorAll('.node-filter').forEach(cb => cb.checked = true);
+
+    // Min siła = 1
+    const strengthSlider = document.getElementById('networkMinStrength');
+    if (strengthSlider) {
+        strengthSlider.value = 1;
+        const valEl = document.getElementById('networkMinStrengthVal');
+        if (valEl) valEl.textContent = '1';
+    }
+
+    // Zaznacz wszystkie relacje
+    Object.values(networkRelationCheckboxes).forEach(cb => cb.checked = true);
+
+    renderNetworkWithFilters();
+}
+
+// Podłącz listenery do istniejących checkboxów i suwaka
+function initNetworkFilterListeners() {
+    // Node type filters
+    document.querySelectorAll('.node-filter').forEach(cb => {
+        if (!cb._filterListenerAttached) {
+            cb.onchange = renderNetworkWithFilters;
+            cb._filterListenerAttached = true;
+        }
+    });
+
+    // Strength slider
+    const strengthSlider = document.getElementById('networkMinStrength');
+    const strengthVal = document.getElementById('networkMinStrengthVal');
+    if (strengthSlider && strengthVal && !strengthSlider._filterListenerAttached) {
+        strengthSlider.oninput = () => {
+            strengthVal.textContent = strengthSlider.value;
+            renderNetworkWithFilters();
+        };
+        strengthSlider._filterListenerAttached = true;
+    }
+}
+
+// Uruchom inicjalizację filtrów po załadowaniu strony
+document.addEventListener('DOMContentLoaded', () => {
+    // Małe opóźnienie, żeby DOM był gotowy
+    setTimeout(initNetworkFilterListeners, 300);
+    setTimeout(restoreLlmProvider, 400);
+
+    // Uruchom Dashboard statusu + auto-refresh co 30s
+    setTimeout(startHealthAutoRefresh, 600);
+});
 
 function renderNetwork(nodes, edges) {
     const svg  = document.getElementById('networkSvg');
@@ -1793,9 +2622,32 @@ function renderNetwork(nodes, edges) {
     // Wyczyść poprzedni graf
     d3.select('#networkSvg').selectAll('*').remove();
 
+    // Oblicz siłę węzłów (degree)
+    const degree = {};
+    edges.forEach(e => {
+        degree[e.source.id || e.source] = (degree[e.source.id || e.source] || 0) + 1;
+        degree[e.target.id || e.target] = (degree[e.target.id || e.target] || 0) + 1;
+    });
+    nodes.forEach(n => {
+        n.degree = degree[n.id] || 1;
+    });
+
+    // Używaj SIŁY z backendu (agregacja dowodów). Fallback na 1.
+    edges.forEach(e => {
+        // Serwer zwraca "strength" lub "evidence_count"
+        e.strength = Number(e.strength || e.evidence_count || 1);
+        if (e.strength < 1) e.strength = 1;
+    });
+
+    // Lepsza, bardziej czytelna paleta kolorów
     const colors = {
-        osoba:    '#fde68a', firma: '#bfdbfe', kwota: '#bbf7d0',
-        dokument: '#e9d5ff', inne: '#fed7aa'
+        osoba:    '#f59e0b',      // pomarańczowy – osoby
+        firma:    '#3b82f6',      // niebieski – firmy
+        kwota:    '#10b981',      // zielony – pieniądze
+        dokument: '#8b5cf6',      // fioletowy – dokumenty
+        przetarg: '#ec4899',      // różowy – przetargi
+        umowa:    '#14b8a6',      // turkusowy – umowy
+        inne:     '#64748b'       // szary
     };
     const edgeColors = (label) => {
         if (!label) return '#94a3b8';
@@ -1838,8 +2690,10 @@ function renderNetwork(nodes, edges) {
         .data(edges).join('line')
         .attr('stroke', d => edgeColors(d.label))
         .attr('stroke-width', d => {
-            const l = (d.label||'').toLowerCase();
-            return (l.includes('zł') || l.includes('zapłacił') || l.includes('przelał')) ? 3 : 1.5;
+            // Znacznie wyraźniejsze skalowanie siły powiązania
+            const s = Math.max(1, d.strength || 1);
+            const base = (d.label||'').toLowerCase().includes('zł') || (d.label||'').toLowerCase().includes('zapłacił') ? 2.8 : 1.6;
+            return Math.min(base + (s - 1) * 1.15, 9.5);
         })
         .attr('stroke-dasharray', d => {
             const l = (d.label||'').toLowerCase();
@@ -1847,24 +2701,17 @@ function renderNetwork(nodes, edges) {
         })
         .attr('marker-end','url(#arrow)')
         .style('cursor', d => d.evidence ? 'pointer' : 'default')
-        .on('click', (event, d) => {
-            if (!d.evidence && !d.doc) return;
-            const panel = document.getElementById('evidencePanel');
-            document.getElementById('evidenceTitle').textContent =
-                `${d.source?.label || d.source} → ${d.target?.label || d.target}: ${d.label}`;
-            document.getElementById('evidenceDoc').textContent =
-                d.doc ? `📄 Źródło: ${d.doc}` : '';
-            document.getElementById('evidenceText').textContent =
-                d.evidence || '(brak cytatu)';
-            panel.style.display = '';
-            event.stopPropagation();
-        })
+        .on('click', (event, d) => { showEdgeEvidence(d, event); })
         .on('mouseover', (e, d) => {
-            if (!d.evidence) return;
             const tt = document.getElementById('nodeTooltip');
-            tt.innerHTML = `<div style="font-weight:700;margin-bottom:3px;">${d.label}</div>`
-                + (d.doc ? `<div style="opacity:0.7;font-size:0.72rem;">📄 ${d.doc}</div>` : '')
-                + (d.evidence ? `<div style="margin-top:4px;font-style:italic;">${d.evidence.slice(0,100)}${d.evidence.length>100?'…':''}</div>` : '');
+            let html = `<div style="font-weight:700;margin-bottom:2px;">${d.label || ''}`;
+            if (d.strength > 1) html += ` <span style="color:#f59e0b;font-size:0.75rem;">×${d.strength}</span>`;
+            html += `</div>`;
+            if (d.date) html += `<div style="color:#16a34a;font-size:0.72rem;">📅 ${d.date}</div>`;
+            if (d.doc) html += `<div style="opacity:0.7;font-size:0.72rem;">📄 ${d.doc}</div>`;
+            if (d.evidence) html += `<div style="margin-top:3px;font-style:italic;font-size:0.78rem;">${d.evidence.slice(0,95)}${d.evidence.length>95?'…':''}</div>`;
+            if (d.evidence_count > 1) html += `<div style="margin-top:2px;color:#f59e0b;font-size:0.7rem;">+${d.evidence_count-1} innych dowodów</div>`;
+            tt.innerHTML = html;
             tt.style.display = 'block';
             tt.style.left = (e.offsetX + 12) + 'px';
             tt.style.top  = (e.offsetY - 10) + 'px';
@@ -1873,26 +2720,19 @@ function renderNetwork(nodes, edges) {
 
     const edgeLabel = g.append('g').selectAll('text')
         .data(edges).join('text')
-        .text(d => d.label + (d.evidence ? ' 📎' : ''))
+        .text(d => {
+            const badge = (d.strength && d.strength > 1) ? ` ×${d.strength}` : '';
+            return d.label + badge + (d.evidence ? ' 📎' : '');
+        })
         .attr('font-size', 9)
         .attr('fill', d => edgeColors(d.label))
         .attr('font-weight', d => {
             const l = (d.label||'').toLowerCase();
-            return (l.includes('zł') || l.includes('zapłacił')) ? '700' : '400';
+            return ((l.includes('zł') || l.includes('zapłacił')) || (d.strength > 2)) ? '700' : '400';
         })
         .attr('text-anchor','middle')
         .style('cursor', d => d.evidence ? 'pointer' : 'default')
-        .on('click', (event, d) => {
-            if (!d.evidence && !d.doc) return;
-            const panel = document.getElementById('evidencePanel');
-            const sLabel = typeof d.source === 'object' ? d.source.label : d.source;
-            const tLabel = typeof d.target === 'object' ? d.target.label : d.target;
-            document.getElementById('evidenceTitle').textContent = `${sLabel} → ${tLabel}: ${d.label}`;
-            document.getElementById('evidenceDoc').textContent = d.doc ? `📄 Źródło: ${d.doc}` : '';
-            document.getElementById('evidenceText').textContent = d.evidence || '(brak cytatu)';
-            panel.style.display = '';
-            event.stopPropagation();
-        });
+        .on('click', (event, d) => { showEdgeEvidence(d, event); });
 
     const node = g.append('g').selectAll('g')
         .data(nodes).join('g')
@@ -1909,16 +2749,51 @@ function renderNetwork(nodes, edges) {
         })
         .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
 
-    node.append('circle')
-        .attr('r', d => d.type === 'kwota' ? 22 : 28)
-        .attr('fill', d => colors[d.type] || colors.inne)
-        .attr('stroke','#fff').attr('stroke-width',2)
-        .style('filter','drop-shadow(0 2px 4px rgba(0,0,0,0.15))');
+    // Różne kształty w zależności od typu węzła (lepsza czytelność)
+    node.each(function(d) {
+        const gNode = d3.select(this);
+        const color = colors[d.type] || colors.inne;
+        const r = 20 + Math.min((d.degree || 1) * 2, 14); // większy węzeł = więcej powiązań
+
+        if (d.type === 'osoba') {
+            gNode.append('circle')
+                .attr('r', r)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        } else if (d.type === 'firma') {
+            gNode.append('rect')
+                .attr('x', -r * 0.9)
+                .attr('y', -r * 0.9)
+                .attr('width', r * 1.8)
+                .attr('height', r * 1.8)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2)
+                .attr('rx', 5);
+        } else if (d.type === 'kwota') {
+            gNode.append('path')
+                .attr('d', `M 0,-${r} L ${r},${r} L -${r},${r} Z`)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        } else {
+            gNode.append('circle')
+                .attr('r', r * 0.9)
+                .attr('fill', color)
+                .attr('stroke', '#1e2937')
+                .attr('stroke-width', 2);
+        }
+    });
 
     node.append('text')
-        .text(d => d.label.length > 14 ? d.label.slice(0,13)+'…' : d.label)
-        .attr('text-anchor','middle').attr('dy','0.35em')
-        .attr('font-size', 10).attr('font-weight','600').attr('fill','#1a1f36');
+        .text(d => d.label.length > 13 ? d.label.slice(0,12) + '…' : d.label)
+        .attr('text-anchor', 'middle')
+        .attr('dy', '0.35em')
+        .attr('font-size', 9)
+        .attr('font-weight', 700)
+        .attr('fill', '#1e2937')
+        .style('pointer-events', 'none');
 
     sim.on('tick', () => {
         link
@@ -1931,6 +2806,166 @@ function renderNetwork(nodes, edges) {
     });
 }
 
+// ============================================================
+// PROSTY PRZEŁĄCZNIK LLM (Ollama <-> OpenRouter)
+// ============================================================
+function getCurrentLlmProvider() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (sel) return sel.value;
+    return localStorage.getItem('llm_provider') || 'ollama';
+}
+
+function onLlmProviderChange() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (!sel) return;
+    localStorage.setItem('llm_provider', sel.value);
+    
+    const badge = sel.parentElement;
+    badge.style.transition = 'all 0.2s';
+    badge.style.boxShadow = sel.value === 'openrouter' ? '0 0 0 2px #22c55e' : 'none';
+    setTimeout(() => { badge.style.boxShadow = ''; }, 800);
+}
+
+function onOpenRouterModelChange() {
+    const input = document.getElementById('openrouterModelInput');
+    if (!input) return;
+    localStorage.setItem('openrouter_model', input.value.trim());
+}
+
+function onOpenRouterModelSelectChange() {
+    const select = document.getElementById('openrouterModelSelect');
+    const input = document.getElementById('openrouterModelInput');
+    if (!select || !input) return;
+
+    if (select.value === 'custom') {
+        input.style.display = 'inline-block';
+        input.focus();
+    } else if (select.value) {
+        input.style.display = 'none';
+        input.value = select.value;
+        localStorage.setItem('openrouter_model', select.value);
+    } else {
+        input.style.display = 'none';
+        input.value = '';
+        localStorage.removeItem('openrouter_model');
+    }
+}
+
+function restoreLlmProvider() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (!sel) return;
+
+    const savedProvider = localStorage.getItem('llm_provider');
+    if (savedProvider === 'openrouter' || savedProvider === 'ollama') {
+        sel.value = savedProvider;
+    }
+
+    // Przywróć zapisany model OpenRouter
+    const savedModel = localStorage.getItem('openrouter_model');
+    const modelSelect = document.getElementById('openrouterModelSelect');
+    const modelInput = document.getElementById('openrouterModelInput');
+
+    if (modelSelect && modelInput) {
+        if (savedModel) {
+            // Sprawdź czy model jest na liście
+            let found = false;
+            for (let i = 0; i < modelSelect.options.length; i++) {
+                if (modelSelect.options[i].value === savedModel) {
+                    modelSelect.value = savedModel;
+                    modelInput.style.display = 'none';
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                modelSelect.value = 'custom';
+                modelInput.style.display = 'inline-block';
+                modelInput.value = savedModel;
+            }
+        } else {
+            modelInput.style.display = 'none';
+        }
+    }
+}
+
+function getCurrentOpenRouterModel() {
+    const select = document.getElementById('openrouterModelSelect');
+    const input = document.getElementById('openrouterModelInput');
+
+    // Prefer select if it has a real value
+    if (select && select.value && select.value !== 'custom') {
+        return select.value;
+    }
+
+    // Fallback to custom input
+    if (input && input.value.trim()) {
+        return input.value.trim();
+    }
+
+    return localStorage.getItem('openrouter_model') || null;
+}
+
+// ---- Obsługa błędów rate limit OpenRouter z ładnym UI + szybki switch ----
+function handleRateLimitError(errorText, container, loader, btn, stopBtn, lastQuery, lastMode) {
+    loader.classList.add('d-none');
+    if (stopBtn) stopBtn.style.display = 'none';
+    btn.disabled = false;
+
+    const isFallback = errorText.includes('[FALLBACK]');
+    const alertClass = isFallback ? 'alert-warning' : 'alert-danger';
+    const icon = isFallback ? '⚠️' : '🚫';
+
+    container.innerHTML = `
+        <div class="alert ${alertClass}">
+            <strong>${icon} Limit OpenRouter</strong><br>
+            ${errorText.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim() || 'Zbyt wiele zapytań w krótkim czasie.'}
+            <div class="mt-2 d-flex gap-2 flex-wrap">
+                <button onclick="quickSwitchToOllama()" class="btn btn-primary btn-sm">
+                    🔄 Przełącz na Ollama (lokalny)
+                </button>
+                ${lastQuery ? `<button onclick="retryLastQuery(${JSON.stringify(lastQuery)}, ${JSON.stringify(lastMode || 'normal')})" class="btn btn-outline-secondary btn-sm">🔁 Spróbuj ponownie</button>` : ''}
+            </div>
+            <div class="small mt-2 text-muted">
+                Wskazówka: w <code>.env</code> ustaw <code>OPENROUTER_FALLBACK_TO_OLLAMA=true</code> żeby aplikacja automatycznie przełączała się na Ollama przy limicie.
+            </div>
+        </div>`;
+
+    // Opcjonalnie: automatycznie podświetl selektor providera
+    const providerSel = document.getElementById('llmProviderSelect');
+    if (providerSel) {
+        providerSel.style.boxShadow = '0 0 0 3px rgba(220, 53, 69, 0.4)';
+        setTimeout(() => { if (providerSel) providerSel.style.boxShadow = ''; }, 2200);
+    }
+}
+
+function quickSwitchToOllama() {
+    const sel = document.getElementById('llmProviderSelect');
+    if (sel) {
+        sel.value = 'ollama';
+        if (typeof onLlmProviderChange === 'function') onLlmProviderChange();
+        // Zapisz wybór
+        localStorage.setItem('llm_provider', 'ollama');
+    }
+    // Delikatne info
+    const toast = document.createElement('div');
+    toast.className = 'position-fixed bottom-0 end-0 m-3 p-2 bg-success text-white rounded shadow';
+    toast.style.zIndex = '9999';
+    toast.innerHTML = '✓ Przełączono na Ollama. Możesz teraz zadać pytanie ponownie.';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2400);
+}
+
+function retryLastQuery(query, mode) {
+    const qInput = document.getElementById('queryInput');
+    const modeSel = document.getElementById('modeSelect');
+    if (qInput) qInput.value = query || '';
+    if (modeSel && mode) modeSel.value = mode;
+    // Uruchom wyszukiwanie
+    const askBtn = document.getElementById('askBtn');
+    if (askBtn) askBtn.click();
+}
+
+// ============================================================
 // ---- ZAKŁADKA BAZY ----
 function loadStorageStats() {
     colTabLoaded = true;
@@ -2151,6 +3186,7 @@ function confirmReindex() {
 let sqlConn = {};
 let sqlTables = [];
 let sqlSchema = '';
+let isHeavyVectorizing = false;  // tymczasowa flaga podczas ciężkiej wektoryzacji
 
 const SQL_CONN_KEY = 'ai_sql_connection';
 
@@ -2243,6 +3279,9 @@ function sqlConnect() {
         st.innerHTML = `✅ Połączono. SQL Server: ${d.version.slice(0,60)}...`;
 
         sqlTables = d.tables;
+        sqlSchema = d.tables.map(t =>
+            `Tabela: ${t.name} (${t.type}) — kliknij „Schemat” po kolumny`
+        ).join('\n');
         document.getElementById('sqlTablesCard').style.display = '';
         document.getElementById('sqlVectorCard').style.display = '';
         renderSqlTableList(sqlTables);
@@ -2279,9 +3318,11 @@ function sqlLoadSchema(tableName) {
     .then(r=>r.json())
     .then(d => {
         if (!d.success) { alert('Błąd: ' + d.error); return; }
-        // Zbuduj opis schematu dla LLM
+        // Zbuduj opis schematu dla LLM (usuń placeholder tej tabeli jeśli był)
         const colDesc = d.columns.map(c => `  ${c.name} (${c.type}${c.max_len?'('+c.max_len+')':''})`).join('\n');
-        sqlSchema += `\nTabela: ${tableName} (${d.row_count} wierszy)\nKolumny:\n${colDesc}\n`;
+        const block = `\nTabela: ${tableName} (${d.row_count} wierszy)\nKolumny:\n${colDesc}\n`;
+        const placeholder = new RegExp(`Tabela: ${tableName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\([^\\n]+\\)[^\\n]*\\n?`, 'g');
+        sqlSchema = (sqlSchema.replace(placeholder, '') + block).trim() + '\n';
         document.getElementById('sqlResult').innerHTML = `
             <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-family:monospace;font-size:0.8rem;">
                 <strong>${tableName}</strong> — ${d.row_count.toLocaleString('pl')} wierszy<br>
@@ -2413,15 +3454,27 @@ function sqlVectorize() {
     const prog = document.getElementById('sqlVecProgress');
     const bar  = document.getElementById('sqlVecBar');
     const log  = document.getElementById('sqlVecLog');
+    const stopBtn = document.getElementById('sqlVecStopBtn');
+
     prog.classList.remove('d-none');
     bar.style.width = '0%';
     log.textContent = 'Startowanie...';
 
-    const params = new URLSearchParams();
-    // Wyślij przez POST z fetch streaming
+    const controller = new AbortController();
+
+    if (stopBtn) {
+        stopBtn.style.display = '';
+        stopBtn.onclick = () => {
+            controller.abort();
+            if (stopBtn) stopBtn.style.display = 'none';
+            log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja anulowana.</span>`;
+        };
+    }
+
     fetch('/sql/vectorize', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol})
+        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol}),
+        signal: controller.signal
     })
     .then(async response => {
         const reader = response.body.getReader();
@@ -2437,15 +3490,21 @@ function sqlVectorize() {
                 if (!dl) continue;
                 try {
                     const ev = JSON.parse(dl.slice(6));
-                    if (ev.done !== undefined) {
+                    if (ev.start !== undefined) {
+                        // Obsługa startu wektoryzacji pojedynczej tabeli
+                        log.textContent = `Przygotowanie do wektoryzacji tabeli ${ev.table} (${ev.total} wierszy)...`;
+                        bar.style.width = '0%';
+                    } else if (ev.done !== undefined) {
                         bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        if (stopBtn) stopBtn.style.display = 'none';
                         updateStats(); allDocs = [];
                     } else if (ev.progress !== undefined) {
                         bar.style.width = ev.pct + '%';
                         log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
                     } else if (ev.error) {
                         log.innerHTML += `<br><span style="color:red;">❌ ${ev.error}</span>`;
+                        if (stopBtn) stopBtn.style.display = 'none';
                     }
                 } catch(e) {}
             }
@@ -2473,7 +3532,27 @@ function sqlVectorizeAll() {
     status.textContent = '';
     pct_el.textContent = '';
 
+<<<<<<< HEAD
     fetch('/sql/vectorize-all', {
+=======
+    isHeavyVectorizing = true;   // wyłącz automatyczne odświeżanie statystyk podczas ciężkiej operacji
+
+    const controller = new AbortController();
+    const allStopBtn = document.getElementById('sqlVecAllStopBtn');
+    if (allStopBtn) {
+        allStopBtn.style.display = '';
+        allStopBtn.onclick = () => {
+            controller.abort();
+            if (allStopBtn) allStopBtn.style.display = 'none';
+            log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja całej bazy anulowana.</span>`;
+            btn.disabled = false;
+            isHeavyVectorizing = false;
+        };
+    }
+
+    fetch('/sql/vectorize-all', {
+        signal: controller.signal,
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({conn: sqlConn})
     })
@@ -2497,6 +3576,7 @@ function sqlVectorizeAll() {
                         totalTables = ev.total_tables;
                         log.innerHTML = `<strong>Tabele do zwektoryzowania:</strong> ${ev.tables.join(', ')}<br>`;
                     } else if (ev.table_start !== undefined) {
+<<<<<<< HEAD
                         status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${ev.table}`;
                     } else if (ev.progress !== undefined) {
                         bar.style.width = ev.pct + '%';
@@ -2507,17 +3587,45 @@ function sqlVectorizeAll() {
                         log.innerHTML += `✅ ${ev.table} (${ev.rows} wierszy)<br>`;
                     } else if (ev.table_error !== undefined) {
                         log.innerHTML += `❌ ${ev.table}: ${ev.error}<br>`;
+=======
+                        const t = ev.table || 'unknown';
+                        status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${t}`;
+                    } else if (ev.progress !== undefined) {
+                        bar.style.width = ev.pct + '%';
+                        pct_el.textContent = ev.pct + '%';
+                        const t = ev.table || 'unknown';
+                        status.textContent = `${t}: ${ev.done}/${ev.total} wierszy`;
+                    } else if (ev.table_done !== undefined) {
+                        tablesDone = ev.table_idx + 1;
+                        const t = ev.table || 'unknown';
+                        log.innerHTML += `✅ ${t} (${ev.rows || 0} wierszy)<br>`;
+                    } else if (ev.table_error !== undefined) {
+                        const t = ev.table || 'unknown';
+                        log.innerHTML += `❌ ${t}: ${ev.error}<br>`;
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                     } else if (ev.done !== undefined) {
                         bar.style.width = '100%';
                         bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
                         btn.disabled = false;
+<<<<<<< HEAD
                         status.textContent = '';
                         pct_el.textContent = '100%';
+=======
+                        if (allStopBtn) allStopBtn.style.display = 'none';
+                        status.textContent = '';
+                        pct_el.textContent = '100%';
+                        isHeavyVectorizing = false;
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                         updateStats(); allDocs = [];
                     } else if (ev.error !== undefined) {
                         log.innerHTML += `<br><span style="color:red;">❌ Błąd: ${ev.error}</span>`;
                         btn.disabled = false;
+<<<<<<< HEAD
+=======
+                        if (allStopBtn) allStopBtn.style.display = 'none';
+                        isHeavyVectorizing = false;
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                     }
                 } catch(e) {}
             }
@@ -2526,6 +3634,10 @@ function sqlVectorizeAll() {
     .catch(err => {
         log.innerHTML += `<br><span style="color:red;">❌ Błąd sieci: ${err}</span>`;
         btn.disabled = false;
+<<<<<<< HEAD
+=======
+        isHeavyVectorizing = false;
+>>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     });
 }
 
