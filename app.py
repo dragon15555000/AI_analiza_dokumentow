@@ -69,7 +69,7 @@ LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL   = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 OPENROUTER_MODEL_VERIFY = os.environ.get("OPENROUTER_MODEL_VERIFY", "google/gemini-2.0-flash-exp:free")
-OPENROUTER_FALLBACK_TO_OLLAMA = os.environ.get("OPENROUTER_FALLBACK_TO_OLLAMA", "false").lower() in ("1", "true", "yes")
+OPENROUTER_FALLBACK_TO_OLLAMA = os.environ.get("OPENROUTER_FALLBACK_TO_OLLAMA", "true").lower() in ("1", "true", "yes")
 OPENROUTER_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
 
 DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # ollama | openrouter
@@ -480,7 +480,14 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
             else:
                 break
 
-    # Final failure
+    # Final failure — optional fallback na Ollama (np. generowanie SQL / synteza)
+    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
+        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+        if isinstance(result, dict):
+            return result
+        return {"response": str(result)}
+
     raise last_error if last_error else RuntimeError("OpenRouter call failed")
 
 
@@ -1698,55 +1705,54 @@ def hybrid_stream():
 
             if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
                 try:
+                    effective_schema, known_tables = _resolve_sql_schema(conn_cfg, schema_str)
                     system_sql = (
                         "Jesteś ekspertem T-SQL (MS SQL Server). "
                         "Na podstawie schematu bazy generujesz zapytania SELECT. "
+                        "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
                         "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
                     )
                     prompt_sql = (
-                        f"SCHEMAT BAZY:\n{schema_str}\n\n"
+                        f"SCHEMAT BAZY:\n{effective_schema}\n\n"
                         f"PYTANIE: {query_text}\n\n"
                         "Wygeneruj SELECT:"
                     )
-                    payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
-                               "stream": False, "options": {"num_ctx": 4096}}
-                    req = urllib.request.Request(
-                        OLLAMA_URL + "/api/generate",
-                        data=json.dumps(payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"}, method="POST"
-                    )
-                    with urllib.request.urlopen(req, timeout=90) as r:
-                        sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
-
-                    sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
-                    sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+                    sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
 
                     first_word = sql_query.split()[0].upper() if sql_query.split() else ""
                     if first_word not in ("SELECT", "WITH"):
                         sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
                     else:
-                        conn = _get_sql_conn(conn_cfg)
-                        cur  = conn.cursor(as_dict=True)
-                        cur.execute(sql_query)
-                        rows = cur.fetchmany(200)
-                        cols = list(rows[0].keys()) if rows else []
+                        is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+                        if not is_safe:
+                            sql_data["error"] = safe_err or "Niedozwolone zapytanie SQL"
+                        else:
+                            ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+                            if not ok_tables:
+                                sql_data["error"] = table_err or "Nieznane tabele w SQL"
+                            else:
+                                conn = _get_sql_conn(conn_cfg)
+                                cur  = conn.cursor(as_dict=True)
+                                cur.execute(sql_query)
+                                rows = cur.fetchmany(200)
+                                cols = list(rows[0].keys()) if rows else []
 
-                        result_rows = []
-                        for row in rows:
-                            result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+                                result_rows = []
+                                for row in rows:
+                                    result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
 
-                        sql_data = {
-                            "success": True,
-                            "table": "wynik SQL",
-                            "columns": cols,
-                            "rows": result_rows,
-                            "sql": sql_query[:120],
-                            "total": len(result_rows)
-                        }
-                        conn.close()
+                                sql_data = {
+                                    "success": True,
+                                    "table": "wynik SQL",
+                                    "columns": cols,
+                                    "rows": result_rows,
+                                    "sql": sql_query[:120],
+                                    "total": len(result_rows)
+                                }
+                                conn.close()
 
                 except Exception as e:
-                    sql_data["error"] = str(e)[:100]
+                    sql_data["error"] = str(e)[:200]
 
             yield sse("sql_results", {"sql_results": sql_data})
 
@@ -2911,6 +2917,145 @@ def _get_sql_conn(cfg: dict):
         charset  = "UTF-8"
     )
 
+
+def _format_table_key(schema_name: str, table_name: str) -> str:
+    if schema_name and schema_name.lower() != "dbo":
+        return f"{schema_name}.{table_name}"
+    return table_name
+
+
+def _fetch_sql_known_tables(cfg: dict) -> set[str]:
+    """Zwraca znane nazwy tabel (z i bez schematu) — do walidacji SQL z LLM."""
+    known: set[str] = set()
+    conn = _get_sql_conn(cfg)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT TABLE_SCHEMA, TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+        """)
+        for schema_name, table_name in cur.fetchall():
+            key = _format_table_key(schema_name, table_name)
+            known.add(key.lower())
+            known.add(table_name.lower())
+    finally:
+        conn.close()
+    return known
+
+
+def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
+    """Buduje opis schematu z INFORMATION_SCHEMA gdy użytkownik nie załadował tabel ręcznie."""
+    conn = _get_sql_conn(cfg)
+    lines: list[str] = []
+    try:
+        cur = conn.cursor()
+        row_limit = max(100, min(max_tables * 40, 4000))
+        cur.execute(f"""
+            SELECT TOP {row_limit} c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            INNER JOIN INFORMATION_SCHEMA.TABLES t
+              ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+            WHERE t.TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
+        """)
+        grouped: dict[str, list[str]] = defaultdict(list)
+        tables_seen: set[str] = set()
+        for schema_name, table_name, col_name, data_type in cur.fetchall():
+            key = _format_table_key(schema_name, table_name)
+            if key not in tables_seen and len(tables_seen) >= max_tables:
+                continue
+            tables_seen.add(key)
+            grouped[key].append(f"{col_name} ({data_type})")
+
+        if not grouped:
+            cur.execute("""
+                SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY TABLE_NAME
+            """)
+            for schema_name, table_name, table_type in cur.fetchall()[:max_tables]:
+                key = _format_table_key(schema_name, table_name)
+                lines.append(f"Tabela: {key} ({table_type})")
+        else:
+            for key in sorted(grouped.keys()):
+                cols = ", ".join(grouped[key][:25])
+                extra = " …" if len(grouped[key]) > 25 else ""
+                lines.append(f"Tabela: {key}\nKolumny: {cols}{extra}")
+    finally:
+        conn.close()
+
+    header = (
+        "UWAGA: Używaj WYŁĄCZNIE poniższych tabel i kolumn. "
+        "Nie wymyślaj nazw (np. Budgets), jeśli ich nie ma na liście.\n"
+    )
+    return header + "\n".join(lines)
+
+
+def _resolve_sql_schema(cfg: dict, user_schema: str) -> tuple[str, set[str]]:
+    """Łączy schemat z UI z automatycznym pobraniem z bazy, gdy brak szczegółów."""
+    known = _fetch_sql_known_tables(cfg)
+    user_schema = (user_schema or "").strip()
+    if user_schema and "Kolumny:" in user_schema:
+        return user_schema, known
+    if user_schema:
+        auto = _build_auto_sql_schema(cfg)
+        merged = (
+            f"{user_schema}\n\n--- Pełny schemat z bazy (INFORMATION_SCHEMA) ---\n{auto}"
+        )
+        return merged, known
+    return _build_auto_sql_schema(cfg), known
+
+
+def _clean_llm_sql_response(raw: str) -> str:
+    sql_query = (raw or "").strip()
+    sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
+    sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+    return sql_query
+
+
+def _extract_sql_table_refs(sql_query: str) -> set[str]:
+    """Wyciąga nazwy tabel z FROM / JOIN (bez aliasów)."""
+    refs: set[str] = set()
+    pattern = re.compile(
+        r'(?:FROM|JOIN)\s+'
+        r'(?:\[?([\w]+)\]?\.)?'
+        r'\[?([\w]+)\]?',
+        re.IGNORECASE
+    )
+    for schema_part, table_part in pattern.findall(sql_query):
+        if table_part:
+            refs.add(table_part.lower())
+        if schema_part and table_part:
+            refs.add(f"{schema_part}.{table_part}".lower())
+    return refs
+
+
+def _validate_sql_table_refs(sql_query: str, known_tables: set[str]) -> tuple[bool, str | None]:
+    if not known_tables:
+        return True, None
+    refs = _extract_sql_table_refs(sql_query)
+    if not refs:
+        return True, None
+    unknown = sorted(r for r in refs if r not in known_tables)
+    if unknown:
+        sample = ", ".join(sorted(known_tables)[:12])
+        return False, (
+            f"Nieznane tabele w zapytaniu: {', '.join(unknown)}. "
+            f"Dostępne m.in.: {sample}{'…' if len(known_tables) > 12 else ''}"
+        )
+    return True, None
+
+
+def _generate_sql_via_ollama(prompt_sql: str, system_sql: str) -> str:
+    """Text-to-SQL zawsze przez lokalny Ollama (bez limitów OpenRouter)."""
+    result = _call_ollama(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+    if isinstance(result, dict):
+        return _clean_llm_sql_response(result.get("response", ""))
+    return _clean_llm_sql_response(str(result))
+
+
 @app.route('/sql/config', methods=['GET', 'POST'])
 def sql_config():
     """Zapisz/załaduj konfigurację SQL Server."""
@@ -3016,36 +3161,31 @@ def sql_ask():
     sql_query = ""
     cols = []
     try:
+        effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
         system_sql = (
             "Jesteś ekspertem T-SQL (MS SQL Server 2016). "
             "Na podstawie schematu bazy danych generujesz zapytania SQL. "
             "ZASADY: używaj tylko SELECT (nigdy DELETE/UPDATE/DROP). "
+            "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
             "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
             "Jeśli pytanie jest niejasne — zgadnij najbardziej sensowne zapytanie."
         )
         prompt_sql = (
-            f"SCHEMAT BAZY:\n{schema}\n\n"
+            f"SCHEMAT BAZY:\n{effective_schema}\n\n"
             f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
             "Wygeneruj zapytanie T-SQL:"
         )
-        payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
-                   "stream": False, "options": {"num_ctx": 8192}}
-        req = urllib.request.Request(
-            OLLAMA_URL + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
-
-        sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
-        sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+        sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
 
         # === Wzmocniona walidacja bezpieczeństwa ===
         is_safe, error_msg = _is_sql_safe(sql_query, ("SELECT", "WITH"))
         if not is_safe:
             return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
                             "sql": sql_query[:200]})
+
+        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+        if not ok_tables:
+            return jsonify({"success": False, "error": table_err, "sql": sql_query[:200]})
 
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor(as_dict=True)
@@ -3104,30 +3244,25 @@ def sql_write():
         return jsonify({"success": False, "error": "Brak pytania lub zapytania SQL"})
 
     try:
+        effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
+
         # Krok 1: generuj SQL (tylko jeśli nie przyszło gotowe)
         if not sql_query:
             system_sql = (
                 "Jesteś ekspertem T-SQL (MS SQL Server). "
                 "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE, CREATE TABLE. "
+                "Używaj TYLKO tabel z podanego schematu. "
                 "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
                 "Bądź precyzyjny — podaj konkretne wartości i warunki WHERE."
             )
             prompt_sql = (
-                f"SCHEMAT BAZY:\n{schema}\n\n"
+                f"SCHEMAT BAZY:\n{effective_schema}\n\n"
                 f"ZADANIE: {question}\n\n"
                 "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
             )
-            payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
-                       "stream": False, "options": {"num_ctx": 4096}}
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=60) as r:
-                sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
-            sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
-            sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
+            sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
 
         # === Wzmocniona walidacja bezpieczeństwa (nawet przy confirmed=True) ===
         allowed_write = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "MERGE")
@@ -3135,6 +3270,10 @@ def sql_write():
         if not is_safe:
             return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
                             "sql": sql_query[:200]})
+
+        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+        if not ok_tables:
+            return jsonify({"success": False, "error": table_err, "sql": sql_query[:200]})
 
         # Krok 2: jeśli nie potwierdzone — zwróć SQL do podglądu
         if not confirmed:
