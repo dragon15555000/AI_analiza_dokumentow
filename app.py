@@ -92,6 +92,146 @@ def get_llm_provider(request_provider: str | None = None) -> str:
 
 # ---- Rate limit helpers (OpenRouter) ----
 
+# ============================================================
+# HEALTH / STATUS DASHBOARD
+# ============================================================
+
+def _check_ollama_health() -> dict:
+    """Sprawdza czy Ollama działa i czy modele są dostępne."""
+    try:
+        url = OLLAMA_URL + "/api/tags"
+        with urllib.request.urlopen(url, timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            models = [m["name"] for m in data.get("models", [])]
+            has_llm = any(LLM_MODEL in m for m in models)
+            has_embed = any("nomic-embed-text" in m for m in models)
+            return {
+                "ok": True,
+                "url": OLLAMA_URL,
+                "models_available": len(models),
+                "has_llm": has_llm,
+                "has_embedding": has_embed,
+                "error": None
+            }
+    except Exception as e:
+        return {"ok": False, "url": OLLAMA_URL, "error": str(e)[:120]}
+
+
+def _check_openrouter_health() -> dict:
+    """Lekkie sprawdzenie OpenRouter (czy klucz działa)."""
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "Brak OPENROUTER_API_KEY"}
+
+    try:
+        # Używamy lekkiego endpointu (list models jest darmowy i szybki)
+        url = "https://openrouter.ai/api/v1/models"
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            return {
+                "ok": True,
+                "models_available": len(data.get("data", [])),
+                "error": None
+            }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def _sanitize_for_prompt(text: str, max_len: int = 1400) -> str:
+    """
+    Podstawowa ochrona przed Prompt Injection.
+    Usuwa/redaguje próby przejęcia kontroli nad LLM przez złośliwą treść w dokumentach.
+    """
+    if not text:
+        return ""
+
+    text = str(text)
+
+    # 1. Usuwamy / redagujemy typowe frazy jailbreak / prompt injection
+    jailbreak_patterns = [
+        r"(?i)(ignore|disregard|forget|override|disobey).*?(previous|above|all|earlier|prior).*?instructions?",
+        r"(?i)(you are now|act as|pretend to be|roleplay as).*?(different|new|another).*?(assistant|ai|model|character)",
+        r"(?i)from now on.*?(you must|you will|always|never)",
+        r"(?i)system prompt|initial instructions|hidden instructions",
+    ]
+
+    for pattern in jailbreak_patterns:
+        text = re.sub(pattern, "[INSTRUCTION REDACTED]", text)
+
+    # 2. Neutralizujemy bloki kodu markdown (często używane do ukrycia instrukcji)
+    text = re.sub(r"```[\s\S]*?```", "[CODE BLOCK REDACTED]", text)
+
+    # 3. Usuwamy nadmierne sekwencje backticków lub specjalnych znaków
+    text = re.sub(r"`{3,}", "``", text)
+
+    # 4. Ograniczamy długość (kontekst per chunk)
+    if len(text) > max_len:
+        text = text[:max_len] + " [TRUNCATED]"
+
+    return text
+
+
+def _check_qdrant_health() -> dict:
+    """Sprawdza połączenie z Qdrant i aktywną kolekcję."""
+    try:
+        client = get_qdrant_client()
+        collections = client.get_collections().collections
+        collection_names = [c.name for c in collections]
+
+        active_exists = ACTIVE_COLLECTION in collection_names
+
+        points = 0
+        if active_exists:
+            info = client.get_collection(ACTIVE_COLLECTION)
+            points = info.points_count or 0
+
+        return {
+            "ok": True,
+            "collections_count": len(collection_names),
+            "active_collection": ACTIVE_COLLECTION,
+            "active_collection_exists": active_exists,
+            "points_in_active": points,
+            "error": None
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:150]}
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Główny endpoint do Dashboardu statusu (używany przez frontend co 30s)."""
+    qdrant = _check_qdrant_health()
+
+    provider = get_llm_provider()
+    if provider == "openrouter":
+        llm = _check_openrouter_health()
+    else:
+        llm = _check_ollama_health()
+
+    # Sprawdzenie embeddingów (dla uproszczenia używamy tego samego co LLM)
+    embedding_ok = llm.get("has_embedding", False) if provider == "ollama" else True
+
+    overall_ok = qdrant.get("ok", False) and llm.get("ok", False)
+
+    return jsonify({
+        "success": True,
+        "timestamp": int(time.time()),
+        "overall": "ok" if overall_ok else "degraded",
+        "provider": provider,
+        "qdrant": qdrant,
+        "llm": llm,
+        "embedding": {
+            "ok": embedding_ok,
+            "model": "nomic-embed-text" if provider == "ollama" else "via OpenRouter"
+        },
+        "active_collection": {
+            "name": ACTIVE_COLLECTION,
+            "points": qdrant.get("points_in_active", 0)
+        }
+    })
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Sprawdza czy wyjątek to 429 Too Many Requests z OpenRouter."""
     msg = str(exc).lower()
@@ -520,7 +660,12 @@ SEARCH_MODES = {
 def generate_answer(query: str, contexts: list, mode: str = "normal",
                     provider: str | None = None, model: str | None = None) -> str:
     """Generuje odpowiedź używając wybranego providera (ollama lub openrouter)."""
-    context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text'][:1400]}" for c in contexts])
+    # Ochrona przed Prompt Injection — sanitizujemy treść dokumentów
+    sanitized_contexts = [
+        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), 1400)}
+        for c in contexts
+    ]
+    context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text']}" for c in sanitized_contexts])
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
 
@@ -553,7 +698,12 @@ def generate_answer(query: str, contexts: list, mode: str = "normal",
 
 def verify_answer(answer: str, contexts: list, query: str, provider: str | None = None, model: str | None = None) -> dict:
     """Krytyk — używa wybranego providera (call_llm)."""
-    context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1000]}" for c in contexts])
+    # Ochrona przed Prompt Injection w weryfikacji
+    sanitized_contexts = [
+        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), 1000)}
+        for c in contexts
+    ]
+    context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_contexts])
     system = (
         "Jesteś rygorystycznym weryfikatorem faktów śledczych. Twoja rola to KRYTYCZNA OCENA odpowiedzi "
         "innego asystenta. Masz dostęp do oryginalnych dokumentów — to jedyne źródło prawdy. "
@@ -1607,8 +1757,12 @@ def hybrid_stream():
 
             cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
 
-            # Buduj prompt syntezy
-            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in rag_contexts[:5]])
+            # Buduj prompt syntezy (z ochroną przed Prompt Injection)
+            sanitized_rag = [
+                {"file": c["file"], "text": _sanitize_for_prompt(c["text"], 800)}
+                for c in rag_contexts[:5]
+            ]
+            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_rag])
             sql_preview = ""
             if sql_data.get("success") and sql_data.get("rows"):
                 rows_str = "\n".join([
@@ -1709,7 +1863,9 @@ def search_stream():
 
             # Streaming LLM
             cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
-            context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1400]}" for c in raw_contexts])
+            # Ochrona przed Prompt Injection
+            sanitized = [{"file": c["file"], "text": _sanitize_for_prompt(c["text"], 1400)} for c in raw_contexts]
+            context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized])
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
 
             # Streaming LLM — obsługuje Ollama i OpenRouter
@@ -2157,7 +2313,12 @@ def build_network():
         res    = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
 
         contexts = [{"file": p.payload.get("file",""), "text": p.payload.get("text","")} for p in res.points]
-        context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in contexts])
+        # Ochrona przed Prompt Injection przy budowie grafu
+        sanitized_contexts = [
+            {"file": c["file"], "text": _sanitize_for_prompt(c["text"], 800)}
+            for c in contexts
+        ]
+        context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_contexts])
 
         system = (
             "Jesteś ekspertem analityki śledczej. Twoim zadaniem jest wyciągnięcie jak najbogatszej sieci powiązań z dokumentów.\n\n"
@@ -2673,6 +2834,48 @@ def cache_stats():
 
 SQL_CONFIG_PATH = Path(__file__).parent / ".sql_config.json"
 
+
+# ============================================================
+# BEZPIECZEŃSTWO SQL — Walidacja zapytań generowanych przez LLM
+# ============================================================
+
+DANGEROUS_SQL_KEYWORDS = {
+    "EXEC", "EXECUTE", "XP_", "SP_", "OPENROWSET", "OPENQUERY",
+    "INTO OUTFILE", "INTO DUMPFILE", "LOAD_FILE", "BENCHMARK",
+    "SLEEP(", "WAITFOR", "SHUTDOWN"
+}
+
+def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str | None]:
+    """
+    Rygorystyczna walidacja bezpieczeństwa zapytań SQL generowanych przez LLM.
+    Zwraca (is_safe, error_message).
+    """
+    if not sql_query or not sql_query.strip():
+        return False, "Puste zapytanie SQL"
+
+    sql_upper = sql_query.strip().upper()
+
+    # 1. Sprawdź pierwsze słowo kluczowe
+    first_token = sql_upper.split()[0] if sql_upper.split() else ""
+    if first_token not in allowed_first_words:
+        return False, f"Niedozwolone polecenie: {first_token}"
+
+    # 2. Odrzuć wielokrotne instrukcje (bardzo częsty wektor ataku)
+    semicolon_count = sql_upper.count(";")
+    if semicolon_count > 1:
+        return False, "Wykryto wiele instrukcji SQL (potencjalne SQL Injection)"
+
+    # 3. Szukaj niebezpiecznych słów kluczowych
+    for dangerous in DANGEROUS_SQL_KEYWORDS:
+        if dangerous in sql_upper:
+            return False, f"Wykryto zabronione słowo kluczowe: {dangerous}"
+
+    # 4. Podstawowa ochrona przed komentowaniem reszty zapytania
+    if "--" in sql_query or "/*" in sql_query:
+        return False, "Wykryto komentarze SQL — potencjalne obejście walidacji"
+
+    return True, None
+
 def _load_sql_config() -> dict:
     """Załaduj zapisaną konfigurację SQL Server."""
     if SQL_CONFIG_PATH.exists():
@@ -2781,7 +2984,7 @@ def sql_schema():
     try:
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor()
-        cur.execute(f"""
+        cur.execute("""
             SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_NAME = %s
@@ -2789,7 +2992,10 @@ def sql_schema():
         """, (table,))
         cols = [{"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
                 for r in cur.fetchall()]
-        cur.execute(f"SELECT COUNT(*) FROM [{table}]")
+
+        # Bezpieczne zapytanie z escapowaniem nazwy tabeli
+        safe_table = table.replace("]", "]]")
+        cur.execute(f"SELECT COUNT(*) FROM [{safe_table}]")
         row_count = cur.fetchone()[0]
         conn.close()
         return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
@@ -2835,10 +3041,11 @@ def sql_ask():
         sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
         sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
 
-        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
-        if first_word not in ("SELECT", "WITH"):
-            return jsonify({"success": False, "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
-                            "sql": sql_query})
+        # === Wzmocniona walidacja bezpieczeństwa ===
+        is_safe, error_msg = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+        if not is_safe:
+            return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
+                            "sql": sql_query[:200]})
 
         conn = _get_sql_conn(cfg)
         cur  = conn.cursor(as_dict=True)
@@ -2922,11 +3129,12 @@ def sql_write():
             sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
             sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
 
-        # Sprawdź typ polecenia
-        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        # === Wzmocniona walidacja bezpieczeństwa (nawet przy confirmed=True) ===
         allowed_write = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "MERGE")
-        if first_word not in allowed_write and first_word not in ("SELECT", "WITH"):
-            return jsonify({"success": False, "error": f"Nieznane polecenie: {first_word}", "sql": sql_query})
+        is_safe, error_msg = _is_sql_safe(sql_query, allowed_write + ("SELECT", "WITH"))
+        if not is_safe:
+            return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
+                            "sql": sql_query[:200]})
 
         # Krok 2: jeśli nie potwierdzone — zwróć SQL do podglądu
         if not confirmed:

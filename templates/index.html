@@ -887,15 +887,62 @@ function showTab(name) {
     if (name === 'sql') sqlLoadSavedConn();
 }
 
-// ---- STATS ----
+// ---- HEALTH DASHBOARD (nowy, bogatszy status) ----
+let healthInterval = null;
+
+function updateHealthStatus() {
+    if (typeof isHeavyVectorizing !== 'undefined' && isHeavyVectorizing) return;
+
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+
+            // Wektory
+            const vectorsEl = document.getElementById('statVectors');
+            if (vectorsEl) {
+                vectorsEl.textContent = (d.active_collection?.points || 0).toLocaleString('pl');
+            }
+
+            // Status ogólny
+            const statusEl = document.getElementById('statStatus');
+            if (statusEl) {
+                const overall = d.overall || 'unknown';
+                statusEl.textContent = overall.toUpperCase();
+                statusEl.className = overall === 'ok' ? 'text-success' : 'text-warning';
+            }
+
+            // Aktywna kolekcja
+            const colEl = document.getElementById('statActiveCol');
+            if (colEl && d.active_collection) {
+                colEl.textContent = d.active_collection.name;
+            }
+
+            // Opcjonalnie: można tu dodać więcej badge'y (np. LLM status)
+        })
+        .catch(() => {
+            const statusEl = document.getElementById('statStatus');
+            if (statusEl) {
+                statusEl.textContent = 'OFFLINE';
+                statusEl.className = 'text-danger';
+            }
+        });
+}
+
+function startHealthAutoRefresh() {
+    // Natychmiastowe pierwsze sprawdzenie
+    updateHealthStatus();
+
+    // Auto-refresh co 30 sekund
+    if (healthInterval) clearInterval(healthInterval);
+    healthInterval = setInterval(() => {
+        updateHealthStatus();
+    }, 30000);
+}
+
+// Zachowujemy starą funkcję dla kompatybilności (niektóre miejsca jej używają)
 function updateStats() {
-    if (isHeavyVectorizing) return;  // wyłącz automatyczne odświeżanie podczas ciężkiej wektoryzacji
-    fetch('/stats').then(r => r.json()).then(d => {
-        if (d.success) {
-            document.getElementById('statVectors').textContent = (d.vectors_count || 0).toLocaleString('pl');
-            document.getElementById('statStatus').textContent  = String(d.status).toUpperCase();
-        }
-    }).catch(() => {});
+    updateHealthStatus();
 }
 
 // ---- DOCS BROWSER ----
@@ -2483,6 +2530,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Małe opóźnienie, żeby DOM był gotowy
     setTimeout(initNetworkFilterListeners, 300);
     setTimeout(restoreLlmProvider, 400);
+
+    // Uruchom Dashboard statusu + auto-refresh co 30s
+    setTimeout(startHealthAutoRefresh, 600);
 });
 
 function renderNetwork(nodes, edges) {
