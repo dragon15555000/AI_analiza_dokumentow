@@ -3187,6 +3187,28 @@ def sql_vectorize_all():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def _check_port(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Sprawdza czy port jest otwarty."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _parse_host_port(url: str, default_port: int) -> tuple:
+    """Wyciąga (host, port) z URL lub adresu."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url if "://" in url else "http://" + url)
+        host = p.hostname or "127.0.0.1"
+        port = p.port or default_port
+        return host, port
+    except Exception:
+        return "127.0.0.1", default_port
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Sprawdza łączność z Qdrant, LLM, SQL i OCR — dla checklisty startowej i paska statusu."""
@@ -3199,9 +3221,12 @@ def health_check():
         "vectors_count": 0,
         "sql_configured": False,
         "ocr_available": pytesseract is not None,
+        "ports": {},
     }
 
-    # Qdrant
+    # Qdrant — test portu + klient
+    qdrant_host, qdrant_port = _parse_host_port(os.environ.get("QDRANT_URL", "http://localhost:6333"), 6333)
+    result["ports"]["qdrant"] = "ok" if _check_port(qdrant_host, qdrant_port) else "error"
     try:
         client = get_qdrant_client()
         client.get_collections()
@@ -3216,14 +3241,35 @@ def health_check():
 
     # LLM
     if DEFAULT_LLM_PROVIDER == "openrouter":
-        result["llm"] = "ok" if OPENROUTER_API_KEY else "no_key"
+        if not OPENROUTER_API_KEY:
+            result["llm"] = "no_key"
+        else:
+            # Realny test — GET /api/v1/models (bezpłatny, weryfikuje klucz)
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                )
+                resp = _ur.urlopen(req, timeout=5)
+                result["llm"] = "ok" if resp.status == 200 else "error"
+                result["ports"]["openrouter"] = "ok"
+            except Exception as e:
+                result["llm"] = "error"
+                result["llm_error"] = str(e)
+                result["ports"]["openrouter"] = "error"
     else:
-        try:
-            import urllib.request as _ur
-            _ur.urlopen(_ur.Request(OLLAMA_URL + "/api/tags"), timeout=3)
-            result["llm"] = "ok"
-        except Exception:
-            pass
+        ollama_host, ollama_port = _parse_host_port(OLLAMA_URL, 11434)
+        result["ports"]["ollama"] = "ok" if _check_port(ollama_host, ollama_port) else "error"
+        if result["ports"]["ollama"] == "ok":
+            try:
+                import urllib.request as _ur
+                _ur.urlopen(_ur.Request(OLLAMA_URL + "/api/tags"), timeout=3)
+                result["llm"] = "ok"
+            except Exception:
+                result["llm"] = "error"
+        else:
+            result["llm"] = "error"
 
     # SQL
     sql_cfg = _load_sql_config()
@@ -3231,6 +3277,9 @@ def health_check():
     if result["sql_configured"]:
         result["sql_server"] = sql_cfg.get("server", "")
         result["sql_database"] = sql_cfg.get("database", "")
+        sql_host, sql_port = _parse_host_port(sql_cfg.get("server", "127.0.0.1"),
+                                               int(sql_cfg.get("port", 1433)))
+        result["ports"]["sql"] = "ok" if _check_port(sql_host, sql_port) else "error"
 
     return jsonify(result)
 

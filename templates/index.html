@@ -3594,21 +3594,37 @@ function showStartupChecklist(d) {
     const llmLabel = d.llm_provider === 'openrouter' ? `OpenRouter (${d.llm_model || ''})` : `Ollama (${d.llm_model || ''})`;
     const llmDetail = {ok:'Połączono', error:'Nie odpowiada — sprawdź czy Ollama działa', no_key:'Brak klucza OPENROUTER_API_KEY w .env'}[d.llm] || d.llm;
 
+    const qdrantDetail = d.qdrant === 'ok'
+        ? `Połączono · kolekcja "${d.collection}" · ${(d.vectors_count||0).toLocaleString('pl')} wektorów`
+        : (d.qdrant_error || 'Błąd połączenia — sprawdź QDRANT_URL w .env');
+    const qdrantPortInfo = d.ports && d.ports.qdrant ? ` (port: ${d.ports.qdrant})` : '';
+
+    const llmDetailFull = llmDetail + (d.llm_provider==='openrouter' ? ` · ${llmLabel}` : '')
+        + (d.llm_error ? ` — ${d.llm_error}` : '');
+
+    const sqlPortInfo = d.ports && d.ports.sql ? ` · port ${d.ports.sql}` : '';
+    const sqlDetail = d.sql_configured
+        ? `Skonfigurowany: ${d.sql_server||''} / ${d.sql_database||}${sqlPortInfo}`
+        : 'Nie skonfigurowany (opcjonalne — zakładka SQL)';
+
+    // Port summary row
+    const ports = d.ports || {};
+    const portNames = Object.keys(ports);
+    const portSummary = portNames.length
+        ? portNames.map(k => `${k}: ${ports[k]==='ok'?'✅':'❌'}`).join('  ')
+        : 'brak danych';
+    const allPortsOk = portNames.length && portNames.every(k => ports[k] === 'ok');
+
     tbody.append(
-        buildCheckRow('Qdrant',
-            d.qdrant,
-            d.qdrant === 'ok'
-                ? `Połączono · kolekcja "${d.collection}" · ${(d.vectors_count||0).toLocaleString('pl')} wektorów`
-                : (d.qdrant_error || 'Błąd połączenia — sprawdź QDRANT_URL w .env')),
-        buildCheckRow('LLM', d.llm, llmDetail + (d.llm_provider==='openrouter' ? ` · ${llmLabel}` : '')),
+        buildCheckRow('Qdrant', d.qdrant, qdrantDetail + qdrantPortInfo),
+        buildCheckRow('LLM', d.llm, llmDetailFull),
         buildCheckRow('SQL Server',
             d.sql_configured ? 'ok' : 'warn',
-            d.sql_configured
-                ? `Skonfigurowany: ${d.sql_server||''} / ${d.sql_database||''}`
-                : 'Nie skonfigurowany (opcjonalne — zakładka SQL)'),
+            sqlDetail),
         buildCheckRow('OCR (Tesseract)',
             d.ocr_available ? 'ok' : 'warn',
-            d.ocr_available ? 'Dostępny — obsługuje skany i obrazy' : 'Nie zainstalowany (opcjonalne — sudo apt install tesseract-ocr)')
+            d.ocr_available ? 'Dostępny — obsługuje skany i obrazy' : 'Nie zainstalowany (opcjonalne — sudo apt install tesseract-ocr)'),
+        buildCheckRow('Porty', allPortsOk ? 'ok' : 'warn', portSummary)
     );
 
     modal.style.display = 'flex';
