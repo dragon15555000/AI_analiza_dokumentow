@@ -62,27 +62,31 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 
 *Natural language queries to SQL databases · Text-to-SQL · Vectorize SQL table data into Qdrant for semantic search.*
 
+### LLM — Ollama lub OpenRouter / LLM Provider
+- **Ollama** (domyślny) — lokalny Llama3, bez limitu zapytań
+- **OpenRouter** — dostęp do dziesiątek modeli przez jeden klucz API (w tym darmowe: Llama3, Gemini, Qwen)
+- Automatyczny retry przy limicie OpenRouter (429) + opcjonalny fallback na Ollama
+
+*Ollama (local Llama3, no rate limits) or OpenRouter (dozens of models incl. free tier). Auto-retry on 429 + optional fallback.*
+
 ### Sieć powiązań / Connection Network
 - LLM wyciąga osoby, firmy, kwoty, umowy i rysuje interaktywny graf (D3.js)
 - Kolory krawędzi: czerwony = przepływ finansowy, fioletowy = zatrudnienie, zielony = przetarg
 - Każda krawędź zawiera cytat z dokumentu jako dowód
 
-*D3.js interactive graph: persons, companies, amounts, contracts · Edge colors: red=financial, purple=employment, green=tender · Evidence citations per edge.*
+*D3.js interactive graph: persons, companies, amounts, contracts · Evidence citations per edge.*
 
 ### Zarządzanie bazą / Collection Management
 - Wiele kolekcji — tworzenie, przełączanie, statystyki zużycia
 - Przeglądarka plików z możliwością usuwania (checkbox + bulk delete)
 - Zbiorczy raport metadanych dla zaznaczonych plików (JSON + DOCX)
-- Automatyczne wykrywanie śmieci (licencje, logi, zaszyfrowane nazwy)
-- Przeglądarka dysków — import bezpośrednio z systemu plików
+- Automatyczne wykrywanie śmieci · Przeglądarka dysków
 
 *Multiple collections · Bulk delete · Metadata reports (JSON + DOCX) · Noise detection · Disk browser.*
 
-### Export / Export
-- **DOCX** — raport z odpowiedzią LLM i fragmentami źródłowymi gotowy do wydruku
+### Export
+- **DOCX** — raport z odpowiedzią LLM i fragmentami źródłowymi
 - **CSV** — eksport wyników ekstrakcji danych
-
-*DOCX report (LLM answer + source passages) · CSV data export.*
 
 ---
 
@@ -90,10 +94,10 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 
 | Komponent / Component | Technologia / Technology |
 |---|---|
-| Backend | Python 3.12 + Flask / Gunicorn |
+| Backend | Python 3.12 + Flask / Waitress |
 | Baza wektorowa / Vector DB | Qdrant Cloud |
 | Embeddingi / Embeddings | nomic-embed-text 137M (768 dim, via Ollama) |
-| LLM | Llama3 (via Ollama) |
+| LLM | Llama3 via Ollama lub OpenRouter |
 | Frontend | Bootstrap 5 + D3.js + vanilla JS |
 | Chunking | 1000 znaków, nakładka 200, granice zdań |
 | OCR | Tesseract (opcjonalnie / optional) |
@@ -104,7 +108,7 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 ## Wymagania / Requirements
 
 - Python 3.10+
-- [Ollama](https://ollama.ai/) z modelami: `llama3`, `nomic-embed-text`
+- [Ollama](https://ollama.ai/) z modelami: `llama3`, `nomic-embed-text` (lub klucz OpenRouter)
 - Konto [Qdrant Cloud](https://cloud.qdrant.io/) (plan Free: 1 GB RAM, 4 GB dysk)
 - Windows + WSL2 lub Linux
 
@@ -125,15 +129,71 @@ Otwórz / Open: `http://localhost:5000`
 
 ### OCR (opcjonalnie / optional)
 
-Aby czytać zeskanowane dokumenty i obrazy:
-
 ```bash
 sudo apt update && sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils -y
 pip install pytesseract pdf2image Pillow
 ```
 
-OCR uruchamiany jest automatycznie jako fallback gdy brak warstwy tekstowej.
-*OCR runs automatically as a fallback when no text layer is detected.*
+### Produkcyjny serwer / Production server (Waitress)
+
+```bash
+# 1. Instalacja
+pip install waitress
+
+# 2. Skopiuj i włącz serwis systemd
+sudo cp ai_analiza.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai_analiza
+
+# 3. Status i logi
+sudo systemctl status ai_analiza
+sudo journalctl -u ai_analiza -f
+
+# Lub użyj skryptu pomocniczego:
+bash migrate_to_waitress.sh
+```
+
+---
+
+## Baza wektorowa — Cloud lub lokalnie / Vector DB — Cloud or Local
+
+Aplikacja działa z **Qdrant Cloud** (domyślnie) lub z **lokalnym Qdrant** bez żadnych limitów.
+Zmiana wymaga tylko jednej linii w `.env` — kod aplikacji jest identyczny.
+
+*The app works with Qdrant Cloud (default) or a local Qdrant instance with no limits. One line change in `.env` — no code changes.*
+
+### Qdrant lokalnie — uruchomienie / Local Qdrant — setup
+
+**Docker (zalecane):**
+```bash
+docker run -d --name qdrant \
+  -p 6333:6333 \
+  -v ~/qdrant_data:/qdrant/storage \
+  qdrant/qdrant
+```
+
+**Bez Dockera (binarny):**
+```bash
+# Pobierz ze strony github.com/qdrant/qdrant/releases
+tar xzf qdrant-x86_64-unknown-linux-gnu.tar.gz
+./qdrant
+```
+
+Potem w `.env`:
+```env
+QDRANT_URL=http://localhost:6333
+QDRANT_KEY=                      # zostaw puste
+```
+
+> ✅ **Kolekcja tworzy się automatycznie** — przy pierwszym uruchomieniu aplikacja sprawdza czy kolekcja z `.env` (`ACTIVE_COLLECTION`) istnieje i jeśli nie, tworzy ją samodzielnie. Nie trzeba nic klikać ani konfigurować.
+
+| | Qdrant Cloud | Qdrant lokalny |
+|---|---|---|
+| Limit RAM | 1 GB (free) | brak |
+| Limit dysk | 4 GB (free) | brak |
+| Dostęp zdalny | ✅ | tylko localhost |
+| Backup | automatyczny | ⚠️ ręczny |
+| Wymaga Dockera | nie | opcjonalnie |
 
 ---
 
@@ -149,6 +209,13 @@ ACTIVE_COLLECTION=dokumenty
 OLLAMA_URL=http://127.0.0.1:11434
 LLM_MODEL=llama3:latest
 
+# OpenRouter (opcjonalnie / optional)
+# LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_MODEL_VERIFY=google/gemini-2.0-flash-exp:free
+# OPENROUTER_FALLBACK_TO_OLLAMA=true
+
 # SQL Server (opcjonalnie / optional)
 SQL_SERVER=127.0.0.1
 SQL_PORT=1433
@@ -157,14 +224,19 @@ SQL_USER=sa
 SQL_PASSWORD=YourPassword
 ```
 
+**Zalecane darmowe modele OpenRouter:**
+- `meta-llama/llama-3.3-70b-instruct:free`
+- `google/gemini-2.0-flash-exp:free`
+- `qwen/qwen-2.5-7b-instruct:free`
+
 ---
 
 ## Automatyczny start / Auto-start (WSL2 + Windows)
 
-Serwis systemd uruchamia aplikację automatycznie przy starcie WSL2.
+Serwis systemd (`ai_analiza.service`) uruchamia aplikację automatycznie przy starcie WSL2.
 Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy logowaniu.
 
-*systemd service auto-starts the app on WSL2 boot. VBScript in Windows Startup wakes WSL2 and launches Ollama on login.*
+*`ai_analiza.service` auto-starts on WSL2 boot. VBScript in Windows Startup wakes WSL2 and launches Ollama on login.*
 
 ---
 
@@ -172,14 +244,11 @@ Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy lo
 
 **Ten projekt jest oprogramowaniem zamkniętym (proprietary software).**
 
-- Wszelkie prawa autorskie należą wyłącznie do Właściciela.
-- Projekt nie jest udostępniany na żadnej licencji open source.
-- Kopiowanie, modyfikowanie lub dystrybucja bez zgody Właściciela jest zabroniona.
-- Plik [LICENSE](LICENSE) zawiera pełny tekst licencji (PL + EN).
+Wszelkie prawa autorskie należą wyłącznie do Właściciela. Kopiowanie, modyfikowanie lub dystrybucja bez pisemnej zgody jest zabroniona. Plik [LICENSE](LICENSE) zawiera pełny tekst (PL + EN).
 
 Właściciel jest otwarty na rozmowy w sprawie płatnych licencji komercyjnych, wdrożeniowych, OEM i instytucjonalnych.
 
-*This project is proprietary software. All rights reserved. No open-source license applies. See [LICENSE](LICENSE) for full terms. Commercial licensing inquiries welcome.*
+*All rights reserved. No open-source license applies. See [LICENSE](LICENSE). Commercial licensing inquiries welcome.*
 
 ---
 

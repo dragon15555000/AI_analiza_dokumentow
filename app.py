@@ -64,7 +64,291 @@ QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
+
+# OpenRouter
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_MODEL_VERIFY = os.environ.get("OPENROUTER_MODEL_VERIFY", "google/gemini-2.0-flash-exp:free")
+OPENROUTER_FALLBACK_TO_OLLAMA = os.environ.get("OPENROUTER_FALLBACK_TO_OLLAMA", "false").lower() in ("1", "true", "yes")
+try:
+    OPENROUTER_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
+except ValueError:
+    logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
+    OPENROUTER_MAX_RETRIES = 3
+
+DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # ollama | openrouter
+
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
+
+
+# ============================================================
+# LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
+# ============================================================
+
+def get_llm_provider(request_provider: str | None = None) -> str:
+    """Zwraca aktywny provider: 'ollama' lub 'openrouter'."""
+    if request_provider:
+        p = request_provider.lower()
+        if p in ("ollama", "openrouter"):
+            return p
+    return DEFAULT_LLM_PROVIDER
+
+
+# ---- Rate limit helpers (OpenRouter) ----
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Sprawdza czy wyjątek to 429 Too Many Requests z OpenRouter."""
+    msg = str(exc).lower()
+    if "429" in msg or "too many requests" in msg or "rate limit" in msg:
+        return True
+    # requests HTTPError
+    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
+        try:
+            status = exc.response.status_code
+            if status == 429:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _get_retry_after(exc: Exception) -> float | None:
+    """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
+    try:
+        if hasattr(exc, "response") and exc.response is not None:
+            ra = exc.response.headers.get("Retry-After")
+            if ra:
+                return float(ra)
+    except Exception:
+        pass
+    return None
+
+
+def call_llm(prompt: str, system: str = "", stream: bool = False,
+             provider: str | None = None, model: str | None = None,
+             max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
+    """
+    Uniwersalna funkcja do wywoływania LLM.
+    Zwraca dict dla non-stream lub Response dla stream.
+    """
+    prov = get_llm_provider(provider)
+
+    if prov == "openrouter":
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
+        return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
+    else:
+        return _call_ollama(prompt, system, stream, model or LLM_MODEL)
+
+
+def stream_llm_tokens(prompt: str, system: str = "",
+                      provider: str | None = None, model: str | None = None,
+                      max_tokens: int = 2000, temperature: float = 0.2):
+    """
+    Generator zwracający kolejne tokeny tekstu z LLM (działa dla Ollama i OpenRouter).
+    Używany w streamingowych endpointach.
+    """
+    prov = get_llm_provider(provider)
+    effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
+
+    if prov == "openrouter":
+        if not OPENROUTER_API_KEY:
+            yield "Błąd: Brak klucza OPENROUTER_API_KEY"
+            return
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": effective_model,
+            "messages": messages,
+            "stream": True,
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        last_error = None
+        for attempt in range(OPENROUTER_MAX_RETRIES):
+            try:
+                with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        line = line.decode("utf-8", errors="replace")
+                        if line.startswith("data: "):
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                return
+                            try:
+                                chunk = json.loads(data_str)
+                                choice = chunk.get("choices", [{}])[0]
+                                delta = choice.get("delta", {})
+                                token = delta.get("content", "")
+                                if token:
+                                    yield token
+                                if choice.get("finish_reason"):
+                                    return
+                            except Exception:
+                                continue
+                return  # sukces
+            except Exception as e:
+                last_error = e
+                if _is_rate_limit_error(e):
+                    if attempt < OPENROUTER_MAX_RETRIES - 1:
+                        wait = _get_retry_after(e) or (1.5 ** attempt)
+                        wait = min(wait, 12.0)
+                        logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                        time.sleep(wait)
+                    continue
+                else:
+                    # Inny błąd — nie retry'ujemy
+                    break
+
+        # Po wyczerpaniu prób
+        err_msg = str(last_error) if last_error else "nieznany błąd"
+
+        # Opcjonalny automatyczny fallback na Ollama przy rate limitach OpenRouter
+        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
+            logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+            # Przepuść przez ścieżkę Ollama
+            ollama_url = OLLAMA_URL + "/api/generate"
+            ollama_payload = {
+                "model": LLM_MODEL,
+                "prompt": prompt,
+                "system": system,
+                "stream": True,
+                "options": {"temperature": temperature if temperature is not None else 0.2}
+            }
+            try:
+                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            tok = data.get("response", "")
+                            if tok:
+                                yield tok
+                            if data.get("done", False):
+                                return
+                        except Exception:
+                            continue
+                return
+            except Exception as fb_err:
+                yield f"[Błąd fallback na Ollama: {fb_err}]"
+                return
+
+        if _is_rate_limit_error(last_error):
+            friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
+            yield friendly
+        else:
+            yield f"[Błąd OpenRouter streaming: {err_msg}]"
+
+    else:
+        # Ollama streaming
+        url = OLLAMA_URL + "/api/generate"
+        payload = {
+            "model": effective_model,
+            "prompt": prompt,
+            "system": system,
+            "stream": True,
+            "options": {"temperature": temperature}
+        }
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            yield f"[Błąd Ollama streaming: {str(e)}]"
+
+
+def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
+    url = OLLAMA_URL + "/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "system": system,
+        "stream": stream,
+        "options": {"temperature": 0.2}
+    }
+    if stream:
+        return requests.post(url, json=payload, stream=True, timeout=300)
+    else:
+        r = requests.post(url, json=payload, timeout=180)
+        r.raise_for_status()
+        return r.json()
+
+
+def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
+                     max_tokens: int, temperature: float) -> dict | requests.Response:
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "http://localhost",  # opcjonalnie
+        "X-Title": "AI Analiza Dokumentów"
+    }
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+
+    if stream:
+        return requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
+
+    # Non-streaming with retry on 429
+    last_error = None
+    for attempt in range(OPENROUTER_MAX_RETRIES):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=180)
+            r.raise_for_status()
+            data = r.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"response": content, "raw": data}
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e):
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = min(wait, 12.0)
+                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    time.sleep(wait)
+                continue
+            else:
+                break
+
+    # Final failure
+    raise last_error if last_error else RuntimeError("OpenRouter call failed")
+
 
 # ---- Qdrant Client (reuse connection) ----
 _qdrant_client = None
@@ -74,7 +358,17 @@ def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     with _qdrant_lock:
         if _qdrant_client is None:
-            _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY, timeout=30.0)
+            from httpx import Limits
+            _qdrant_client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=QDRANT_KEY,
+                timeout=30.0,
+                limits=Limits(
+                    max_keepalive_connections=5,
+                    max_connections=20,
+                    keepalive_expiry=30
+                )
+            )
         return _qdrant_client
 
 # ---- Cache (dokumenty i sugestie) ----
@@ -100,6 +394,22 @@ def _init_embed_cache():
         logger.warning(f"Błąd inicjalizacji cache embeddingów: {e}")
 
 _init_embed_cache()
+
+def _ensure_collection_exists():
+    """Tworzy ACTIVE_COLLECTION jeśli nie istnieje (np. świeży lokalny Qdrant)."""
+    try:
+        from qdrant_client.models import VectorParams, Distance
+        client = get_qdrant_client()
+        if not client.collection_exists(ACTIVE_COLLECTION):
+            client.create_collection(
+                ACTIVE_COLLECTION,
+                vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            )
+            logger.info(f"Kolekcja '{ACTIVE_COLLECTION}' utworzona automatycznie")
+    except Exception as e:
+        logger.warning(f"Nie udało się sprawdzić/utworzyć kolekcji '{ACTIVE_COLLECTION}': {e}")
+
+_ensure_collection_exists()
 
 def get_embedding(text: str) -> list:
     import hashlib as _hl
@@ -229,28 +539,42 @@ SEARCH_MODES = {
     }
 }
 
-def generate_answer(query: str, contexts: list, mode: str = "normal") -> str:
-    url = OLLAMA_URL + "/api/generate"
+def generate_answer(query: str, contexts: list, mode: str = "normal",
+                    provider: str | None = None, model: str | None = None) -> str:
+    """Generuje odpowiedź używając wybranego providera (ollama lub openrouter)."""
     context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text'][:1400]}" for c in contexts])
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
-    payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
 
     try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=240) as r:
-            return json.loads(r.read().decode("utf-8"))["response"]
-    except urllib.error.URLError as e:
-        logger.error(f"LLM connection error (generate_answer): {e}")
-        return "Błąd połączenia z modelem językowym (Ollama)."
+        result = call_llm(
+            prompt=prompt,
+            system=cfg["system"],
+            stream=False,
+            provider=provider,
+            model=model
+        )
+        if isinstance(result, dict):
+            return result.get("response", str(result))
+        return str(result)
     except Exception as e:
-        logger.error(f"LLM error in generate_answer: {e}")
-        return f"Błąd syntezy LLM: {e}"
+        prov = get_llm_provider(provider)
+        if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov == "openrouter":
+            logger.warning("generate_answer: OpenRouter 429 → fallback do Ollama")
+            try:
+                result = _call_ollama(prompt, cfg["system"], stream=False, model=LLM_MODEL)
+                if isinstance(result, dict):
+                    return result.get("response", str(result))
+                return str(result)
+            except Exception as fb_e:
+                return f"[RATE_LIMIT + Błąd fallback] {fb_e}"
+        logger.error(f"LLM error in generate_answer ({prov}): {e}")
+        if _is_rate_limit_error(e):
+            return "[RATE_LIMIT] Przekroczono limit OpenRouter. Spróbuj później lub użyj Ollama."
+        return f"Błąd syntezy LLM ({prov}): {e}"
 
-def verify_answer(answer: str, contexts: list, query: str) -> dict:
-    """Krytyk: weryfikuje każde twierdzenie odpowiedzi względem źródłowych dokumentów."""
-    url = OLLAMA_URL + "/api/generate"
+def verify_answer(answer: str, contexts: list, query: str, provider: str | None = None, model: str | None = None) -> dict:
+    """Krytyk — używa wybranego providera (call_llm)."""
     context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1000]}" for c in contexts])
     system = (
         "Jesteś rygorystycznym weryfikatorem faktów śledczych. Twoja rola to KRYTYCZNA OCENA odpowiedzi "
@@ -272,12 +596,14 @@ def verify_answer(answer: str, contexts: list, query: str) -> dict:
         "UZASADNIENIE: <jedno zdanie>\n\n"
         "Weryfikacja:"
     )
-    payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
+
     try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=240) as r:
-            raw = json.loads(r.read().decode("utf-8"))["response"]
+        # Używamy dedykowanego modelu do weryfikacji (jeśli ustawiony), żeby nie dobić limitu tego samego modelu co główna odpowiedź
+        effective_verify_model = model
+        if not effective_verify_model and get_llm_provider(provider) == "openrouter":
+            effective_verify_model = OPENROUTER_MODEL_VERIFY
+        result = call_llm(prompt=prompt, system=system, stream=False, provider=provider, model=effective_verify_model)
+        raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
         # Wyciągnij werdykt
         verdict = "NIEOKREŚLONY"
@@ -318,9 +644,12 @@ def verify_endpoint():
     answer   = data.get('answer', '').strip()
     query    = data.get('query', '').strip()
     contexts = data.get('contexts', [])
+    llm_provider = data.get('llm_provider')
+    openrouter_model = data.get('openrouter_model')
     if not answer or not query or not contexts:
         return jsonify({"success": False, "error": "Brak danych do weryfikacji"})
-    result = verify_answer(answer, contexts, query)
+    # Przekazujemy provider, żeby weryfikacja też szła przez wybrany model (w tym osobny model_verify)
+    result = verify_answer(answer, contexts, query, provider=llm_provider, model=openrouter_model)
     return jsonify(result)
 
 def highlight_backend(text: str, query: str) -> str:
@@ -559,6 +888,8 @@ def _extract_excel(file_path: Path) -> str:
         try: wb_form.close()
         except Exception: pass
 
+    return "\n\n".join(parts)
+
 
 def extract_file_metadata(f_path: Path) -> dict:
     """Zbiera bogate metadane pliku (systemowe + formatowe) do celów śledczych."""
@@ -643,7 +974,6 @@ def extract_file_metadata(f_path: Path) -> dict:
 
     return meta
 
-    return "\n\n".join(parts)
 
 def extract_text(file_path: Path) -> str:
     ext = file_path.suffix.lower()
@@ -1042,6 +1372,9 @@ def import_stream():
                 chunks = make_chunks(text)
                 file_new = 0
 
+                # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
+                file_meta = extract_file_metadata(f_path)
+
                 # Deduplikacja — sprawdź które chunki już są w bazie
                 chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
                 existing_ids = set()
@@ -1055,14 +1388,13 @@ def import_stream():
                                    if cid not in existing_ids]
                 total_chunks += len(chunks)
 
-                # Batch embeddings — 8 równolegle
-                BATCH = 8
+                # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
+                BATCH = 6
                 for b in range(0, len(new_chunks_data), BATCH):
                     batch_items = new_chunks_data[b:b+BATCH]
                     batch_texts  = [item[1] for item in batch_items]
                     batch_ids    = [item[0] for item in batch_items]
                     vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
-                    file_meta = extract_file_metadata(f_path)
 
                     points  = [
                         PointStruct(
@@ -1194,6 +1526,8 @@ def hybrid_stream():
     limit      = min(int(data.get('limit', 5)), 20)
     mode       = data.get('mode', 'normal')
     file_filter= data.get('file_filter', None)
+    llm_provider = data.get('llm_provider')
+    openrouter_model = data.get('openrouter_model')
 
     if not query_text:
         return jsonify({"success": False, "error": "Zapytanie puste"}), 400
@@ -1316,32 +1650,25 @@ def hybrid_stream():
             payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
                        "stream": True, "options": {"num_ctx": 8192}}
 
-            # Używamy requests zamiast urllib — lepiej wykrywa rozłączenie klienta (przeglądarka)
+            # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
             full_answer = ""
+
             try:
-                with requests.post(
-                    OLLAMA_URL + "/api/generate",
-                    json=payload,
-                    stream=True,
-                    timeout=240
-                ) as r:
-                    r.raise_for_status()
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            chunk_data = json.loads(line)
-                            token = chunk_data.get("response", "")
-                            if token:
-                                full_answer += token
-                                yield sse("token", {"token": token})
-                            if chunk_data.get("done"):
-                                break
-                        except json.JSONDecodeError:
-                            continue
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"LLM stream przerwany (klient rozłączony lub błąd): {e}")
-                yield sse("error", {"error": "Połączenie z modelem zostało przerwane."})
+                for token in stream_llm_tokens(
+                    prompt=prompt,
+                    system=cfg["system"],
+                    provider=llm_provider,
+                    model=openrouter_model
+                ):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                        logger.warning(f"LLM stream error (hybrid): {token[:120]}")
+                        yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
+                        return
+                    full_answer += token
+                    yield sse("token", {"token": token})
+            except Exception as e:
+                logger.warning(f"LLM stream error: {e}")
+                yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
 
             yield sse("done", {"ai_answer": full_answer})
 
@@ -1361,6 +1688,7 @@ def search_stream():
     limit      = min(int(data.get('limit', 5)), 20)
     file_filter = data.get('file_filter', None)
     mode        = data.get('mode', 'normal')
+    llm_provider = data.get('llm_provider')
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -1405,34 +1733,28 @@ def search_stream():
             cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
             context_str = "\n\n".join([f"[{c['file']}]: {c['text'][:1400]}" for c in raw_contexts])
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
-            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
 
-            # requests zamiast urllib — lepsza obsługa rozłączenia klienta
+            # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
+            openrouter_model = data.get("openrouter_model")
+
             try:
-                with requests.post(
-                    OLLAMA_URL + "/api/generate",
-                    json=payload,
-                    stream=True,
-                    timeout=240
-                ) as r:
-                    r.raise_for_status()
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            chunk_data = json.loads(line)
-                            token = chunk_data.get("response", "")
-                            if token:
-                                full_answer += token
-                                yield sse("token", {"token": token})
-                            if chunk_data.get("done"):
-                                break
-                        except json.JSONDecodeError:
-                            continue
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"LLM stream przerwany w search_stream: {e}")
-                yield sse("error", {"error": "Połączenie z modelem zostało przerwane."})
+                for token in stream_llm_tokens(
+                    prompt=prompt,
+                    system=cfg["system"],
+                    provider=llm_provider,
+                    model=openrouter_model
+                ):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                        # Czysty błąd zamiast zaśmiecania odpowiedzi
+                        logger.warning(f"LLM stream error (search): {token[:120]}")
+                        yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
+                        return
+                    full_answer += token
+                    yield sse("token", {"token": token})
+            except Exception as e:
+                logger.warning(f"LLM stream error w search_stream: {e}")
+                yield sse("error", {"error": "Błąd streamingu modelu językowego."})
 
             yield sse("done", {"ai_answer": full_answer})
 
@@ -1450,6 +1772,7 @@ def search():
     limit = min(int(data.get('limit', 5)), 20)
     file_filter = data.get('file_filter', None)
     mode = data.get('mode', 'normal')
+    llm_provider = data.get('llm_provider')  # 'ollama' lub 'openrouter' z UI
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -1482,7 +1805,8 @@ def search():
                 "win_path": wsl_to_win(full_path)
             })
 
-        ai_answer = generate_answer(query_text, raw_contexts, mode) if raw_contexts else "Brak dokumentów."
+        openrouter_model = data.get("openrouter_model")
+        ai_answer = generate_answer(query_text, raw_contexts, mode, provider=llm_provider, model=openrouter_model) if raw_contexts else "Brak dokumentów."
         return jsonify({
             "success": True,
             "results": results,
@@ -1843,6 +2167,7 @@ def build_network():
     data    = request.get_json()
     query   = data.get('query', '').strip()
     limit   = min(int(data.get('limit', 10)), 20)
+    llm_provider = data.get('llm_provider')
     raw = ""
 
     if not query:
@@ -1890,14 +2215,16 @@ def build_network():
             "NIE używaj placeholderów. Każdy label = prawdziwa wartość z tekstu.\n"
             "JSON:"
         )
-        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
-        req = urllib.request.Request(
-            OLLAMA_URL + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST"
+        openrouter_model = data.get("openrouter_model")
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            stream=False,
+            provider=llm_provider,
+            model=openrouter_model,
+            max_tokens=3000
         )
-        with urllib.request.urlopen(req, timeout=180) as r:
-            raw = json.loads(r.read().decode("utf-8"))["response"]
+        raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
         # Wyciągnij JSON z odpowiedzi
         json_match = re.search(r'\{[\s\S]*\}', raw)
@@ -2727,7 +3054,7 @@ def sql_vectorize():
                     rows_buf.append(text)
 
                 # Batch embeddings
-                vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                vecs = get_embeddings_batch(rows_buf, batch_size=6)
                 points = []
                 for txt, vec in zip(rows_buf, vecs):
                     cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
@@ -2818,7 +3145,7 @@ def sql_vectorize_all():
                             rows_buf.append(text)
 
                         # Batch embeddings
-                        vecs = get_embeddings_batch(rows_buf, batch_size=8)
+                        vecs = get_embeddings_batch(rows_buf, batch_size=6)
                         points = []
                         for txt, vec in zip(rows_buf, vecs):
                             cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
