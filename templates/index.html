@@ -1356,7 +1356,7 @@ function executeSearch() {
                         } else if (ev.token !== undefined) {
                             // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
                             const t = ev.token;
-                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter') || t.startsWith('[FALLBACK]'))) {
+                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter'))) {
                                 // Zamień na prawdziwy błąd z ładnym UI
                                 handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
                                 return;
@@ -3201,6 +3201,9 @@ function sqlConnect() {
         st.innerHTML = `✅ Połączono. SQL Server: ${d.version.slice(0,60)}...`;
 
         sqlTables = d.tables;
+        sqlSchema = d.tables.map(t =>
+            `Tabela: ${t.name} (${t.type}) — kliknij „Schemat” po kolumny`
+        ).join('\n');
         document.getElementById('sqlTablesCard').style.display = '';
         document.getElementById('sqlVectorCard').style.display = '';
         renderSqlTableList(sqlTables);
@@ -3237,9 +3240,11 @@ function sqlLoadSchema(tableName) {
     .then(r=>r.json())
     .then(d => {
         if (!d.success) { alert('Błąd: ' + d.error); return; }
-        // Zbuduj opis schematu dla LLM
+        // Zbuduj opis schematu dla LLM (usuń placeholder tej tabeli jeśli był)
         const colDesc = d.columns.map(c => `  ${c.name} (${c.type}${c.max_len?'('+c.max_len+')':''})`).join('\n');
-        sqlSchema += `\nTabela: ${tableName} (${d.row_count} wierszy)\nKolumny:\n${colDesc}\n`;
+        const block = `\nTabela: ${tableName} (${d.row_count} wierszy)\nKolumny:\n${colDesc}\n`;
+        const placeholder = new RegExp(`Tabela: ${tableName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\([^\\n]+\\)[^\\n]*\\n?`, 'g');
+        sqlSchema = (sqlSchema.replace(placeholder, '') + block).trim() + '\n';
         document.getElementById('sqlResult').innerHTML = `
             <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-family:monospace;font-size:0.8rem;">
                 <strong>${tableName}</strong> — ${d.row_count.toLocaleString('pl')} wierszy<br>
