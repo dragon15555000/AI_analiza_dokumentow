@@ -67,7 +67,7 @@ Dostajesz konkretną odpowiedź z cytatami źródłowymi
 | Backend | Python 3.12 + Flask / Gunicorn |
 | Baza wektorowa | Qdrant Cloud (darmowy plan wystarczy) |
 | Embeddingi | nomic-embed-text 137M (768 dim, lokalnie) |
-| LLM | Llama3 8B Q4 (lokalnie via Ollama) |
+| LLM | Ollama (lokalnie) + OpenRouter (opcjonalnie, darmowe modele) |
 | Frontend | Bootstrap 5 + D3.js + vanilla JS |
 | Chunking | 1000 znaków, nakładka 200, granice zdań |
 
@@ -132,6 +132,16 @@ OPENROUTER_MODEL_VERIFY=google/gemini-2.0-flash-exp:free
 
 Aplikacja ma wbudowaną obsługę limitów (retry + exponential backoff + opcjonalny fallback na Ollama).
 
+## Bezpieczeństwo
+
+> **Uwaga:** Aplikacja pozwala na generowanie i wykonywanie zapytań SQL przez LLM (funkcja Text-to-SQL).  
+> Używaj tej funkcji **tylko** z zaufanymi bazami danych i zawsze sprawdzaj wygenerowane zapytania przed wykonaniem, szczególnie w trybie zapisu (`/sql/write`).
+
+Aplikacja jest przeznaczona do użytku wewnętrznego / instytucjonalnego. Ze względu na specyfikę systemów RAG (Prompt Injection, LLM-generated SQL) zalecane jest:
+- Ograniczanie dostępu do interfejsu
+- Regularne audyty
+- Używanie trybu tylko-do-odczytu gdzie to możliwe
+
 ## Automatyczny start (WSL2 + Windows)
 
 Serwis systemd uruchamia aplikację automatycznie przy starcie WSL2.
@@ -174,7 +184,7 @@ Upload your documents (PDF, Word, Excel, CSV, JSON, Markdown) and ask questions 
 
 **Key features:** semantic search, 5 analysis modes, dual-LLM verification, Excel forensics (Goal Seek detection, hidden rows, formula verification), network graph visualization, DOCX export, multi-collection management.
 
-**Stack:** Python/Flask · Qdrant Cloud · Llama3 (Ollama) · nomic-embed-text · Bootstrap 5 · D3.js
+**Stack:** Python/Flask · Qdrant Cloud · Ollama + OpenRouter (free models) · nomic-embed-text · Bootstrap 5 · D3.js
 
 ---
 
