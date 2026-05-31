@@ -3294,5 +3294,76 @@ def collection_profile():
         return jsonify({"success": False, "error": str(e)})
 
 
+def _localhost_only():
+    """Zwraca True gdy żądanie pochodzi z localhost."""
+    return request.remote_addr in ("127.0.0.1", "::1", "localhost")
+
+
+@app.route('/api/service/status', methods=['GET'])
+def service_status():
+    """Zwraca status usługi systemd i ostatnie logi — tylko z localhost."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    import shutil
+    result: dict = {
+        "success": True,
+        "is_systemd": os.environ.get("INVOCATION_ID") is not None,
+        "active": "unknown",
+        "logs": "",
+    }
+    if not shutil.which("systemctl"):
+        result["active"] = "dev_mode"
+        return jsonify(result)
+
+    try:
+        st = subprocess.run(
+            ["systemctl", "is-active", "ai_analiza"],
+            capture_output=True, text=True, timeout=3,
+        )
+        result["active"] = st.stdout.strip()
+    except Exception:
+        result["active"] = "unknown"
+
+    try:
+        logs = subprocess.run(
+            ["journalctl", "-u", "ai_analiza", "-n", "30", "--no-pager", "--output=short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        result["logs"] = logs.stdout
+    except Exception:
+        pass
+
+    return jsonify(result)
+
+
+@app.route('/api/service/restart', methods=['POST'])
+def service_restart():
+    """Restartuje usługę ai_analiza (lub kończy proces w trybie dev) — tylko z localhost."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    import shutil
+
+    def _do_restart():
+        time.sleep(0.6)
+        try:
+            if shutil.which("systemctl"):
+                st = subprocess.run(
+                    ["systemctl", "is-active", "ai_analiza"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if st.stdout.strip() in ("active", "activating"):
+                    subprocess.run(["systemctl", "restart", "ai_analiza"], timeout=15)
+                    return
+            # Tryb dev lub brak systemd — zakończ proces (systemd z Restart=always wznowi)
+            os._exit(0)
+        except Exception:
+            os._exit(0)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"success": True, "msg": "Restart zlecony"})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)

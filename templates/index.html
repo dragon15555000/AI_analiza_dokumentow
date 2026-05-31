@@ -154,6 +154,8 @@
         <span id="dotQdrant" class="status-dot dot-pending" title="Qdrant">⬤</span> Qdrant &nbsp;
         <span id="dotLlm"    class="status-dot dot-pending" title="LLM">⬤</span> LLM
     </div>
+    <button onclick="openDiagnostics()" title="Diagnostyka / Zarządzanie usługą"
+            style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
 
@@ -3610,10 +3612,72 @@ function showStartupChecklist(d) {
     );
 
     modal.style.display = 'flex';
+    loadServiceStatus();
 }
 
 function closeStartupModal() {
     document.getElementById('startupModal').style.display = 'none';
+}
+
+function openDiagnostics() {
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => showStartupChecklist(d))
+        .catch(() => {});
+}
+
+// --- Service management ---
+let _svcLogsVisible = false;
+
+function loadServiceStatus() {
+    fetch('/api/service/status')
+        .then(r => r.json())
+        .then(d => {
+            const label = document.getElementById('svcStatusLabel');
+            if (!label) return;
+            const map = {active:'🟢 aktywna', inactive:'🔴 zatrzymana', failed:'🔴 błąd', dev_mode:'⚪ tryb dev', unknown:'❓ nieznany'};
+            label.textContent = map[d.active] || d.active;
+            label.style.color = d.active === 'active' ? '#166534' : d.active === 'dev_mode' ? '#6c757d' : '#991b1b';
+            if (d.logs) document.getElementById('svcLogsBox').textContent = d.logs;
+        })
+        .catch(() => {
+            const label = document.getElementById('svcStatusLabel');
+            if (label) label.textContent = '— brak danych';
+        });
+}
+
+function toggleServiceLogs() {
+    _svcLogsVisible = !_svcLogsVisible;
+    document.getElementById('svcLogsBox').style.display = _svcLogsVisible ? 'block' : 'none';
+    document.getElementById('svcLogsBtn').textContent = _svcLogsVisible ? '📋 Ukryj logi' : '📋 Logi';
+    if (_svcLogsVisible) loadServiceStatus();
+}
+
+function restartService() {
+    if (!confirm('Restartować usługę ai_analiza?\nAplikacja będzie niedostępna przez kilka sekund.')) return;
+    const overlay = document.getElementById('restartOverlay');
+    overlay.style.display = 'flex';
+    document.getElementById('restartOverlayMsg').textContent = 'Restartuję usługę…';
+    fetch('/api/service/restart', {method:'POST'})
+        .then(() => {
+            document.getElementById('restartOverlayMsg').textContent = 'Czekam na ponowne uruchomienie…';
+            // Poll until server responds
+            const poll = setInterval(() => {
+                fetch('/health', {signal: AbortSignal.timeout(2000)})
+                    .then(r => r.json())
+                    .then(() => {
+                        clearInterval(poll);
+                        location.reload();
+                    })
+                    .catch(() => {});
+            }, 2000);
+            // Safety timeout after 60s
+            setTimeout(() => { clearInterval(poll); location.reload(); }, 60000);
+        })
+        .catch(() => {
+            overlay.style.display = 'none';
+            alert('Błąd wywołania restartu');
+        });
 }
 
 window.onload = function() {
@@ -3633,7 +3697,7 @@ window.onload = function() {
 
 <!-- Modal checklisty startowej -->
 <div id="startupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:560px;width:94%;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
+    <div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:580px;width:94%;box-shadow:0 8px 32px rgba(0,0,0,0.18);max-height:90vh;overflow-y:auto;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
             <h5 style="margin:0;font-size:1.05rem;font-weight:700;color:#1a1f36;">Diagnostyka startowa</h5>
             <button onclick="closeStartupModal()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:#6c757d;line-height:1;">✕</button>
@@ -3641,10 +3705,28 @@ window.onload = function() {
         <table style="width:100%;border-collapse:collapse;">
             <tbody id="startupCheckBody"></tbody>
         </table>
-        <div style="margin-top:18px;text-align:right;">
-            <button class="btn btn-primary btn-sm" onclick="closeStartupModal()">OK, zaczynam pracę</button>
+
+        <!-- Zarządzanie usługą -->
+        <hr style="margin:18px 0 14px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+            <div style="font-size:0.82rem;color:#6c757d;">
+                Usługa: <strong id="svcStatusLabel" style="color:#6c757d;">sprawdzam…</strong>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-sm btn-outline-secondary" onclick="toggleServiceLogs()" id="svcLogsBtn">📋 Logi</button>
+                <button class="btn btn-sm btn-warning" onclick="restartService()" id="svcRestartBtn">🔄 Restartuj</button>
+                <button class="btn btn-sm btn-primary" onclick="closeStartupModal()">OK, zaczynam pracę</button>
+            </div>
         </div>
+        <pre id="svcLogsBox" style="display:none;margin-top:12px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:12px;border-radius:8px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
     </div>
+</div>
+
+<!-- Nakładka restartu -->
+<div id="restartOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:#fff;font-size:1rem;">
+    <div style="font-size:2rem;">🔄</div>
+    <div id="restartOverlayMsg">Restartuję usługę…</div>
+    <div style="font-size:0.82rem;color:#a0aec0;">Strona odświeży się automatycznie gdy serwer wróci</div>
 </div>
 
 </body>
