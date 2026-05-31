@@ -17,7 +17,7 @@ source venv/bin/activate
 pip install waitress
 
 echo "2. Kopiuję i konfiguruję serwis systemd..."
-CURRENT_USER=$(whoami)
+CURRENT_USER=${SUDO_USER:-$(whoami)}
 CURRENT_DIR=$(pwd)
 sed -e "s|{{USER}}|${CURRENT_USER}|g" \
     -e "s|{{WORKDIR}}|${CURRENT_DIR}|g" \
