@@ -70,7 +70,11 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL   = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 OPENROUTER_MODEL_VERIFY = os.environ.get("OPENROUTER_MODEL_VERIFY", "google/gemini-2.0-flash-exp:free")
 OPENROUTER_FALLBACK_TO_OLLAMA = os.environ.get("OPENROUTER_FALLBACK_TO_OLLAMA", "false").lower() in ("1", "true", "yes")
-OPENROUTER_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
+try:
+    OPENROUTER_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
+except ValueError:
+    logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
+    OPENROUTER_MAX_RETRIES = 3
 
 DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # ollama | openrouter
 
@@ -178,7 +182,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
                     for line in r.iter_lines():
                         if not line:
                             continue
-                        line = line.decode("utf-8")
+                        line = line.decode("utf-8", errors="replace")
                         if line.startswith("data: "):
                             data_str = line[6:].strip()
                             if data_str == "[DONE]":
@@ -198,10 +202,11 @@ def stream_llm_tokens(prompt: str, system: str = "",
             except Exception as e:
                 last_error = e
                 if _is_rate_limit_error(e):
-                    wait = _get_retry_after(e) or (1.5 ** attempt)
-                    wait = min(wait, 12.0)
-                    logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
-                    time.sleep(wait)
+                    if attempt < OPENROUTER_MAX_RETRIES - 1:
+                        wait = _get_retry_after(e) or (1.5 ** attempt)
+                        wait = min(wait, 12.0)
+                        logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                        time.sleep(wait)
                     continue
                 else:
                     # Inny błąd — nie retry'ujemy
@@ -221,7 +226,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
                 "prompt": prompt,
                 "system": system,
                 "stream": True,
-                "options": {"temperature": temperature or 0.2}
+                "options": {"temperature": temperature if temperature is not None else 0.2}
             }
             try:
                 with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
@@ -332,10 +337,11 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
         except Exception as e:
             last_error = e
             if _is_rate_limit_error(e):
-                wait = _get_retry_after(e) or (1.5 ** attempt)
-                wait = min(wait, 12.0)
-                logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
-                time.sleep(wait)
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = min(wait, 12.0)
+                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    time.sleep(wait)
                 continue
             else:
                 break

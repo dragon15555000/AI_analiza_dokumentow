@@ -3,6 +3,8 @@
 
 set -e
 
+cd "$(dirname "$0")"
+
 echo "=== Migracja na produkcyjny serwer (waitress) ==="
 
 if [ ! -d "venv" ]; then
@@ -14,8 +16,12 @@ echo "1. Instaluję waitress..."
 source venv/bin/activate
 pip install waitress
 
-echo "2. Kopiuję serwis systemd..."
-sudo cp ai_analiza.service /etc/systemd/system/
+echo "2. Kopiuję i konfiguruję serwis systemd..."
+CURRENT_USER=$(whoami)
+CURRENT_DIR=$(pwd)
+sed -e "s|{{USER}}|${CURRENT_USER}|g" \
+    -e "s|{{WORKDIR}}|${CURRENT_DIR}|g" \
+    ai_analiza.service | sudo tee /etc/systemd/system/ai_analiza.service > /dev/null
 
 echo "3. Przeładowuję systemd..."
 sudo systemctl daemon-reload

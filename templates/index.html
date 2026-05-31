@@ -1309,8 +1309,7 @@ function executeSearch() {
                         } else if (ev.token !== undefined) {
                             // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
                             const t = ev.token;
-                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter') || t.startsWith('[FALLBACK]'))) {
-                                // Zamień na prawdziwy błąd z ładnym UI
+                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter'))) {
                                 handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
                                 return;
                             }
@@ -2343,15 +2342,24 @@ function generateRelationFilterCheckboxes(edges) {
         const labelEl = document.createElement('label');
         labelEl.className = 'form-check-label';
         labelEl.style.fontSize = '0.72rem';
-        labelEl.innerHTML = `
-            <input type="checkbox" id="${id}" class="relation-filter" checked>
-            <span title="${label} (${count})">${label.length > 18 ? label.slice(0,17)+'…' : label}</span>
-        `;
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.id = id;
+        input.className = 'relation-filter';
+        input.checked = true;
+        input.onchange = renderNetworkWithFilters;
+
+        const span = document.createElement('span');
+        span.title = `${label} (${count})`;
+        span.textContent = label.length > 18 ? label.slice(0, 17) + '…' : label;
+
+        labelEl.appendChild(input);
+        labelEl.appendChild(document.createTextNode(' '));
+        labelEl.appendChild(span);
         container.appendChild(labelEl);
 
-        const cb = labelEl.querySelector('input');
-        cb.onchange = renderNetworkWithFilters;
-        networkRelationCheckboxes[label] = cb;
+        networkRelationCheckboxes[label] = input;
     });
 
     // Jeśli jest więcej relacji niż pokazujemy
@@ -2480,9 +2488,8 @@ function initNetworkFilterListeners() {
 
 // Uruchom inicjalizację filtrów po załadowaniu strony
 document.addEventListener('DOMContentLoaded', () => {
-    // Małe opóźnienie, żeby DOM był gotowy
-    setTimeout(initNetworkFilterListeners, 300);
-    setTimeout(restoreLlmProvider, 400);
+    initNetworkFilterListeners();
+    restoreLlmProvider();
 });
 
 function renderNetwork(nodes, edges) {
