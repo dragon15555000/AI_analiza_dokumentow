@@ -29,10 +29,10 @@ Optional OCR (not required for core RAG): `tesseract-ocr`, `tesseract-ocr-pol`, 
 **Local Qdrant (dev without cloud):** standalone binary can live under `.local/` (gitignored). Example one-time download (x86_64 Linux):
 
 ```bash
-mkdir -p /workspace/.local && cd /workspace/.local
+mkdir -p .local && cd .local
 curl -fsSL -o qdrant.tar.gz "https://github.com/qdrant/qdrant/releases/download/v1.13.6/qdrant-x86_64-unknown-linux-gnu.tar.gz"
 tar -xzf qdrant.tar.gz && rm qdrant.tar.gz && chmod +x qdrant
-# then in tmux from /workspace/.local:
+# then in tmux from .local:
 ./qdrant
 ```
 
