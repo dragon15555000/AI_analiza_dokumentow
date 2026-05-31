@@ -185,6 +185,8 @@ QDRANT_URL=http://localhost:6333
 QDRANT_KEY=                      # zostaw puste
 ```
 
+> ✅ **Kolekcja tworzy się automatycznie** — przy pierwszym uruchomieniu aplikacja sprawdza czy kolekcja z `.env` (`ACTIVE_COLLECTION`) istnieje i jeśli nie, tworzy ją samodzielnie. Nie trzeba nic klikać ani konfigurować.
+
 | | Qdrant Cloud | Qdrant lokalny |
 |---|---|---|
 | Limit RAM | 1 GB (free) | brak |
