@@ -276,6 +276,14 @@
                 <p class="mt-2 text-muted small">Generowanie embeddingu, wyszukiwanie semantyczne i synteza LLM...</p>
             </div>
 
+            <!-- Licznik tokenów / prędkość LLM -->
+            <div id="tokenCountBar" style="display:none;padding:6px 14px;background:#f0f4ff;border-radius:8px;margin-bottom:10px;font-size:0.78rem;color:#4338ca;display:none;align-items:center;gap:14px;flex-wrap:wrap;">
+                <span>🔤 Tokeny: <strong id="tokenCount">0</strong></span>
+                <span>⚡ Prędkość: <strong id="tokenSpeed">—</strong> tok/s</span>
+                <span id="tokenProviderBadge" style="background:#e0e7ff;padding:1px 8px;border-radius:10px;font-size:0.7rem;"></span>
+                <span id="tokenFinalMsg" style="color:#166534;display:none;"></span>
+            </div>
+
             <div id="aiResponseContainer"></div>
             <div id="resultsContainer"></div>
             <div id="sqlHybridResults" class="d-none mt-3" style="background:#f0f9ff;padding:14px 16px;border-radius:10px;border-left:5px solid #0ea5e9;">
@@ -801,6 +809,68 @@
       </div>
     </div>
   </div>
+
+  <!-- Konfiguracja API -->
+  <div class="col-12 mt-1">
+    <div class="search-card">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 style="margin:0;">Konfiguracja LLM / API</h2>
+        <button class="btn btn-outline-secondary btn-sm" onclick="llmConfigLoad()">↺ Odśwież</button>
+      </div>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label small fw-bold mb-1">Dostawca LLM</label>
+          <select id="cfgProvider" class="form-select form-select-sm" onchange="llmConfigToggle()">
+            <option value="ollama">Ollama (lokalny)</option>
+            <option value="openrouter">OpenRouter (chmura)</option>
+          </select>
+        </div>
+        <!-- Ollama -->
+        <div class="col-md-4" id="cfgOllamaUrlWrap">
+          <label class="form-label small fw-bold mb-1">Ollama URL</label>
+          <input type="text" id="cfgOllamaUrl" class="form-control form-control-sm font-monospace" placeholder="http://127.0.0.1:11434">
+        </div>
+        <div class="col-md-4" id="cfgLlmModelWrap">
+          <label class="form-label small fw-bold mb-1">Model Ollama</label>
+          <input type="text" id="cfgLlmModel" class="form-control form-control-sm" placeholder="llama3:latest">
+        </div>
+        <!-- OpenRouter -->
+        <div class="col-md-6" id="cfgOrKeyWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">OpenRouter API Key <span id="cfgOrKeyStatus" class="text-muted small"></span></label>
+          <input type="password" id="cfgOrKey" class="form-control form-control-sm font-monospace" placeholder="sk-or-v1-… (zostaw puste by nie zmieniać)">
+        </div>
+        <div class="col-md-6" id="cfgOrModelWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Model główny</label>
+          <select id="cfgOrModelSelect" class="form-select form-select-sm" onchange="cfgOrModelSyncInput()">
+            <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★</option>
+            <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free)</option>
+            <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (free)</option>
+            <option value="qwen/qwen-2.5-7b-instruct:free">Qwen 2.5 7B (free)</option>
+            <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (free)</option>
+            <option value="custom">Własny…</option>
+          </select>
+          <input type="text" id="cfgOrModel" class="form-control form-control-sm mt-1 font-monospace" placeholder="np. meta-llama/llama-3.3-70b-instruct:free" style="font-size:0.75rem;">
+        </div>
+        <div class="col-md-6" id="cfgOrModelVerifyWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Model Krytyk (weryfikacja)</label>
+          <input type="text" id="cfgOrModelVerify" class="form-control form-control-sm font-monospace" placeholder="google/gemini-2.0-flash-exp:free" style="font-size:0.75rem;">
+        </div>
+        <div class="col-md-3" id="cfgOrFallbackWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Fallback na Ollama przy 429</label>
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" id="cfgOrFallback">
+            <label class="form-check-label small" for="cfgOrFallback">Włącz fallback</label>
+          </div>
+        </div>
+      </div>
+      <div class="mt-3 d-flex gap-2 align-items-center">
+        <button class="btn btn-primary btn-sm" onclick="llmConfigSave()">💾 Zapisz i zastosuj</button>
+        <span id="cfgSaveStatus" class="small text-muted"></span>
+      </div>
+      <div class="mt-2 small text-muted">Zmiany działają natychmiast (bez restartu). Zapisywane do <code>.llm_config.json</code>.</div>
+    </div>
+  </div>
+
 </div>
 </div>
 
@@ -911,7 +981,8 @@ function showTab(name) {
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
-    if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); }
+    if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
+    else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
     if (name === 'sql') sqlLoadSavedConn();
 }
@@ -1258,6 +1329,9 @@ function executeSearch() {
     container.innerHTML = '';
     aiContainer.innerHTML = '';
     if (sqlResultsContainer) sqlResultsContainer.classList.add('d-none');
+    // Reset token counter
+    const _tcBar = document.getElementById('tokenCountBar');
+    if (_tcBar) _tcBar.style.display = 'none';
     btn.disabled = true;
     if (stopBtn) stopBtn.style.display = '';
 
@@ -1301,6 +1375,38 @@ function executeSearch() {
         const reader  = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '', resultsData = null, aiText = '';
+        let _tokCount = 0, _tokStart = 0, _tokTimer = null;
+
+        function _startTokenCounter() {
+            _tokCount = 0; _tokStart = Date.now();
+            const bar = document.getElementById('tokenCountBar');
+            bar.style.display = 'flex';
+            document.getElementById('tokenCount').textContent = '0';
+            document.getElementById('tokenSpeed').textContent = '—';
+            document.getElementById('tokenFinalMsg').style.display = 'none';
+            const prov = document.getElementById('llmProviderSelect').value;
+            const model = prov === 'openrouter'
+                ? (document.getElementById('openrouterModelInput').value || document.getElementById('openrouterModelSelect').value || '')
+                : (document.getElementById('cfgLlmModel')?.value || '');
+            document.getElementById('tokenProviderBadge').textContent = prov === 'openrouter' ? `OpenRouter · ${model.split('/').pop()}` : `Ollama · ${model}`;
+        }
+
+        function _tickTokenCounter(token) {
+            _tokCount++;
+            const secs = (Date.now() - _tokStart) / 1000;
+            document.getElementById('tokenCount').textContent = _tokCount.toLocaleString('pl');
+            if (secs > 0.5)
+                document.getElementById('tokenSpeed').textContent = Math.round(_tokCount / secs);
+        }
+
+        function _stopTokenCounter() {
+            const secs = ((Date.now() - _tokStart) / 1000).toFixed(1);
+            const tps  = secs > 0 ? Math.round(_tokCount / secs) : 0;
+            document.getElementById('tokenSpeed').textContent = tps;
+            const fin = document.getElementById('tokenFinalMsg');
+            fin.textContent = `Gotowe — ${_tokCount.toLocaleString('pl')} tokenów w ${secs}s`;
+            fin.style.display = 'inline';
+        }
 
         const readChunk = async () => {
             try {
@@ -1342,10 +1448,13 @@ function executeSearch() {
                                 handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
                                 return;
                             }
+                            if (_tokCount === 0) _startTokenCounter();
+                            _tickTokenCounter(t);
                             aiText += t;
                             const body = document.getElementById('aiAnswerBody');
                             if (body) body.innerHTML = formatAiText(aiText, mode);
                         } else if (ev.done !== undefined) {
+                            _stopTokenCounter();
                             const box = document.getElementById('aiStreamBox');
                             if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
                             if (resultsData) {
@@ -3633,6 +3742,87 @@ function showStartupChecklist(d) {
 
 function closeStartupModal() {
     document.getElementById('startupModal').style.display = 'none';
+}
+
+// --- LLM Config panel ---
+function llmConfigLoad() {
+    fetch('/api/config/llm')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+            document.getElementById('cfgProvider').value = d.provider || 'ollama';
+            document.getElementById('cfgOllamaUrl').value = d.ollama_url || '';
+            document.getElementById('cfgLlmModel').value  = d.llm_model  || '';
+            document.getElementById('cfgOrKey').value     = '';  // nigdy nie pokazuj klucza
+            const kStatus = document.getElementById('cfgOrKeyStatus');
+            kStatus.textContent = d.openrouter_key_set ? `(ustawiony: ${d.openrouter_key_preview})` : '(nie ustawiony)';
+            kStatus.style.color = d.openrouter_key_set ? '#166534' : '#991b1b';
+
+            // Model główny
+            const sel = document.getElementById('cfgOrModelSelect');
+            const knownModels = Array.from(sel.options).map(o => o.value);
+            if (d.openrouter_model && knownModels.includes(d.openrouter_model)) {
+                sel.value = d.openrouter_model;
+            } else {
+                sel.value = 'custom';
+            }
+            document.getElementById('cfgOrModel').value        = d.openrouter_model || '';
+            document.getElementById('cfgOrModelVerify').value  = d.openrouter_model_verify || '';
+            document.getElementById('cfgOrFallback').checked   = !!d.openrouter_fallback;
+            llmConfigToggle();
+        });
+}
+
+function llmConfigToggle() {
+    const isOr = document.getElementById('cfgProvider').value === 'openrouter';
+    document.getElementById('cfgOllamaUrlWrap').style.display  = isOr ? 'none' : '';
+    document.getElementById('cfgLlmModelWrap').style.display   = isOr ? 'none' : '';
+    document.getElementById('cfgOrKeyWrap').style.display          = isOr ? '' : 'none';
+    document.getElementById('cfgOrModelWrap').style.display        = isOr ? '' : 'none';
+    document.getElementById('cfgOrModelVerifyWrap').style.display  = isOr ? '' : 'none';
+    document.getElementById('cfgOrFallbackWrap').style.display     = isOr ? '' : 'none';
+}
+
+function cfgOrModelSyncInput() {
+    const sel = document.getElementById('cfgOrModelSelect');
+    if (sel.value !== 'custom') {
+        document.getElementById('cfgOrModel').value = sel.value;
+    }
+}
+
+function llmConfigSave() {
+    const provider = document.getElementById('cfgProvider').value;
+    const payload  = { provider };
+    if (provider === 'openrouter') {
+        const key = document.getElementById('cfgOrKey').value.trim();
+        if (key) payload.openrouter_key = key;
+        payload.openrouter_model        = document.getElementById('cfgOrModel').value.trim();
+        payload.openrouter_model_verify = document.getElementById('cfgOrModelVerify').value.trim();
+        payload.openrouter_fallback     = document.getElementById('cfgOrFallback').checked;
+    } else {
+        payload.ollama_url = document.getElementById('cfgOllamaUrl').value.trim();
+        payload.llm_model  = document.getElementById('cfgLlmModel').value.trim();
+    }
+    const status = document.getElementById('cfgSaveStatus');
+    status.textContent = 'Zapisuję…';
+    fetch('/api/config/llm', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(d => {
+        status.textContent = d.success ? '✅ Zapisano i zastosowano' : '❌ ' + d.message;
+        status.style.color = d.success ? '#166534' : '#991b1b';
+        if (d.success) {
+            llmConfigLoad();   // odśwież podgląd klucza
+            // Zaktualizuj selektor w topbarze
+            document.getElementById('llmProviderSelect').value = payload.provider;
+            onLlmProviderChange();
+        }
+        setTimeout(() => { status.textContent = ''; }, 4000);
+    })
+    .catch(() => { status.textContent = '❌ Błąd sieci'; });
 }
 
 function openDiagnostics() {

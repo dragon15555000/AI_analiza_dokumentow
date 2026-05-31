@@ -80,6 +80,46 @@ DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # olla
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
+# Konfiguracja LLM zapisywana przez UI (nadpisuje zmienne powyżej)
+LLM_CONFIG_PATH = Path(__file__).parent / ".llm_config.json"
+
+def _load_llm_config() -> dict:
+    if LLM_CONFIG_PATH.exists():
+        try:
+            return json.loads(LLM_CONFIG_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_llm_config(cfg: dict):
+    try:
+        LLM_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    except Exception as e:
+        logger.warning(f"Błąd zapisu llm config: {e}")
+
+def _apply_llm_config(cfg: dict):
+    """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
+    global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
+    global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
+    global OLLAMA_URL, LLM_MODEL
+    if cfg.get("provider"):
+        DEFAULT_LLM_PROVIDER = cfg["provider"]
+    if cfg.get("openrouter_key"):
+        OPENROUTER_API_KEY = cfg["openrouter_key"]
+    if cfg.get("openrouter_model"):
+        OPENROUTER_MODEL = cfg["openrouter_model"]
+    if cfg.get("openrouter_model_verify"):
+        OPENROUTER_MODEL_VERIFY = cfg["openrouter_model_verify"]
+    if "openrouter_fallback" in cfg:
+        OPENROUTER_FALLBACK_TO_OLLAMA = bool(cfg["openrouter_fallback"])
+    if cfg.get("ollama_url"):
+        OLLAMA_URL = cfg["ollama_url"]
+    if cfg.get("llm_model"):
+        LLM_MODEL = cfg["llm_model"]
+
+# Załaduj i zastosuj konfigurację przy starcie
+_apply_llm_config(_load_llm_config())
+
 
 # ============================================================
 # LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
@@ -3341,6 +3381,53 @@ def collection_profile():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/config/llm', methods=['GET', 'POST'])
+def llm_config():
+    """Odczyt / zapis konfiguracji LLM z UI."""
+    global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
+    global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OLLAMA_URL, LLM_MODEL
+
+    if request.method == 'GET':
+        cfg = _load_llm_config()
+        return jsonify({
+            "success": True,
+            "provider": DEFAULT_LLM_PROVIDER,
+            "openrouter_key_set": bool(OPENROUTER_API_KEY),
+            "openrouter_key_preview": (OPENROUTER_API_KEY[:8] + "…") if OPENROUTER_API_KEY else "",
+            "openrouter_model": OPENROUTER_MODEL,
+            "openrouter_model_verify": OPENROUTER_MODEL_VERIFY,
+            "openrouter_fallback": OPENROUTER_FALLBACK_TO_OLLAMA,
+            "ollama_url": OLLAMA_URL,
+            "llm_model": LLM_MODEL,
+            "source": "file" if cfg else "env",
+        })
+
+    data = request.get_json() or {}
+    cfg = _load_llm_config()
+
+    # Aktualizuj tylko podane pola
+    if "provider" in data:
+        cfg["provider"] = data["provider"].lower().strip()
+    if "openrouter_key" in data and data["openrouter_key"].strip():
+        cfg["openrouter_key"] = data["openrouter_key"].strip()
+    elif "openrouter_key" in data and not data["openrouter_key"].strip():
+        cfg.pop("openrouter_key", None)   # usuń jeśli pusty
+    if "openrouter_model" in data:
+        cfg["openrouter_model"] = data["openrouter_model"].strip()
+    if "openrouter_model_verify" in data:
+        cfg["openrouter_model_verify"] = data["openrouter_model_verify"].strip()
+    if "openrouter_fallback" in data:
+        cfg["openrouter_fallback"] = bool(data["openrouter_fallback"])
+    if "ollama_url" in data:
+        cfg["ollama_url"] = data["ollama_url"].strip()
+    if "llm_model" in data:
+        cfg["llm_model"] = data["llm_model"].strip()
+
+    _save_llm_config(cfg)
+    _apply_llm_config(cfg)
+    return jsonify({"success": True, "message": "Konfiguracja zapisana i zastosowana"})
 
 
 def _localhost_only():
