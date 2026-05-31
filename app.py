@@ -3189,19 +3189,32 @@ def sql_vectorize_all():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Sprawdza łączność z Qdrant i LLM — dla paska statusu w UI."""
+    """Sprawdza łączność z Qdrant, LLM, SQL i OCR — dla checklisty startowej i paska statusu."""
     result = {
         "qdrant": "error",
         "llm": "error",
         "llm_provider": DEFAULT_LLM_PROVIDER,
+        "llm_model": OPENROUTER_MODEL if DEFAULT_LLM_PROVIDER == "openrouter" else os.environ.get("LLM_MODEL", "llama3:latest"),
         "collection": ACTIVE_COLLECTION,
+        "vectors_count": 0,
+        "sql_configured": False,
+        "ocr_available": pytesseract is not None,
     }
+
+    # Qdrant
     try:
-        get_qdrant_client().get_collections()
+        client = get_qdrant_client()
+        client.get_collections()
         result["qdrant"] = "ok"
+        try:
+            info = client.get_collection(ACTIVE_COLLECTION)
+            result["vectors_count"] = info.points_count or 0
+        except Exception:
+            pass
     except Exception as e:
         result["qdrant_error"] = str(e)
 
+    # LLM
     if DEFAULT_LLM_PROVIDER == "openrouter":
         result["llm"] = "ok" if OPENROUTER_API_KEY else "no_key"
     else:
@@ -3211,6 +3224,13 @@ def health_check():
             result["llm"] = "ok"
         except Exception:
             pass
+
+    # SQL
+    sql_cfg = _load_sql_config()
+    result["sql_configured"] = bool(sql_cfg.get("server"))
+    if result["sql_configured"]:
+        result["sql_server"] = sql_cfg.get("server", "")
+        result["sql_database"] = sql_cfg.get("database", "")
 
     return jsonify(result)
 

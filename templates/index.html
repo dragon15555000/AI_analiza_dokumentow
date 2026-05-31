@@ -3566,6 +3566,56 @@ function dismissContextBanner() {
     document.getElementById('contextBanner').style.display = 'none';
 }
 
+// --- Startup checklist modal ---
+function buildCheckRow(label, state, detail) {
+    const tr = document.createElement('tr');
+    const icon = {ok:'✅', error:'❌', no_key:'⚠️', warn:'⚠️'}[state] || '⬜';
+    const color = {ok:'#166534', error:'#991b1b', no_key:'#92400e', warn:'#92400e'}[state] || '#6c757d';
+    const tdIcon = document.createElement('td');
+    tdIcon.style.cssText = 'width:32px;font-size:1.1rem;';
+    tdIcon.textContent = icon;
+    const tdLabel = document.createElement('td');
+    tdLabel.style.cssText = 'font-weight:600;padding:4px 8px;';
+    tdLabel.textContent = label;
+    const tdDetail = document.createElement('td');
+    tdDetail.style.cssText = `font-size:0.82rem;color:${color};`;
+    tdDetail.textContent = detail;
+    tr.append(tdIcon, tdLabel, tdDetail);
+    return tr;
+}
+
+function showStartupChecklist(d) {
+    const modal = document.getElementById('startupModal');
+    const tbody = document.getElementById('startupCheckBody');
+    tbody.innerHTML = '';
+
+    const llmLabel = d.llm_provider === 'openrouter' ? `OpenRouter (${d.llm_model || ''})` : `Ollama (${d.llm_model || ''})`;
+    const llmDetail = {ok:'Połączono', error:'Nie odpowiada — sprawdź czy Ollama działa', no_key:'Brak klucza OPENROUTER_API_KEY w .env'}[d.llm] || d.llm;
+
+    tbody.append(
+        buildCheckRow('Qdrant',
+            d.qdrant,
+            d.qdrant === 'ok'
+                ? `Połączono · kolekcja "${d.collection}" · ${(d.vectors_count||0).toLocaleString('pl')} wektorów`
+                : (d.qdrant_error || 'Błąd połączenia — sprawdź QDRANT_URL w .env')),
+        buildCheckRow('LLM', d.llm, llmDetail + (d.llm_provider==='openrouter' ? ` · ${llmLabel}` : '')),
+        buildCheckRow('SQL Server',
+            d.sql_configured ? 'ok' : 'warn',
+            d.sql_configured
+                ? `Skonfigurowany: ${d.sql_server||''} / ${d.sql_database||''}`
+                : 'Nie skonfigurowany (opcjonalne — zakładka SQL)'),
+        buildCheckRow('OCR (Tesseract)',
+            d.ocr_available ? 'ok' : 'warn',
+            d.ocr_available ? 'Dostępny — obsługuje skany i obrazy' : 'Nie zainstalowany (opcjonalne — sudo apt install tesseract-ocr)')
+    );
+
+    modal.style.display = 'flex';
+}
+
+function closeStartupModal() {
+    document.getElementById('startupModal').style.display = 'none';
+}
+
 window.onload = function() {
     updateStats();
     sqlLoadSavedConn();
@@ -3573,7 +3623,29 @@ window.onload = function() {
     setInterval(checkHealth, 30000);
     setTimeout(() => loadSuggestions(false), 2000);
     setTimeout(() => loadCollectionProfile(), 3000);
+    // Pokaż checklistę startową
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => showStartupChecklist(d))
+        .catch(() => {});
 };
 </script>
+
+<!-- Modal checklisty startowej -->
+<div id="startupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:560px;width:94%;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+            <h5 style="margin:0;font-size:1.05rem;font-weight:700;color:#1a1f36;">Diagnostyka startowa</h5>
+            <button onclick="closeStartupModal()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:#6c757d;line-height:1;">✕</button>
+        </div>
+        <table style="width:100%;border-collapse:collapse;">
+            <tbody id="startupCheckBody"></tbody>
+        </table>
+        <div style="margin-top:18px;text-align:right;">
+            <button class="btn btn-primary btn-sm" onclick="closeStartupModal()">OK, zaczynam pracę</button>
+        </div>
+    </div>
+</div>
+
 </body>
 </html>
