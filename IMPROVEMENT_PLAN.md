@@ -1,5 +1,8 @@
 # Plan Usprawnień – AI Analiza Dokumentów
 
+> **Roadmapa na GitHub:** [Issue #2 — Plan rozwoju 2026](https://github.com/dragon15555000/AI_analiza_dokumentow/issues/2) (tabela faz + sprinty).  
+> Kopia treści issue: [`docs/ROADMAP_ISSUE_2.md`](docs/ROADMAP_ISSUE_2.md).
+
 Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po dodaniu integracji z OpenRouter.
 
 ## Priorytety
