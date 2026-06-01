@@ -76,6 +76,161 @@ DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # olla
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
+APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
+APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
+_ACTIVE_COLLECTION_FILE = Path(__file__).parent / ".active_collection"
+ALLOWED_DOC_EXTENSIONS = frozenset(
+    {"docx", "pdf", "xlsx", "xls", "csv", "md", "json", "txt"}
+)
+
+
+class EmbeddingError(RuntimeError):
+    """Błąd generowania embeddingu — nie używaj wektora zerowego."""
+
+
+def _load_persisted_collection() -> str | None:
+    if _ACTIVE_COLLECTION_FILE.exists():
+        name = _ACTIVE_COLLECTION_FILE.read_text(encoding="utf-8").strip()
+        if name and re.match(r"^[\w\-]+$", name):
+            return name
+    return None
+
+
+_persisted_col = _load_persisted_collection()
+if _persisted_col:
+    ACTIVE_COLLECTION = _persisted_col
+
+
+def _persist_active_collection(name: str) -> None:
+    try:
+        _ACTIVE_COLLECTION_FILE.write_text(name, encoding="utf-8")
+    except OSError as e:
+        logger.warning("Nie zapisano aktywnej kolekcji: %s", e)
+
+
+def _resolve_allowed_roots() -> list[Path]:
+    roots: list[Path] = []
+    for raw in SEARCH_ROOTS:
+        try:
+            p = Path(raw).expanduser().resolve()
+            if p.exists():
+                roots.append(p)
+        except OSError:
+            continue
+    if not roots:
+        for fallback in (Path.home(), Path("/mnt"), Path(__file__).parent.resolve()):
+            try:
+                if fallback.exists():
+                    roots.append(fallback.resolve())
+            except OSError:
+                continue
+    return roots
+
+
+def _path_is_allowed(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return False
+    for root in _resolve_allowed_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _validate_extensions(exts: list) -> list[str]:
+    out: list[str] = []
+    for e in exts:
+        e = str(e).strip().lower().lstrip(".")
+        if re.match(r"^[a-z0-9]{1,10}$", e) and e in ALLOWED_DOC_EXTENSIONS:
+            out.append(e)
+    if not out:
+        return ["docx", "pdf", "xlsx", "xls", "csv", "md", "json"]
+    return out
+
+
+def _find_files_safe(folder: Path, exts: list) -> list[Path]:
+    """Wyszukiwanie plików bez shella (find jako lista argv)."""
+    validated = _validate_extensions(exts)
+    seen: set[str] = set()
+    files: list[Path] = []
+    for ext in validated:
+        proc = subprocess.run(
+            ["find", str(folder), "-type", "f", "-name", f"*.{ext}"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode not in (0, 1):
+            logger.warning("find zakończone kodem %s: %s", proc.returncode, proc.stderr[:200])
+            continue
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                p = Path(line).resolve()
+            except OSError:
+                continue
+            key = str(p)
+            if key not in seen and p.is_file() and _path_is_allowed(p):
+                seen.add(key)
+                files.append(p)
+    return files
+
+
+def _find_file_by_name_safe(fname: str) -> Path | None:
+    if not fname or not re.match(r"^[^\\/\0]+$", fname):
+        return None
+    for root in _resolve_allowed_roots():
+        if not root.exists():
+            continue
+        proc = subprocess.run(
+            ["find", str(root), "-type", "f", "-name", fname],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if proc.returncode not in (0, 1):
+            continue
+        for line in proc.stdout.splitlines()[:1]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                p = Path(line).resolve()
+            except OSError:
+                continue
+            if p.is_file() and _path_is_allowed(p):
+                return p
+    return None
+
+
+def _redact_sql_config(cfg: dict) -> dict:
+    if not cfg:
+        return {}
+    out = dict(cfg)
+    if out.get("password"):
+        out["password"] = "********"
+    return out
+
+
+@app.before_request
+def _require_api_key():
+    if not APP_API_KEY:
+        return None
+    if request.endpoint == "index":
+        return None
+    provided = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
+    if provided != APP_API_KEY:
+        return jsonify(
+            {"success": False, "error": "Brak lub nieprawidłowy klucz API (nagłówek X-API-Key)"}
+        ), 401
+    return None
+
 
 # ============================================================
 # LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
@@ -579,10 +734,10 @@ def get_embedding(text: str) -> list:
                 continue
             else:
                 logger.error(f"Ollama Embedding Error: {e}")
-                return [0.0] * 768
+                raise EmbeddingError(f"Błąd embeddingu Ollama: {e}") from e
 
     logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
-    return [0.0] * 768
+    raise EmbeddingError("Embedding niedostępny — Ollama nie odpowiada (connection reset)")
 
 def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
     """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
@@ -599,9 +754,11 @@ def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
             try:
                 idx, vec = fut.result()
                 results[idx] = vec
+            except EmbeddingError:
+                raise
             except Exception as e:
                 logger.error(f"Batch embedding error: {e}")
-                results[futures[fut]] = [0.0] * 768
+                raise EmbeddingError(f"Błąd batch embeddingu: {e}") from e
 
     return results
 
@@ -799,7 +956,8 @@ def highlight_backend(text: str, query: str) -> str:
         try:
             pattern = re.compile(rf"({root}[a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ]*)", re.IGNORECASE)
             escaped = pattern.sub(r"<mark>\1</mark>", escaped)
-        except: continue
+        except re.error:
+            continue
     return escaped
 
 CHUNK_SIZE = 1000
@@ -1183,7 +1341,7 @@ def extract_text(file_path: Path) -> str:
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template("index.html", api_key_required=bool(APP_API_KEY))
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
@@ -1276,6 +1434,7 @@ def create_collection():
 
         if switch:
             ACTIVE_COLLECTION = name
+            _persist_active_collection(name)
             _qdrant_client = None  # Reset połączenia po zmianie kolekcji
             _suggestions_cache["data"] = None; _docs_cache["data"] = None
 
@@ -1295,6 +1454,7 @@ def switch_collection():
         if not client.collection_exists(name):
             return jsonify({"success": False, "error": f"Kolekcja '{name}' nie istnieje"})
         ACTIVE_COLLECTION = name
+        _persist_active_collection(name)
         _qdrant_client = None  # Reset połączenia po zmianie kolekcji
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
         return jsonify({"success": True, "active_collection": ACTIVE_COLLECTION})
@@ -1323,6 +1483,9 @@ def browse():
     raw = request.args.get('path', '/mnt').strip()
     show_all = request.args.get('all', '0') == '1'   # ?all=1 → pokaż wszystkie pliki (nie tylko dokumenty)
     p = Path(raw)
+
+    if not _path_is_allowed(p if p.exists() else p.parent if p.parent.exists() else Path("/mnt")):
+        return jsonify({"success": False, "error": "Ścieżka poza dozwolonymi katalogami (SEARCH_ROOTS)"})
 
     if not p.exists() or not p.is_dir():
         parent = p.parent
@@ -1474,15 +1637,15 @@ def import_stream():
             import json as _json
             return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
 
-        folder_path = Path(folder)
+        folder_path = Path(folder).expanduser()
         if not folder or not folder_path.exists():
             yield sse("error", {"msg": f"Ścieżka nie istnieje: {folder}"})
             return
+        if not folder_path.is_dir() or not _path_is_allowed(folder_path):
+            yield sse("error", {"msg": "Ścieżka niedozwolona lub poza SEARCH_ROOTS"})
+            return
 
-        ext_pattern = " ".join([f'-name "*.{e}"' for e in exts])
-        or_pattern = " -o ".join([f'-name "*.{e}"' for e in exts])
-        cmd = f'find "{folder_path}" -type f \\( {or_pattern} \\)'
-        files = [Path(l.strip()) for l in os.popen(cmd).readlines() if l.strip()]
+        files = _find_files_safe(folder_path.resolve(), exts)
 
         if not files:
             yield sse("done", {"count": 0, "chunks": 0, "skipped": 0, "msg": "Brak kompatybilnych plików."})
@@ -1525,11 +1688,18 @@ def import_stream():
 
                 # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
                 BATCH = 6
+                embed_failed = False
                 for b in range(0, len(new_chunks_data), BATCH):
                     batch_items = new_chunks_data[b:b+BATCH]
                     batch_texts  = [item[1] for item in batch_items]
                     batch_ids    = [item[0] for item in batch_items]
-                    vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                    try:
+                        vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                    except EmbeddingError as e:
+                        skipped += 1
+                        embed_failed = True
+                        yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                        break
 
                     points  = [
                         PointStruct(
@@ -1549,6 +1719,9 @@ def import_stream():
                         qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
                     new_chunks += len(points)
                     file_new  += len(points)
+
+                if embed_failed:
+                    continue
 
                 imported += 1
                 yield sse("file", {
@@ -1640,6 +1813,13 @@ def file_open():
     if not wsl_path:
         return jsonify({"success": False, "error": "Brak ścieżki"})
 
+    try:
+        check_path = Path(wsl_path).expanduser().resolve()
+    except OSError:
+        return jsonify({"success": False, "error": "Nieprawidłowa ścieżka"})
+    if not check_path.is_file() or not _path_is_allowed(check_path):
+        return jsonify({"success": False, "error": "Plik niedostępny lub poza dozwolonymi katalogami"})
+
     win_path = wsl_to_win(wsl_path)
     if not win_path:
         return jsonify({"success": False, "error": "Nie można skonwertować ścieżki"})
@@ -1674,7 +1854,11 @@ def hybrid_stream():
         try:
             # 1. RAG — Qdrant query
             client = get_qdrant_client()
-            vector = get_embedding(query_text)
+            try:
+                vector = get_embedding(query_text)
+            except EmbeddingError as e:
+                yield sse("error", {"error": str(e)})
+                return
 
             if file_filter:
                 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -1836,7 +2020,11 @@ def search_stream():
 
         try:
             client = get_qdrant_client()
-            vector = get_embedding(query_text)
+            try:
+                vector = get_embedding(query_text)
+            except EmbeddingError as e:
+                yield sse("error", {"error": str(e)})
+                return
 
             if file_filter:
                 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -1918,7 +2106,10 @@ def search():
 
     try:
         client = get_qdrant_client()
-        vector = get_embedding(query_text)
+        try:
+            vector = get_embedding(query_text)
+        except EmbeddingError as e:
+            return jsonify({"success": False, "error": str(e)})
 
         if file_filter:
             # Używa indeksu keyword na polu 'file' — szybkie, bez skanowania całości
@@ -2315,7 +2506,10 @@ def build_network():
 
     try:
         client = get_qdrant_client()
-        vector = get_embedding(query)
+        try:
+            vector = get_embedding(query)
+        except EmbeddingError as e:
+            return jsonify({"success": False, "error": str(e)})
         res    = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
 
         contexts = [{"file": p.payload.get("file",""), "text": p.payload.get("text","")} for p in res.points]
@@ -2678,17 +2872,9 @@ def analyze_excel():
             if p.exists():
                 path = p
 
-    # 3. Szukaj po nazwie rekurencyjnie
+    # 3. Szukaj po nazwie rekurencyjnie (bez shella)
     if not path and fname:
-        for root in SEARCH_ROOTS:
-            rp = Path(root)
-            if not rp.exists():
-                continue
-            # find przez system — szybciej niż Python glob
-            result = os.popen(f'find "{root}" -type f -name "{fname}" 2>/dev/null | head -1').read().strip()
-            if result and Path(result).exists():
-                path = Path(result)
-                break
+        path = _find_file_by_name_safe(fname)
 
     if not path:
         return jsonify({"success": False, "error": f"Nie znaleziono pliku '{fname}' — zaimportuj go ponownie z opcją śledzenia ścieżek (full_path)."})
@@ -2866,10 +3052,15 @@ def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str 
     if first_token not in allowed_first_words:
         return False, f"Niedozwolone polecenie: {first_token}"
 
-    # 2. Odrzuć wielokrotne instrukcje (bardzo częsty wektor ataku)
-    semicolon_count = sql_upper.count(";")
-    if semicolon_count > 1:
-        return False, "Wykryto wiele instrukcji SQL (potencjalne SQL Injection)"
+    # 2. Odrzuć batche (SELECT 1; DROP TABLE ...)
+    if ";" in sql_query:
+        return False, "Średnik niedozwolony — tylko jedno polecenie SQL"
+
+    # Zapytania tylko do odczytu — odrzuć słowa modyfikujące w treści (np. w podzapytaniu)
+    if set(allowed_first_words) <= {"SELECT", "WITH"}:
+        for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "MERGE"):
+            if re.search(rf"\b{forbidden}\b", sql_upper):
+                return False, f"Niedozwolone słowo kluczowe w zapytaniu SELECT: {forbidden}"
 
     # 3. Szukaj niebezpiecznych słów kluczowych
     for dangerous in DANGEROUS_SQL_KEYWORDS:
@@ -3063,7 +3254,7 @@ def sql_config():
         cfg = _load_sql_config()
         return jsonify({
             "success": True,
-            "config": cfg if cfg else None,
+            "config": _redact_sql_config(cfg) if cfg else None,
             "has_config": bool(cfg)
         })
 
@@ -3250,7 +3441,7 @@ def sql_write():
         if not sql_query:
             system_sql = (
                 "Jesteś ekspertem T-SQL (MS SQL Server). "
-                "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE, CREATE TABLE. "
+                "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE lub MERGE. "
                 "Używaj TYLKO tabel z podanego schematu. "
                 "Odpowiadasz WYŁĄCZNIE samym zapytaniem SQL — bez wyjaśnień, bez markdown, bez ```sql. "
                 "Bądź precyzyjny — podaj konkretne wartości i warunki WHERE."
@@ -3265,7 +3456,7 @@ def sql_write():
         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
 
         # === Wzmocniona walidacja bezpieczeństwa (nawet przy confirmed=True) ===
-        allowed_write = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "MERGE")
+        allowed_write = ("INSERT", "UPDATE", "DELETE", "MERGE")
         is_safe, error_msg = _is_sql_safe(sql_query, allowed_write + ("SELECT", "WITH"))
         if not is_safe:
             return jsonify({"success": False, "error": error_msg or "Niedozwolone zapytanie SQL",
@@ -3513,4 +3704,4 @@ def sql_vectorize_all():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    app.run(host=APP_HOST, port=int(os.environ.get("APP_PORT", "5000")), threaded=True)
