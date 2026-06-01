@@ -160,6 +160,7 @@ Te zmiany znacząco zwiększają niezawodność przy korzystaniu z darmowych mod
 - [x] Komunikat w UI gdy `ocr.available === false` (z `install_hint`) — kropka ⬤ OCR w topbarze, tooltip z komendą instalacji
 
 **Excel/PDF**
+- [x] Rozszerzona forensyka Excel (metadane, AVERAGE/SUM, błędy #REF!, ukryte arkusze, rekomendacje w UI) — 2026-06
 - [ ] Podgląd tekstu źródłowego przy kliknięciu wyniku (modal)
 - [ ] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
 - [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
