@@ -159,6 +159,9 @@
             style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
+    <div class="badge-stat" title="Tokeny zużyte w tej sesji">
+        🔤 <span id="sessionTokenCount">0</span>
+    </div>
 
     <!-- Przełącznik Qdrant lokalny/cloud -->
     <div class="badge-stat" style="background:#2d3561; padding:2px 6px; border-radius:999px; display:flex; align-items:center; gap:5px; font-size:0.72rem;">
@@ -174,8 +177,8 @@
     <div class="badge-stat" style="background:#2d3561; padding:2px 6px; border-radius:999px; display:flex; align-items:center; gap:6px; font-size:0.72rem;">
         <select id="llmProviderSelect" onchange="onLlmProviderChange()" 
                 style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:999px; cursor:pointer;">
-            <option value="ollama">Lokalny</option>
             <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Lokalny</option>
         </select>
 
         <select id="openrouterModelSelect" onchange="onOpenRouterModelSelectChange()"
@@ -225,6 +228,9 @@
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('network'); return false;">Sieć powiązań</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('reports'); return false;">Raporty śledcze</a>
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('sql'); return false;">SQL</a>
@@ -622,6 +628,39 @@
 </div>
 </div>
 
+<!-- TAB: Raporty śledcze (Gotowe szablony analityczne) -->
+<div id="tabReports" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-12">
+    <div class="search-card">
+      <h2>Gotowe raporty śledcze</h2>
+      <p class="text-muted small mb-3">
+        Wybierz gotowy szablon raportu. Program automatycznie przeprowadzi analizę na podstawie dostępnych dokumentów 
+        i przygotuje czytelne podsumowanie z kluczowymi ustaleniami.
+      </p>
+
+      <div class="row g-3" id="reportsGrid">
+        <!-- Raporty będą generowane dynamicznie przez JS -->
+      </div>
+
+      <div class="mt-4">
+        <div id="reportResult" class="d-none">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5 id="reportTitle" class="mb-0"></h5>
+            <div>
+              <button class="btn btn-sm btn-outline-secondary" onclick="exportReportDocx()">📄 Eksportuj DOCX</button>
+              <button class="btn btn-sm btn-outline-primary ms-1" onclick="hideReportResult()">Zamknij</button>
+            </div>
+          </div>
+          <div id="reportContent" class="border rounded p-3 bg-light" style="max-height:65vh; overflow:auto; white-space:pre-wrap; font-size:0.92rem; line-height:1.5;"></div>
+          <div class="small text-muted mt-2" id="reportMeta"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
 <!-- TAB: SQL -->
 <div id="tabSql" class="main-wrap" style="display:none;">
 <div class="row g-3">
@@ -887,6 +926,22 @@
             <label class="form-check-label small" for="cfgOrFallback">Włącz fallback</label>
           </div>
         </div>
+
+        <!-- App API Key (ochrona API) -->
+        <div class="col-12 mt-4 pt-3 border-top">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <label class="form-label small fw-bold mb-0">
+              🔐 App API Key <span class="text-danger">(ochrona API)</span>
+              <span id="cfgAppKeyStatus" class="text-muted small ms-1"></span>
+            </label>
+            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="clearAppApiKey()" style="font-size:0.7rem;">Wyczyść</button>
+          </div>
+          <input type="password" id="cfgAppKey" class="form-control form-control-sm font-monospace" placeholder="Zostaw puste, aby nie zmieniać">
+          <div class="form-text small text-danger mt-1">
+            <strong>Uwaga:</strong> Po ustawieniu tego klucza wszystkie zapytania do API (w tym import, SQL, health) będą wymagały nagłówka <code>X-API-Key</code>.
+            Używaj tylko jeśli wystawiasz aplikację poza localhost.
+          </div>
+        </div>
       </div>
       <div class="mt-3 d-flex gap-2 align-items-center">
         <button class="btn btn-primary btn-sm" onclick="llmConfigSave()">💾 Zapisz i zastosuj</button>
@@ -970,15 +1025,16 @@
         Czyszczenie kolekcji...
       </div>
 
-      <div id="importProgressWrap" style="display:none;">
+      <div id="importProgressWrap" style="display:none; border:2px solid #4ade80; background:#f0fdf4; padding:14px 18px; border-radius:12px; margin:12px 0; box-shadow:0 4px 12px rgba(74, 222, 128, 0.15);">
         <div class="d-flex justify-content-between align-items-center mb-2">
-          <span id="importProgressLabel" class="fw-semibold text-success"></span>
-          <span id="importProgressPct" class="fw-bold text-success" style="font-size:0.9rem;"></span>
+          <span id="importProgressLabel" class="fw-semibold text-success" style="font-size:1rem;"></span>
+          <span id="importProgressPct" class="fw-bold text-success" style="font-size:1.1rem; min-width:60px; text-align:right;"></span>
         </div>
-        <div class="progress mb-3" style="height:12px; background:#e6f4ea; border-radius:6px;">
-          <div id="importProgressBar" class="progress-bar bg-success" style="width:0%; transition: width 0.3s;"></div>
+        <div class="progress" style="height:22px; background:#dcfce7; border-radius:8px; overflow:hidden;">
+          <div id="importProgressBar" class="progress-bar bg-success progress-bar-striped progress-bar-animated fw-bold" 
+               style="width:0%; transition: width 0.35s; font-size:0.8rem; line-height:22px; color:#166534;"></div>
         </div>
-        <div id="importLog" style="max-height:220px;overflow-y:auto;font-size:0.75rem;font-family:monospace;background:#0f172a;color:#94a3b8;border-radius:8px;padding:10px 12px; line-height:1.4;"></div>
+        <div id="importLog" style="max-height:180px;overflow-y:auto;font-size:0.72rem;font-family:monospace;background:#0f172a;color:#94a3b8;border-radius:8px;padding:10px 12px; line-height:1.35; margin-top:10px;"></div>
       </div>
       <div id="importDone" class="alert alert-success mt-3 d-none small py-2"></div>
     </div>
@@ -1030,8 +1086,8 @@ let aiTabLoaded = false, colTabLoaded = false;
 // Konfiguracja optymalnych modeli per zakładka
 const _tabModelPrefs = {
     import:     { provider: null,         model: null,                                          autoApply: false, icon: '📥', hint: 'Import nie używa LLM — tylko embeddingi (nomic-embed-text)' },
-    search:     { provider: 'ollama',     model: null,                                          autoApply: true,  icon: '🔍', hint: 'Wyszukiwanie: przełączono na lokalny Ollama (szybki)' },
-    ai:         { provider: 'ollama',     model: null,                                          autoApply: true,  icon: '🤖', hint: 'Analiza AI: przełączono na lokalny Ollama' },
+    search:     { provider: 'openrouter', model: null,                                          autoApply: false, icon: '🔍', hint: 'Wyszukiwanie: OpenRouter (domyślnie)' },
+    ai:         { provider: 'openrouter', model: null,                                          autoApply: false, icon: '🤖', hint: 'Analiza AI: OpenRouter (domyślnie)' },
     compare:    { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',     autoApply: false, icon: '⚖️', hint: 'Porównanie dokumentów: zalecany duży model (70B+)' },
     network:    { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',     autoApply: false, icon: '🕸️', hint: 'Sieć powiązań: zalecany duży model do ekstrakcji relacji' },
 };
@@ -1602,15 +1658,31 @@ function executeSearch() {
             document.getElementById('tokenCount').textContent = _tokCount.toLocaleString('pl');
             if (secs > 0.5)
                 document.getElementById('tokenSpeed').textContent = Math.round(_tokCount / secs);
+
+            // Live update global session counter (przybliżenie)
+            updateSessionTokenCounter(1);
         }
 
-        function _stopTokenCounter() {
+        function _stopTokenCounter(realUsage = null) {
             const secs = ((Date.now() - _tokStart) / 1000).toFixed(1);
             const tps  = secs > 0 ? Math.round(_tokCount / secs) : 0;
             document.getElementById('tokenSpeed').textContent = tps;
             const fin = document.getElementById('tokenFinalMsg');
-            fin.textContent = `Gotowe — ${_tokCount.toLocaleString('pl')} tokenów w ${secs}s`;
+
+            let finalCount = _tokCount;
+
+            // Jeśli dostaliśmy prawdziwe dane usage z OpenRouter
+            if (realUsage && realUsage.completion_tokens) {
+                finalCount = realUsage.completion_tokens;
+                _tokCount = finalCount; // nadpisz przybliżenie
+                document.getElementById('tokenCount').textContent = finalCount.toLocaleString('pl');
+            }
+
+            fin.textContent = `Gotowe — ${finalCount.toLocaleString('pl')} tokenów w ${secs}s`;
             fin.style.display = 'inline';
+
+            // Zaktualizuj globalny licznik sesji dokładniejszą wartością
+            updateSessionTokenCounter(finalCount - (_tokCount - finalCount)); // korekta
         }
 
         const readChunk = async () => {
@@ -2579,8 +2651,8 @@ function openNetworkForQuery(q) {
 
 function runNetworkScenario(prompt) {
     document.getElementById('networkQuery').value = prompt;
-    // Ustaw więcej dokumentów dla scenariuszy
-    document.getElementById('networkLimit').value = '20';
+    // Zalecane: mniejsza liczba dokumentów dla stabilności przy ciężkich scenariuszach (umowy, przetargi)
+    document.getElementById('networkLimit').value = '8';
     buildNetwork();
     // Przewiń do grafu
     document.getElementById('networkSvg').scrollIntoView({behavior:'smooth', block:'center'});
@@ -2614,8 +2686,11 @@ function buildNetwork() {
         document.getElementById('networkBtn').disabled = false;
         if (!d.success) {
             document.getElementById('networkPlaceholder').classList.remove('d-none');
+            const hint = d.error && d.error.includes("Connection") 
+                ? "<br><small>Spróbuj zmniejszyć liczbę dokumentów (max 8-10) lub użyj mocniejszego modelu przez OpenRouter.</small>"
+                : "";
             document.getElementById('networkPlaceholder').innerHTML =
-                `<div style="color:#dc2626;">❌ ${d.error}</div>`;
+                `<div style="color:#dc2626;">❌ ${d.error}${hint}</div>`;
             return;
         }
         if (!d.nodes.length) {
@@ -3068,7 +3143,7 @@ function renderNetwork(nodes, edges) {
 function getCurrentLlmProvider() {
     const sel = document.getElementById('llmProviderSelect');
     if (sel) return sel.value;
-    return localStorage.getItem('llm_provider') || 'ollama';
+    return localStorage.getItem('llm_provider') || 'openrouter';
 }
 
 function onQdrantModeChange() {
@@ -4240,42 +4315,82 @@ function performUpdate() {
     const btnUpdate = document.getElementById('btnUpdateNow');
     const btnRestart = document.getElementById('btnRestartAfterUpdate');
 
-    resultBox.textContent = 'Pobieranie aktualizacji...';
+    resultBox.innerHTML = `<span class="text-primary">⏳ Pobieranie aktualizacji z GitHub...</span>`;
     btnUpdate.disabled = true;
+    btnRestart.style.display = 'none';
+
+    // Symulacja paska postępu (git pull może chwilę trwać)
+    let progress = 0;
+    const progressBar = document.createElement('div');
+    progressBar.className = 'progress mt-2';
+    progressBar.style.height = '6px';
+    progressBar.innerHTML = `<div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%"></div>`;
+    resultBox.appendChild(progressBar);
+
+    const interval = setInterval(() => {
+        progress = Math.min(progress + Math.random() * 25, 90);
+        progressBar.querySelector('.progress-bar').style.width = progress + '%';
+    }, 400);
 
     fetch('/api/update/pull', { method: 'POST' })
         .then(r => r.json())
         .then(d => {
+            clearInterval(interval);
+            progressBar.querySelector('.progress-bar').style.width = '100%';
+
             if (d.success) {
-                resultBox.innerHTML = `<span style="color:#166534;">✓ ${d.message || 'Zaktualizowano.'}</span>`;
+                resultBox.innerHTML = `
+                    <span class="text-success">✅ Kod zaktualizowany.</span><br>
+                    <small>${d.message || ''}</small>
+                `;
                 btnRestart.style.display = 'inline-block';
+                btnRestart.disabled = false;
             } else {
-                resultBox.innerHTML = `<span style="color:#991b1b;">Błąd: ${d.error || d.message}</span>`;
+                resultBox.innerHTML = `<span class="text-danger">❌ Błąd: ${d.error || d.message}</span>`;
+                btnUpdate.disabled = false;
             }
-            btnUpdate.disabled = false;
         })
         .catch(() => {
-            resultBox.textContent = 'Błąd sieci podczas aktualizacji.';
+            clearInterval(interval);
+            resultBox.innerHTML = `<span class="text-danger">❌ Błąd sieci podczas pobierania aktualizacji.</span>`;
             btnUpdate.disabled = false;
         });
 }
 
 function restartAfterUpdate() {
     const resultBox = document.getElementById('updateResultBox');
-    resultBox.textContent = 'Restartowanie aplikacji...';
+    const btnRestart = document.getElementById('btnRestartAfterUpdate');
+
+    resultBox.innerHTML = `
+        <span class="text-warning">🔄 Restartowanie aplikacji...</span><br>
+        <small>Preferowana metoda: user service (Waitress)</small>
+    `;
+    btnRestart.disabled = true;
 
     fetch('/api/update/restart', { method: 'POST' })
         .then(r => r.json())
         .then(d => {
             if (d.success) {
-                resultBox.innerHTML = `<span style="color:#166534;">✓ ${d.message}</span><br>Strona powinna się odświeżyć automatycznie...`;
-                setTimeout(() => window.location.reload(), 2500);
+                resultBox.innerHTML = `
+                    <span class="text-success">✅ ${d.message}</span><br>
+                    <small>Strona odświeży się automatycznie za chwilę...</small>
+                `;
+                showUpdateSuccessToast();
+                setTimeout(() => window.location.reload(), 2200);
             } else {
-                resultBox.innerHTML = `<span style="color:#b45309;">${d.message}</span><br>Uruchom ręcznie: <code>./restart-app.sh --user</code>`;
+                resultBox.innerHTML = `
+                    <span class="text-warning">⚠️ ${d.message}</span><br>
+                    <small>Użyj w terminalu: <code>./restart-app.sh --user</code></small>
+                `;
+                btnRestart.disabled = false;
             }
         })
         .catch(() => {
-            resultBox.innerHTML = `Nie udało się zrestartować automatycznie.<br>Użyj: <code>./restart-app.sh --user</code>`;
+            resultBox.innerHTML = `
+                <span class="text-danger">❌ Nie udało się wysłać komendy restartu.</span><br>
+                <small>Użyj: <code>./restart-app.sh --user</code></small>
+            `;
+            btnRestart.disabled = false;
         });
 }
 
@@ -4285,6 +4400,19 @@ function restartAfterUpdate() {
 
 let updateCheckInterval = null;
 const UPDATE_CHECK_INTERVAL_MS = 20 * 60 * 1000; // co 20 minut
+
+// Globalny licznik tokenów w sesji
+window._sessionTokens = window._sessionTokens || 0;
+
+function updateSessionTokenCounter(additionalTokens = 0) {
+    if (additionalTokens > 0) {
+        window._sessionTokens += additionalTokens;
+    }
+    const el = document.getElementById('sessionTokenCount');
+    if (el) {
+        el.textContent = window._sessionTokens.toLocaleString('pl');
+    }
+}
 
 function startAutoUpdateChecks() {
     // Pierwsze sprawdzenie po 90 sekundach od załadowania strony
@@ -4336,6 +4464,10 @@ function showUpdateNotification(updateData) {
 // Uruchom automatyczne sprawdzanie przy starcie strony
 if (typeof window !== 'undefined') {
     window.addEventListener('load', () => {
+        // Inicjalizuj globalny licznik tokenów
+        const sessionEl = document.getElementById('sessionTokenCount');
+        if (sessionEl) sessionEl.textContent = (window._sessionTokens || 0).toLocaleString('pl');
+
         // Startujemy sprawdzanie dopiero po pełnym załadowaniu UI
         setTimeout(startAutoUpdateChecks, 5000);
     });
@@ -4347,13 +4479,19 @@ function llmConfigLoad() {
         .then(r => r.json())
         .then(d => {
             if (!d.success) return;
-            document.getElementById('cfgProvider').value = d.provider || 'ollama';
+            document.getElementById('cfgProvider').value = d.provider || 'openrouter';
             document.getElementById('cfgOllamaUrl').value = d.ollama_url || '';
             document.getElementById('cfgLlmModel').value  = d.llm_model  || '';
             document.getElementById('cfgOrKey').value     = '';  // nigdy nie pokazuj klucza
             const kStatus = document.getElementById('cfgOrKeyStatus');
             kStatus.textContent = d.openrouter_key_set ? `(ustawiony: ${d.openrouter_key_preview})` : '(nie ustawiony)';
             kStatus.style.color = d.openrouter_key_set ? '#166534' : '#991b1b';
+
+            // App API Key
+            document.getElementById('cfgAppKey').value = '';
+            const appKeyStatus = document.getElementById('cfgAppKeyStatus');
+            appKeyStatus.textContent = d.app_api_key_set ? `(ustawiony: ${d.app_api_key_preview})` : '(nie ustawiony)';
+            appKeyStatus.style.color = d.app_api_key_set ? '#166534' : '#991b1b';
 
             // Model główny
             const sel = document.getElementById('cfgOrModelSelect');
@@ -4387,9 +4525,21 @@ function cfgOrModelSyncInput() {
     }
 }
 
+function clearAppApiKey() {
+    if (!confirm('Na pewno wyczyścić App API Key? Po zapisaniu ochrona API zostanie wyłączona.')) return;
+    document.getElementById('cfgAppKey').value = '';
+    // Immediately save empty value
+    llmConfigSave();
+}
+
 function llmConfigSave() {
     const provider = document.getElementById('cfgProvider').value;
     const payload  = { provider };
+
+    // App API Key (zawsze próbujemy zapisać, nawet jeśli puste)
+    const appKey = document.getElementById('cfgAppKey').value.trim();
+    payload.app_api_key = appKey;  // puste = wyczyść
+
     if (provider === 'openrouter') {
         const key = document.getElementById('cfgOrKey').value.trim();
         if (key) payload.openrouter_key = key;
@@ -4400,8 +4550,15 @@ function llmConfigSave() {
         payload.ollama_url = document.getElementById('cfgOllamaUrl').value.trim();
         payload.llm_model  = document.getElementById('cfgLlmModel').value.trim();
     }
+
     const status = document.getElementById('cfgSaveStatus');
-    status.textContent = 'Zapisuję…';
+    const btn = document.querySelector('#cfgSaveStatus').previousElementSibling; // the save button
+
+    status.textContent = '⏳ Zapisywanie i stosowanie...';
+    status.style.color = '#0d6efd';
+
+    if (btn) btn.disabled = true;
+
     fetch('/api/config/llm', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -4412,14 +4569,19 @@ function llmConfigSave() {
         status.textContent = d.success ? '✅ Zapisano i zastosowano' : '❌ ' + d.message;
         status.style.color = d.success ? '#166534' : '#991b1b';
         if (d.success) {
-            llmConfigLoad();   // odśwież podgląd klucza
-            // Zaktualizuj selektor w topbarze
+            llmConfigLoad();
             document.getElementById('llmProviderSelect').value = payload.provider;
             onLlmProviderChange();
         }
-        setTimeout(() => { status.textContent = ''; }, 4000);
+        setTimeout(() => { 
+            status.textContent = ''; 
+            if (btn) btn.disabled = false;
+        }, 3500);
     })
-    .catch(() => { status.textContent = '❌ Błąd sieci'; });
+    .catch(() => { 
+        status.textContent = '❌ Błąd sieci'; 
+        if (btn) btn.disabled = false;
+    });
 }
 
 function openDiagnostics() {
@@ -4443,6 +4605,17 @@ function loadServiceStatus() {
             label.textContent = map[d.active] || d.active;
             label.style.color = d.active === 'active' ? '#166534' : d.active === 'dev_mode' ? '#6c757d' : '#991b1b';
             if (d.logs) document.getElementById('svcLogsBox').textContent = d.logs;
+
+            // API Protection badge
+            const badge = document.getElementById('apiProtectionBadge');
+            if (badge) {
+                const hasAppKey = window._lastHealthData && window._lastHealthData.app_api_key_set;
+                if (hasAppKey) {
+                    badge.innerHTML = '<span class="badge bg-danger">🔐 API protected</span>';
+                } else {
+                    badge.innerHTML = '<span class="badge bg-secondary">API unprotected</span>';
+                }
+            }
         })
         .catch(() => {
             const label = document.getElementById('svcStatusLabel');
@@ -4483,6 +4656,53 @@ function restartService() {
             alert('Błąd wywołania restartu');
         });
 }
+
+// ============================================================
+// GOTOWE RAPORTY ŚLED CZE
+// ============================================================
+
+const READY_REPORTS = [
+    { id: 'umowy', title: '📋 Umowy i aneksy', desc: 'Strony, daty, wartości, aneksy', icon: '📋', mode: 'detective', prompt: 'Wyciągnij wszystkie umowy i aneksy: strony, daty, wartości i zmiany warunków.' },
+    { id: 'przeplywy', title: '💸 Przepływy finansowe', desc: 'Płatności między podmiotami', icon: '💸', mode: 'detective', prompt: 'Podsumuj wszystkie przepływy finansowe i płatności.' },
+    { id: 'osoby', title: '👤 Osoby decyzyjne', desc: 'Podpisy i role', icon: '👤', mode: 'detective', prompt: 'Wyodrębnij osoby podpisujące i ich role.' },
+    { id: 'przetargi', title: '🏆 Przetargi i oferenci', desc: 'Wyniki i powiązania', icon: '🏆', mode: 'detective', prompt: 'Przeanalizuj przetargi, oferentów i wyniki.' },
+    { id: 'ryzyka', title: '⚠️ Ryzyka i anomalie', desc: 'Rozbieżności i braki', icon: '⚠️', mode: 'detective', prompt: 'Znajdź ryzyka, anomalie i rozbieżności.' },
+    { id: 'wlasnosc', title: '🔗 Struktura własności', desc: 'Beneficjenci', icon: '🔗', mode: 'detective', prompt: 'Wyodrębnij strukturę własności i beneficjentów.' }
+];
+
+function loadReports() {
+    const container = document.getElementById('reportsGrid');
+    if (!container) return;
+    container.innerHTML = '';
+    READY_REPORTS.forEach(r => {
+        const col = document.createElement('div');
+        col.className = 'col-md-6 col-lg-4';
+        col.innerHTML = `<div class="card h-100 shadow-sm" style="cursor:pointer" onclick="runReadyReport('${r.id}')">
+            <div class="card-body"><span style="font-size:1.4rem">${r.icon}</span>
+            <h6 class="mt-2 mb-1">${r.title}</h6><p class="small text-muted mb-0">${r.desc}</p></div></div>`;
+        container.appendChild(col);
+    });
+}
+
+function runReadyReport(id) {
+    const rep = READY_REPORTS.find(x => x.id === id);
+    const resDiv = document.getElementById('reportResult');
+    document.getElementById('reportTitle').textContent = rep.title;
+    document.getElementById('reportContent').innerHTML = '<div class="text-center p-4"><div class="spinner-border"></div></div>';
+    resDiv.classList.remove('d-none');
+
+    fetch('/analyze', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, llm_provider: getCurrentLlmProvider()})
+    }).then(r=>r.json()).then(d => {
+        document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${d.answer || 'Brak danych.'}</div>`;
+    });
+}
+
+function hideReportResult() { document.getElementById('reportResult').classList.add('d-none'); }
+
+const _oldShow = showTab;
+showTab = function(n) { _oldShow(n); if (n==='reports') setTimeout(loadReports, 80); };
 
 window.onload = function() {
     updateStats();           // jeden dodatkowy update statystyk (główny polling jest w startHealthAutoRefresh)
@@ -4540,6 +4760,7 @@ window.onload = function() {
             <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
                 <div style="font-size:0.82rem;color:#6c757d;">
                     Status: <strong id="svcStatusLabel" style="color:#6c757d;">sprawdzam…</strong>
+                    <span id="apiProtectionBadge" class="ms-2 small"></span>
                 </div>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     <button class="btn btn-sm btn-outline-secondary" onclick="toggleServiceLogs()" id="svcLogsBtn">📋 Logi</button>
@@ -4578,6 +4799,18 @@ window.onload = function() {
     <div style="font-size:2rem;">🔄</div>
     <div id="restartOverlayMsg">Restartuję usługę…</div>
     <div style="font-size:0.82rem;color:#a0aec0;">Strona odświeży się automatycznie gdy serwer wróci</div>
+</div>
+
+<!-- Toast kontener na powiadomienia -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:11000;">
+  <div id="updateToast" class="toast align-items-center text-bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+    <div class="d-flex">
+      <div class="toast-body" id="updateToastBody">
+        Aplikacja została pomyślnie zaktualizowana!
+      </div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+  </div>
 </div>
 
 </body>

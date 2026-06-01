@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Kolorowe komunikaty
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+print_warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
+
+cd "$(dirname "$0")" || exit 1
+
+SERVICE_NAME="ai_analiza"
+
+echo -e "${BLUE}========================================"
+echo -e "   Zatrzymywanie AI Analiza Dokumentów"
+echo -e "========================================${NC}"
+echo ""
+
+# Najpierw spróbuj user service
+if systemctl --user is-active "$SERVICE_NAME" &>/dev/null 2>&1; then
+    print_info "Zatrzymuję usługę użytkownika..."
+    systemctl --user stop "$SERVICE_NAME"
+    print_success "Usługa użytkownika zatrzymana."
+    exit 0
+fi
+
+# Fallback na nohup
+print_warn "Zatrzymuję instancję nohup..."
+ps aux | awk '/python.*app.py/ && !/awk/ {print $2}' | while read -r pid; do
+    if [ -n "$pid" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+done
+
+print_success "Aplikacja zatrzymana."

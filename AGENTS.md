@@ -12,7 +12,7 @@ Single Flask RAG app (`app.py`) for document Q&A. UI at `http://localhost:5000`.
 |---------|------|--------|
 | **Qdrant** | `6333` (local) or cloud URL | App **exits on import** without `QDRANT_URL` and `QDRANT_KEY`. Collection auto-created on startup if missing (768 dim). |
 | **Ollama** | `11434` | Required for embeddings (`nomic-embed-text`) and default chat (`llama3`). |
-| **Flask app** | `5000` | **Dev**: `./venv/bin/python app.py`<br>**Polecane (user service)**: `./restart-app.sh --user`<br>**Pełna prod**: Waitress + `ai_analiza-user.service` (systemd --user) lub systemowe `ai_analiza.service`. |
+| **Flask app** | `5000` | **Dev**: `./venv/bin/python app.py`<br>**Polecane (user service)**: `./restart-app.sh --user`<br>**Pełna prod**: Waitress + `ai_analiza-user.service` (systemd --user) lub systemowe `ai_analiza.service`.<br><br>**Domyślny provider LLM**: **OpenRouter** (dla wszystkiego poza importem/wektoryzacją, które zawsze idą przez Ollama + nomic-embed-text). |
 
 ### First-time VM setup (not in update script)
 
@@ -22,6 +22,8 @@ chmod +x scripts/setup-local-dev.sh
 ```
 
 Then start `ollama serve`, `.local/qdrant`, and `./venv/bin/python app.py` (see README „Dev lokalny”).  
+Domyślnie aplikacja używa teraz **OpenRouter** do zadań LLM (chat, analiza, sieć powiązań). Import/wektoryzacja zawsze zostaje na Ollama.
+
 `./scripts/setup-local-dev.sh --help` for options.
 
 Optional OCR: `tesseract-ocr`, `tesseract-ocr-pol`, `poppler-utils`.

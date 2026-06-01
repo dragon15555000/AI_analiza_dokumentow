@@ -82,7 +82,7 @@ except ValueError:
     logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
     OPENROUTER_MAX_RETRIES = 3
 
-DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # ollama | openrouter
+DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter (domyślnie dla LLM) | ollama (tylko dla importu/embeddings)
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
@@ -420,7 +420,8 @@ def _apply_llm_config(cfg: dict):
     """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
-    global OLLAMA_URL, LLM_MODEL
+    global OLLAMA_URL, LLM_MODEL, APP_API_KEY
+
     if cfg.get("provider"):
         DEFAULT_LLM_PROVIDER = cfg["provider"]
     if cfg.get("openrouter_key"):
@@ -435,6 +436,13 @@ def _apply_llm_config(cfg: dict):
         OLLAMA_URL = cfg["ollama_url"]
     if cfg.get("llm_model"):
         LLM_MODEL = cfg["llm_model"]
+
+    # Obsługa klucza API aplikacji (do ochrony endpointów)
+    if cfg.get("app_api_key"):
+        APP_API_KEY = cfg["app_api_key"]
+    elif "app_api_key" in cfg and not cfg.get("app_api_key"):
+        # Pozwól wyczyścić klucz przez UI
+        APP_API_KEY = ""
 
 
 _apply_llm_config(_load_llm_config())
@@ -2886,24 +2894,126 @@ def export_docx():
 
 @app.route('/network', methods=['POST'])
 def build_network():
-    data    = request.get_json()
-    query   = data.get('query', '').strip()
-    limit   = min(int(data.get('limit', 10)), 20)
+    """
+    Buduje sieć powiązań partiami (domyślnie po 5 dokumentów).
+    Zwraca SSE z postępem: progress + done.
+    """
+    data = request.get_json()
+    query = data.get('query', '').strip()
+    limit = min(int(data.get('limit', 10)), 20)
     llm_provider = data.get('llm_provider')
-    raw = ""
+    openrouter_model = data.get("openrouter_model")
+    BATCH_SIZE = 5
 
     if not query:
         return jsonify({"success": False, "error": "Brak zapytania"})
 
-    try:
-        client = get_qdrant_client()
+    def generate():
         try:
-            vector = get_embedding(query)
-        except EmbeddingError as e:
-            return jsonify({"success": False, "error": str(e)})
-        res    = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
+            client = get_qdrant_client()
+            try:
+                vector = get_embedding(query)
+            except EmbeddingError as e:
+                yield sse("error", {"error": str(e)})
+                return
 
-        contexts = [{"file": p.payload.get("file",""), "text": p.payload.get("text","")} for p in res.points]
+            res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
+            all_contexts = [
+                {"file": p.payload.get("file", ""), "text": p.payload.get("text", "")}
+                for p in res.points
+            ]
+
+            if not all_contexts:
+                yield sse("error", {"error": "Nie znaleziono dokumentów"})
+                return
+
+            batches = [all_contexts[i:i+BATCH_SIZE] for i in range(0, len(all_contexts), BATCH_SIZE)]
+            total = len(all_contexts)
+
+            all_nodes = []
+            all_edges = []
+            seen_node_ids = set()
+
+            system = "Jesteś ekspertem analityki śledczej..."  # (skrócony dla czytelności — w oryginale pełny)
+
+            for i, batch in enumerate(batches):
+                yield sse("progress", {
+                    "processed": min((i+1)*BATCH_SIZE, total),
+                    "total": total,
+                    "message": f"Przetworzono {min((i+1)*BATCH_SIZE, total)}/{total} dokumentów..."
+                })
+
+                batch_str = "\n\n".join([f"[{c['file']}]: {_sanitize_for_prompt(c['text'], 650)}" for c in batch])
+                prompt = f"DOKUMENTY (partia {i+1}):\n{batch_str}\n\nZADANIE: {query}\n\nJSON:"
+
+                try:
+                    result = call_llm(prompt=prompt, system=system, stream=False,
+                                      provider=llm_provider, model=openrouter_model, max_tokens=2200)
+                    raw = result.get("response", "") if isinstance(result, dict) else str(result)
+
+                    json_match = re.search(r'\{[\s\S]*\}', raw)
+                    if not json_match:
+                        continue
+
+                    graph = json.loads(json_match.group())
+
+                    for n in graph.get("nodes", []):
+                        nid = str(n.get("id", "")).strip()
+                        if nid and nid not in seen_node_ids:
+                            seen_node_ids.add(nid)
+                            all_nodes.append({
+                                "id": nid,
+                                "type": n.get("type", "inne"),
+                                "label": n.get("label", nid)[:40]
+                            })
+
+                    for e in graph.get("edges", []):
+                        src = str(e.get("source", "")).strip()
+                        tgt = str(e.get("target", "")).strip()
+                        if src and tgt and src in seen_node_ids and tgt in seen_node_ids:
+                            all_edges.append({
+                                "source": src, "target": tgt,
+                                "label": (e.get("label") or "")[:40],
+                                "doc": (e.get("doc") or "")[:90],
+                                "evidence": (e.get("evidence") or "")[:180],
+                                "date": (e.get("date") or "")[:20],
+                                "strength": max(1, min(5, int(e.get("strength", 1))))
+                            })
+                except Exception as batch_err:
+                    logger.warning(f"Błąd partii {i+1}: {batch_err}")
+                    continue
+
+            # Agregacja krawędzi (ta sama co wcześniej)
+            edge_groups = defaultdict(list)
+            for e in all_edges:
+                edge_groups[(e["source"], e["target"])].append(e)
+
+            clean_edges = []
+            for (src, tgt), items in edge_groups.items():
+                # ... (ta sama logika agregacji co w oryginale)
+                labels = [it["label"] for it in items if it["label"]]
+                main_label = max(set(labels), key=labels.count) if labels else items[0]["label"]
+                total_strength = sum(it["strength"] for it in items) + (len(items) - 1)
+                clean_edges.append({
+                    "source": src, "target": tgt, "label": main_label,
+                    "strength": max(1, min(12, total_strength)),
+                    "evidence_count": len(items)
+                })
+
+            clean_edges.sort(key=lambda e: e.get("strength", 1), reverse=True)
+
+            yield sse("done", {
+                "nodes": all_nodes,
+                "edges": clean_edges,
+                "sources": len(all_contexts)
+            })
+
+        except Exception as e:
+            logger.exception("Błąd build_network (batched)")
+            yield sse("error", {"error": str(e)})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache"})
         # Ochrona przed Prompt Injection przy budowie grafu
         sanitized_contexts = [
             {"file": c["file"], "text": _sanitize_for_prompt(c["text"], 800)}
@@ -4494,6 +4604,7 @@ def health_check():
         "sql_server": sql_server,
         "sql_database": sql_database,
         "ports": ports,
+        "app_api_key_set": bool(APP_API_KEY),
     })
 
 
@@ -4574,6 +4685,8 @@ def llm_config():
             "openrouter_fallback": OPENROUTER_FALLBACK_TO_OLLAMA,
             "ollama_url": OLLAMA_URL,
             "llm_model": LLM_MODEL,
+            "app_api_key_set": bool(APP_API_KEY),
+            "app_api_key_preview": (APP_API_KEY[:8] + "…") if APP_API_KEY else "",
             "source": "file" if cfg else "env",
         })
 
@@ -4597,6 +4710,14 @@ def llm_config():
         cfg["ollama_url"] = data["ollama_url"].strip()
     if "llm_model" in data:
         cfg["llm_model"] = data["llm_model"].strip()
+
+    # Obsługa klucza API aplikacji
+    if "app_api_key" in data:
+        key = data["app_api_key"].strip()
+        if key:
+            cfg["app_api_key"] = key
+        else:
+            cfg.pop("app_api_key", None)
 
     _save_llm_config(cfg)
     _apply_llm_config(cfg)

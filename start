@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# Kolorowe komunikaty
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+print_warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
+print_error()   { echo -e "${RED}[✗]${NC} $1"; }
+
+cd "$(dirname "$0")" || exit 1
+
+SERVICE_NAME="ai_analiza"
+
+echo -e "${CYAN}========================================"
+echo -e "   Uruchamianie AI Analiza Dokumentów"
+echo -e "========================================${NC}"
+echo ""
+
+# === Git Pull ===
+read -p "Czy pobrać najnowszy kod z GitHub przed startem? (Y/n): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    print_info "Pobieram najnowsze zmiany..."
+    if git pull origin master; then
+        print_success "Kod zaktualizowany"
+    else
+        print_warn "Nie udało się pobrać zmian (kontynuuję mimo to)"
+    fi
+    echo ""
+fi
+
+# === Sprawdzenie środowiska ===
+if [ ! -f "venv/bin/python" ]; then
+    print_error "Nie znaleziono środowiska wirtualnego (venv/bin/python)"
+    echo "Uruchom najpierw:"
+    echo "  python3 -m venv venv && ./venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
+
+# === User Service (najlepsza opcja) ===
+if systemctl --user is-enabled "$SERVICE_NAME" &>/dev/null 2>&1; then
+    print_info "Wykryto usługę użytkownika systemd"
+    print_info "Uruchamiam przez systemctl --user (Waitress)..."
+    
+    systemctl --user start "$SERVICE_NAME"
+    
+    sleep 2
+    
+    if systemctl --user is-active "$SERVICE_NAME" &>/dev/null; then
+        print_success "Aplikacja uruchomiona jako usługa użytkownika"
+        echo ""
+        echo "   Adres:   http://127.0.0.1:5000"
+        echo "   Logi:    journalctl --user -u $SERVICE_NAME -f"
+        echo "   Status:  systemctl --user status $SERVICE_NAME"
+        echo "   Zatrzymaj: ./stop"
+        echo ""
+        exit 0
+    else
+        print_error "Nie udało się uruchomić usługi użytkownika"
+        exit 1
+    fi
+fi
+
+# === Fallback: nohup ===
+print_warn "Usługa użytkownika nie jest zainstalowana – używam trybu nohup"
+
+# Zatrzymaj starą instancję
+ps aux | awk '/python.*app.py/ && !/awk/ {print $2}' | while read -r pid; do
+    if [ -n "$pid" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+done
+sleep 1
+
+nohup ./venv/bin/python app.py > app.log 2>&1 &
+PID=$!
+
+sleep 3
+
+if ps -p $PID > /dev/null 2>&1; then
+    print_success "Aplikacja uruchomiona w tle (PID: $PID)"
+    echo ""
+    echo "   Adres:   http://127.0.0.1:5000"
+    echo "   Logi:    tail -f app.log"
+    echo "   Zatrzymaj: ./stop"
+    echo ""
+else
+    print_error "Nie udało się uruchomić aplikacji"
+    echo "Sprawdź logi: tail -n 50 app.log"
+    exit 1
+fi
