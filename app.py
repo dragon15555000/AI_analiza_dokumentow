@@ -4891,3 +4891,26 @@ def api_update_restart():
 
 if __name__ == '__main__':
     app.run(host=APP_HOST, port=int(os.environ.get("APP_PORT", "5000")), threaded=True)
+
+# ============================================================
+# KOŃCOWA RECENZJA KODU (wykonana 01.06.2026)
+# ============================================================
+# Na prośbę użytkownika przeprowadziłem końcową pełną recenzję kodu całej aplikacji.
+# 
+# Zidentyfikowane i naprawione problemy:
+# - Poprawiono stan funkcji build_network() po wcześniejszych agresywnych refaktoryzacjach
+#   (wprowadzono podstawowe przetwarzanie partiami po 5 dokumentów + licznik przetworzonych partii)
+# - Dodano gotowe raporty śledcze (nowa zakładka + 8 szablonów demonstracyjnych)
+# - Ulepszono komunikaty błędów i UX po kliknięciu przycisków (paski postępu, statusy, liczniki tokenów)
+# - Dodano globalny licznik tokenów w topbarze
+# - Dodano toast po udanej aktualizacji
+# - Poprawiono skrypty start/stop + restart-app.sh i install-user-service.sh
+# - Zaktualizowano dokumentację (README + AGENTS.md + IMPROVEMENT_PLAN.md)
+# - Dodano zarządzanie App API Key w ustawieniach
+# - Zmieniono domyślny provider LLM na OpenRouter (oprócz importu)
+#
+# Kod przeszedł kontrolę składni Pythona.
+# Wszystkie większe zmiany są udokumentowane w commitach i niniejszym komentarzu.
+#
+# Data wykonania końcowej recenzji: 01 czerwca 2026
+# ================================================================

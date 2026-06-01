@@ -386,6 +386,22 @@ Endpointy: `GET /api/update/status`, `POST /api/update/pull`, `POST /api/update/
 
 ---
 
+## Nowa funkcjonalność: Gotowe raporty śledcze (v2026.09+)
+
+W aplikacji pojawiła się nowa zakładka **„Raporty śledcze”** — zestaw gotowych szablonów analitycznych, które demonstrują możliwości programu na rzeczywistych dokumentach.
+
+Dostępne szablony (m.in.):
+- Umowy i aneksy (strony, daty, wartości, zmiany warunków)
+- Przepływy finansowe między podmiotami
+- Osoby decyzyjne i ich podpisy
+- Przetargi — oferenci i wyniki
+- Ryzyka, anomalie i rozbieżności
+- Struktura własności i beneficjenci
+
+Każdy raport uruchamia automatyczną analizę (głównie w trybie Detektyw) i prezentuje wyniki w czytelnej formie z możliwością eksportu.
+
+---
+
 ## Licencja / License
 
 **Ten projekt jest oprogramowaniem zamkniętym (proprietary software).**
