@@ -152,7 +152,8 @@
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
     <div class="badge-stat" title="Status połączeń">
         <span id="dotQdrant" class="status-dot dot-pending" title="Qdrant">⬤</span> Qdrant &nbsp;
-        <span id="dotLlm"    class="status-dot dot-pending" title="LLM">⬤</span> LLM
+        <span id="dotLlm"    class="status-dot dot-pending" title="LLM">⬤</span> LLM &nbsp;
+        <span id="dotOcr"    class="status-dot dot-pending" title="OCR (Tesseract)">⬤</span> OCR
     </div>
     <button onclick="openDiagnostics()" title="Diagnostyka / Zarządzanie usługą"
             style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
@@ -3774,6 +3775,15 @@ function checkHealth() {
         .then(d => {
             setStatusDot('dotQdrant', d.qdrant);
             setStatusDot('dotLlm',    d.llm);
+            const ocrDot = document.getElementById('dotOcr');
+            if (ocrDot) {
+                const ocr = d.ocr || {};
+                const ok = ocr.available ?? d.ocr_available ?? false;
+                ocrDot.className = 'status-dot ' + (ok ? 'dot-ok' : 'dot-warn');
+                ocrDot.title = ok
+                    ? `OCR (Tesseract) — dostępny · język: ${ocr.lang || 'pol'}`
+                    : `OCR niedostępny · ${ocr.install_hint || 'sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils'}`;
+            }
         })
         .catch(() => {
             setStatusDot('dotQdrant', 'error');

@@ -176,14 +176,17 @@ source venv/bin/activate
 pip install pytesseract pdf2image Pillow
 ```
 
-**Sprawdzenie:** po restarcie Flask otwórz http://localhost:5000 — checklista startowa pokaże wiersz **OCR (Tesseract)**.  
-Albo w terminalu:
+**Sprawdzenie:** topbar aplikacji pokazuje wskaźnik **⬤ OCR**:
+- 🟢 zielony — Tesseract zainstalowany i gotowy
+- 🟡 żółty — brak Tesseracta; najedź kursorem aby zobaczyć komendę instalacji
+
+Albo przez API:
 
 ```bash
 curl -s http://127.0.0.1:5000/health | python3 -m json.tool | grep -A8 '"ocr"'
 ```
 
-Gdy `available: false`, pole `install_hint` podaje brakujące kroki.  
+Gdy `available: false`, pole `install_hint` zawiera gotową komendę do skopiowania.  
 Szczegóły planu rozwoju OCR/Excel: [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) (macierz funkcji).
 
 ### Produkcyjny serwer / Production server (Waitress)

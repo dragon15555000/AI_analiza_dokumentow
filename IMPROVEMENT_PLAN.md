@@ -157,7 +157,7 @@ Te zmiany znacząco zwiększają niezawodność przy korzystaniu z darmowych mod
 - [ ] Checkbox „Wymuś OCR” przy imporcie folderu
 - [ ] SSE: postęp `ocr_page` / `ocr_done` dla wielostronicowych PDF
 - [ ] Rozszerzyć `lang` na `pol+eng` (konfiguracja w `.env`)
-- [ ] Komunikat w UI gdy `ocr.available === false` (z `install_hint`)
+- [x] Komunikat w UI gdy `ocr.available === false` (z `install_hint`) — kropka ⬤ OCR w topbarze, tooltip z komendą instalacji
 
 **Excel/PDF**
 - [ ] Podgląd tekstu źródłowego przy kliknięciu wyniku (modal)
