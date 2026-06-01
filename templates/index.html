@@ -194,6 +194,13 @@
                onchange="onOpenRouterModelChange()"
                title="Np: meta-llama/llama-3.3-70b-instruct:free">
     </div>
+
+    <!-- Wersja aplikacji (automatycznie z backendu /health) -->
+    <div class="badge-stat" id="appVersionBadge"
+         style="background:#2d3561; color:#94a3b8; font-size:0.72rem; padding:2px 9px; border-radius:999px; margin-left:4px;"
+         title="Wersja aplikacji (odczytywana automatycznie z tagów git / stałej)">
+        v<span id="appVersion">...</span>
+    </div>
 </div>
 
 <ul class="nav nav-tabs" id="mainTabs">
@@ -1063,6 +1070,12 @@ function updateHealthStatus() {
                 colEl.textContent = d.active_collection.name;
             }
 
+            // Wersja aplikacji (u góry z prawej, automatyczna po zmianie na backendzie)
+            const verEl = document.getElementById('appVersion');
+            if (verEl && d.version) {
+                verEl.textContent = d.version;
+            }
+
             // Aktualizacja kolorowych kropek w nagłówku (opcja A - lepsza widoczność)
             if (typeof setStatusDot === 'function') {
                 setStatusDot('dotQdrant', d.qdrant_status || (d.qdrant?.ok ? 'ok' : 'error'));
@@ -1089,6 +1102,11 @@ function updateHealthStatus() {
                 setStatusDot('dotLlm',    'error');
                 const ocrDot = document.getElementById('dotOcr');
                 if (ocrDot) ocrDot.className = 'status-dot dot-err';
+            }
+            // Wersja — zostawiamy poprzednią wartość lub pokazujemy "dev"
+            const verEl = document.getElementById('appVersion');
+            if (verEl && verEl.textContent === '...') {
+                verEl.textContent = 'dev';
             }
         });
 }
@@ -3891,9 +3909,15 @@ function showStartupChecklist(d) {
 
     connectionsBody.append(
         buildCheckRow('Qdrant', qdrantOk ? 'ok' : 'error', qdrantDetail),
-        buildCheckRow('LLM', d.llm_status || (d.llm?.ok ? 'ok' : 'error'), getLlmDetail(d)),
-        buildCheckRow('SQL Server', d.sql_configured ? 'ok' : 'warn', getSqlDetail(d))
+        buildCheckRow('LLM', d.llm_status || (d.llm?.ok ? 'ok' : 'error'), getLlmDetail(d))
     );
+
+    // SQL Server pokazujemy TYLKO gdy jest skonfigurowany (to funkcja w pełni opcjonalna)
+    if (d.sql_configured) {
+        connectionsBody.append(
+            buildCheckRow('SQL Server', 'ok', getSqlDetail(d))
+        );
+    }
 
     // === Komponenty ===
     const ocrOk = (d.ocr && d.ocr.available) ?? d.ocr_available ?? false;
@@ -3906,6 +3930,12 @@ function showStartupChecklist(d) {
 
     modal.style.display = 'flex';
     loadServiceStatus();
+
+    // Wersja w nagłówku modala
+    const modalVer = document.getElementById('modalAppVersion');
+    if (modalVer && d.version) {
+        modalVer.textContent = d.version;
+    }
 }
 
 // Pomocnicze funkcje do generowania szczegółów
@@ -3928,7 +3958,6 @@ function getLlmDetail(d) {
 }
 
 function getSqlDetail(d) {
-    if (!d.sql_configured) return 'Nie skonfigurowany (funkcja opcjonalna — bezpieczne pominąć)';
     const portState = d.ports && d.ports.sql;
     if (portState === 'error') {
         return `Skonfigurowany (${d.sql_server || ''}/${d.sql_database || ''}) — port niedostępny (firewall / SQL nie działa)`;
@@ -4135,7 +4164,9 @@ window.onload = function() {
 
         <!-- Nagłówek -->
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-            <h4 style="margin:0;font-size:1.1rem;font-weight:700;color:#1a1f36;">Diagnostyka startowa</h4>
+            <h4 style="margin:0;font-size:1.1rem;font-weight:700;color:#1a1f36;">
+                Diagnostyka startowa <span style="font-weight:400;color:#64748b;font-size:0.85rem;">v<span id="modalAppVersion">...</span></span>
+            </h4>
             <div style="display:flex;gap:8px;align-items:center;">
                 <button onclick="refreshStartupChecklist()" title="Odśwież dane z /health"
                         style="background:none;border:1px solid #cbd5e1;border-radius:6px;font-size:0.75rem;padding:2px 8px;cursor:pointer;color:#475569;">⟳ Odśwież</button>

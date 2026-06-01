@@ -86,6 +86,23 @@ SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split
 
 APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
+
+# Wersja aplikacji — automatycznie odczytywana z git tagów w trybie deweloperskim
+# (git describe --tags --dirty). W releasach produkcyjnych wraca do stałej.
+def _get_app_version() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "describe", "--tags", "--always", "--dirty", "--abbrev=0"],
+            cwd=Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        )
+        return out.decode().strip()
+    except Exception:
+        return "2026.07"
+
+APP_VERSION = _get_app_version()
+
 _ACTIVE_COLLECTION_FILE = Path(__file__).parent / ".active_collection"
 ALLOWED_DOC_EXTENSIONS = frozenset(
     {"docx", "pdf", "xlsx", "xls", "csv", "md", "json", "txt"}
@@ -1684,6 +1701,24 @@ def _discover_local_drives():
                             "kind": "wsl",
                             "icon": "🪟"
                         })
+
+                # Agresywne sondowanie liter (C-J) — rozwiązuje problem leniwego montowania
+                # w WSL (dysk G: pojawia się dopiero po pierwszym dostępie).
+                # Użytkownik z dyskiem G: w Windows powinien go teraz zobaczyć
+                # w "Szybki dostęp" nawet jeśli iterdir() go nie zwrócił.
+                for letter in "cdefghij":
+                    drive_path = mnt / letter
+                    try:
+                        if drive_path.exists() and drive_path.is_dir():
+                            if not any(d["path"] == str(drive_path) for d in drives):
+                                drives.append({
+                                    "path": str(drive_path),
+                                    "label": f"{letter.upper()}: (Windows)",
+                                    "kind": "wsl",
+                                    "icon": "🪟"
+                                })
+                    except Exception:
+                        pass
 
             # Spróbuj wyciągnąć prawdziwe montowania z /proc/mounts (najlepszy wysiłek)
             try:
@@ -3881,6 +3916,7 @@ def health_check():
     return jsonify({
         "success": True,
         "timestamp": int(time.time()),
+        "version": APP_VERSION,
         "overall": "ok" if overall_ok else "degraded",
         "provider": provider,
         "qdrant": qdrant,
