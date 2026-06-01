@@ -227,6 +227,39 @@ def _resolve_sql_schema(cfg: dict, user_schema: str) -> tuple[str, set[str]]:
 # KONIEC PRZYWRÓCONYCH FUNKCJI BEZPIECZEŃSTWA SQL
 # ============================================================
 
+SQL_CONFIG_PATH = Path(__file__).parent / ".sql_config.json"
+
+
+def _load_sql_config() -> dict:
+    """Pełna konfiguracja SQL z pliku (w tym hasło) — tylko backend."""
+    if SQL_CONFIG_PATH.exists():
+        try:
+            return json.loads(SQL_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_sql_config(cfg: dict) -> None:
+    SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _llm_response_text(result) -> str:
+    if isinstance(result, dict):
+        return (result.get("response") or "").strip()
+    return str(result).strip()
+
+
+def _clean_llm_sql(raw: str) -> str:
+    sql = re.sub(r"^```\w*\n?", "", raw or "", flags=re.MULTILINE)
+    sql = re.sub(r"```$", "", sql.strip()).strip()
+    return sql
+
+
+def _validate_sql_table_name(name: str) -> bool:
+    return bool(name and re.match(r"^[\w]+$", name))
+
+
 app = Flask(__name__)
 
 # === Podstawowe logowanie ===
@@ -4506,7 +4539,7 @@ def analyze_excel():
 # ================================================================
 
 # ============================================================
-# STUBY DLA SQL (moduł opcjonalny - dodane 2026-06-01)
+# MODUŁ SQL — MS SQL Server (Text-to-SQL + wektoryzacja do Qdrant)
 # ============================================================
 
 @app.route('/sql/config', methods=['GET'])
@@ -4515,15 +4548,16 @@ def sql_config_get():
     try:
         cfg = _load_sql_config()
         if cfg and cfg.get("server"):
+            safe = _redact_sql_config(cfg)
             return jsonify({
                 "success": True,
                 "has_config": True,
                 "config": {
-                    "server": cfg.get("server", ""),
-                    "port": cfg.get("port", 1433),
-                    "database": cfg.get("database", ""),
-                    "user": cfg.get("user", "")
-                }
+                    "server": safe.get("server", ""),
+                    "port": safe.get("port", 1433),
+                    "database": safe.get("database", ""),
+                    "user": safe.get("user", ""),
+                },
             })
         return jsonify({"success": True, "has_config": False})
     except Exception as e:
@@ -4532,92 +4566,466 @@ def sql_config_get():
 
 @app.route('/sql/config', methods=['POST'])
 def sql_config_post():
-    """Zapisuje podstawową konfigurację SQL (dla UI)."""
+    """Zapisuje konfigurację SQL (dla UI)."""
     try:
         data = request.get_json() or {}
-        sql_cfg_path = Path(__file__).parent / ".sql_config.json"
-        existing = {}
-        if sql_cfg_path.exists():
-            existing = json.loads(sql_cfg_path.read_text())
-
-        for k in ["server", "port", "database", "user", "password"]:
+        existing = _load_sql_config()
+        for k in ["server", "port", "database", "user"]:
             if k in data:
                 existing[k] = data[k]
-
-        sql_cfg_path.write_text(json.dumps(existing, indent=2))
+        if data.get("password"):
+            existing["password"] = data["password"]
+        _save_sql_config(existing)
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-# ============================================================
-# POPRAWKA 2026-06-01 (uzupełnione w ramach opcji A)
-# Dodano minimalne stub endpointy /sql/config GET i POST + wszystkie
-# pozostałe endpointy wywoływane z UI zakładki SQL (/test, /schema, /write,
-# /vectorize, /vectorize-all). Dzięki temu nawet jeśli użytkownik ręcznie
-# włączy zakładkę SQL, nie dostaje błędów parsowania HTML→JSON.
-#
-# Dodatkowo: całkowite odłączenie sqlLoadSavedConn z window.onload i showTab
-# w frontendzie (templates/index.html). Zakładka #navItemSql jest domyślnie
-# ukryta i pokazywana TYLKO gdy /sql/config zwróci has_config:true.
-# Użytkownik może włączyć ją ręcznie z modala diagnostycznego (⚙️).
-#
-# PYMSSQL_AVAILABLE eksponowane dla przyszłego /health i logiki.
-# ============================================================
+def _sql_text_columns(cur, table: str) -> list[str]:
+    cur.execute("""
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME=%s AND DATA_TYPE IN
+        ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
+        ORDER BY ORDINAL_POSITION
+    """, (table,))
+    return [r["COLUMN_NAME"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+
+
+def _sql_row_to_text(table: str, row: dict, label_col: str = "") -> str:
+    label = str(row.get(label_col, "")) if label_col else ""
+    parts = [f"{k}: {v}" for k, v in row.items() if v is not None and str(v).strip()]
+    prefix = f"[{table}] {label}\n" if label else f"[{table}]\n"
+    return prefix + " | ".join(parts)
+
 
 @app.route('/sql/test', methods=['POST'])
-def sql_test_stub():
-    return jsonify({
-        "success": False,
-        "error": "Moduł SQL Server jest opcjonalny. Brak pełnej implementacji endpointów lub brak pymssql w środowisku."
-    })
+def sql_test():
+    """Test połączenia z bazą SQL."""
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
+    cfg = request.get_json() or {}
+    try:
+        conn = _get_sql_conn(cfg)
+        cur = conn.cursor()
+        cur.execute("SELECT @@VERSION")
+        version = cur.fetchone()[0]
+        cur.execute("""
+            SELECT TABLE_NAME, TABLE_TYPE
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY TABLE_NAME
+        """)
+        tables = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"success": True, "version": version[:120], "tables": tables})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 
 @app.route('/sql/schema', methods=['POST'])
-def sql_schema_stub():
-    return jsonify({
-        "success": False,
-        "error": "Moduł SQL Server jest opcjonalny (stub)."
-    })
+def sql_schema():
+    """Pobiera schemat wybranej tabeli."""
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
+    data = request.get_json() or {}
+    cfg = data.get("conn", {})
+    table = data.get("table", "")
+    if not _validate_sql_table_name(table):
+        return jsonify({"success": False, "error": "Nieprawidłowa nazwa tabeli"})
+    try:
+        conn = _get_sql_conn(cfg)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+        """, (table,))
+        cols = [
+            {"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
+            for r in cur.fetchall()
+        ]
+        cur.execute(f"SELECT COUNT(*) FROM [{table}]")
+        row_count = cur.fetchone()[0]
+        conn.close()
+        return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/sql/ask', methods=['POST'])
+def sql_ask():
+    """Text-to-SQL: pytanie po polsku → LLM → SELECT → wyniki + interpretacja."""
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
+    data = request.get_json() or {}
+    cfg = data.get("conn", {})
+    question = (data.get("question") or "").strip()
+    schema = data.get("schema") or ""
+
+    if not question:
+        return jsonify({"success": False, "error": "Brak pytania"})
+
+    sql_query = ""
+    try:
+        effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
+        system_sql = (
+            "Jesteś ekspertem T-SQL (MS SQL Server). "
+            "Generujesz wyłącznie zapytania SELECT (nigdy DELETE/UPDATE/DROP). "
+            "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+        )
+        prompt_sql = (
+            f"SCHEMAT BAZY:\n{effective_schema}\n\n"
+            f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
+            "Wygeneruj zapytanie T-SQL:"
+        )
+        sql_response = call_llm(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+        sql_query = _clean_llm_sql(_llm_response_text(sql_response))
+
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        if first_word not in ("SELECT", "WITH"):
+            return jsonify({
+                "success": False,
+                "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
+                "sql": sql_query,
+            })
+
+        is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+        if not is_safe:
+            return jsonify({"success": False, "error": safe_err or "Niedozwolone zapytanie SQL", "sql": sql_query})
+
+        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+        if not ok_tables:
+            return jsonify({"success": False, "error": table_err or "Nieznane tabele w SQL", "sql": sql_query})
+
+        conn = _get_sql_conn(cfg)
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql_query)
+        rows = cur.fetchmany(500)
+        cols = list(rows[0].keys()) if rows else []
+        result_rows = [{k: (str(v) if v is not None else "") for k, v in row.items()} for row in rows]
+        conn.close()
+
+        preview = "\n".join([
+            ", ".join([f"{k}={v}" for k, v in r.items()])
+            for r in result_rows[:10]
+        ])
+        prompt_interp = (
+            f"Pytanie użytkownika: {question}\n"
+            f"Zapytanie SQL: {sql_query}\n"
+            f"Liczba wyników: {len(result_rows)}\n"
+            f"Przykładowe wyniki:\n{preview}\n\n"
+            "Odpowiedz po polsku: co wynika z tych danych? Podaj konkretne liczby i wnioski."
+        )
+        interp = call_llm(
+            prompt_interp,
+            "Jesteś analitykiem danych. Interpretujesz wyniki SQL po polsku.",
+            stream=False,
+            model=LLM_MODEL,
+        )
+        interpretation = _llm_response_text(interp)
+
+        return jsonify({
+            "success": True,
+            "sql": sql_query,
+            "columns": cols,
+            "rows": result_rows,
+            "total": len(result_rows),
+            "truncated": len(result_rows) == 500,
+            "interpretation": interpretation,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "sql": sql_query})
+
 
 @app.route('/sql/write', methods=['POST'])
-def sql_write_stub():
-    return jsonify({
-        "success": False,
-        "error": "Zapis do SQL Server jest opcjonalny i niezaimplementowany w tej wersji."
-    })
+def sql_write():
+    """Generuje i wykonuje INSERT/UPDATE/DELETE po potwierdzeniu użytkownika."""
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
+    data = request.get_json() or {}
+    cfg = data.get("conn", {})
+    question = (data.get("question") or "").strip()
+    schema = data.get("schema") or ""
+    confirmed = bool(data.get("confirmed", False))
+    sql_query = (data.get("sql") or "").strip()
+
+    if not question and not sql_query:
+        return jsonify({"success": False, "error": "Brak pytania lub zapytania SQL"})
+
+    try:
+        if not sql_query:
+            effective_schema, _known = _resolve_sql_schema(cfg, schema)
+            system_sql = (
+                "Jesteś ekspertem T-SQL (MS SQL Server). "
+                "Generujesz zapytania modyfikujące dane: INSERT, UPDATE, DELETE. "
+                "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+            )
+            prompt_sql = (
+                f"SCHEMAT BAZY:\n{effective_schema}\n\n"
+                f"ZADANIE: {question}\n\n"
+                "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
+            )
+            gen = call_llm(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+            sql_query = _clean_llm_sql(_llm_response_text(gen))
+
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        allowed_write = ("INSERT", "UPDATE", "DELETE", "MERGE")
+        if first_word not in allowed_write and first_word not in ("SELECT", "WITH"):
+            return jsonify({"success": False, "error": f"Nieznane polecenie: {first_word}", "sql": sql_query})
+
+        if not confirmed:
+            impact_info = ""
+            if first_word in ("UPDATE", "DELETE"):
+                try:
+                    conn_check = _get_sql_conn(cfg)
+                    cur_check = conn_check.cursor()
+                    if first_word == "UPDATE":
+                        where_part = re.search(r"\bWHERE\b(.+?)(?:$)", sql_query, re.IGNORECASE | re.DOTALL)
+                        table_part = re.search(r"UPDATE\s+\[?(\w+)\]?", sql_query, re.IGNORECASE)
+                        if where_part and table_part:
+                            count_sql = f"SELECT COUNT(*) FROM [{table_part.group(1)}] WHERE {where_part.group(1)}"
+                            cur_check.execute(count_sql)
+                            impact_info = f"Zmieni {cur_check.fetchone()[0]} wierszy"
+                    elif first_word == "DELETE":
+                        count_sql = sql_query.replace("DELETE", "SELECT COUNT(*)", 1)
+                        cur_check.execute(count_sql)
+                        impact_info = f"Usunie {cur_check.fetchone()[0]} wierszy"
+                    conn_check.close()
+                except Exception:
+                    impact_info = "Nie udało się oszacować wpływu"
+
+            return jsonify({
+                "success": True,
+                "preview": True,
+                "sql": sql_query,
+                "impact": impact_info,
+                "first_word": first_word,
+            })
+
+        is_safe, safe_err = _is_sql_safe(sql_query, allowed_write)
+        if not is_safe:
+            return jsonify({"success": False, "error": safe_err or "Niedozwolone zapytanie SQL", "sql": sql_query})
+
+        conn = _get_sql_conn(cfg)
+        cur = conn.cursor()
+        cur.execute(sql_query)
+        rows_affected = cur.rowcount
+        conn.commit()
+        conn.close()
+        logger.info("[SQL WRITE] %s | rows=%s | %s", first_word, rows_affected, sql_query[:100])
+
+        return jsonify({
+            "success": True,
+            "executed": True,
+            "sql": sql_query,
+            "rows_affected": rows_affected,
+            "message": f"Wykonano. Zmieniono/dodano {rows_affected} wierszy.",
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "sql": sql_query})
+
 
 @app.route('/sql/vectorize', methods=['POST'])
-def sql_vectorize_stub():
-    return jsonify({
-        "success": False,
-        "error": "Wektoryzacja tabel SQL jest funkcją opcjonalną (stub)."
-    })
+def sql_vectorize():
+    """Wektoryzuje dane z tabeli SQL do Qdrant (SSE)."""
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"}), 503
+    data = request.get_json() or {}
+    cfg = data.get("conn", {})
+    table = data.get("table", "")
+    cols = data.get("columns") or []
+    label_col = (data.get("label_col") or "").strip()
+
+    if not _validate_sql_table_name(table):
+        return jsonify({"success": False, "error": "Nieprawidłowa nazwa tabeli"}), 400
+
+    def generate():
+        def sse(event, payload):
+            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        try:
+            _ensure_collection_exists()
+            conn = _get_sql_conn(cfg)
+            cur = conn.cursor(as_dict=True)
+
+            if cols:
+                active_cols = list(cols)
+            else:
+                active_cols = _sql_text_columns(cur, table)
+            if not active_cols:
+                yield sse("error", {"error": f"Brak kolumn do wektoryzacji w tabeli {table}"})
+                return
+
+            col_list = ", ".join(f"[{c}]" for c in active_cols)
+            cur.execute(f"SELECT COUNT(*) AS cnt FROM [{table}]")
+            total = cur.fetchone()["cnt"]
+            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols})
+
+            cur.execute(f"SELECT {col_list} FROM [{table}]")
+            qdrant = get_qdrant_client()
+            done = 0
+            rows_buf: list[str] = []
+            BATCH = 50
+
+            while True:
+                batch_rows = cur.fetchmany(BATCH)
+                if not batch_rows:
+                    break
+                for row in batch_rows:
+                    rows_buf.append(_sql_row_to_text(table, row, label_col))
+
+                vectors = get_embeddings_batch(rows_buf, batch_size=6)
+                points = []
+                for txt, vec in zip(rows_buf, vectors):
+                    if not vec or not any(v != 0.0 for v in vec):
+                        continue
+                    cid = hashlib.md5(txt.encode("utf-8", errors="replace")).hexdigest()
+                    points.append(PointStruct(
+                        id=cid,
+                        vector=vec,
+                        payload={"file": f"[SQL] {table}", "text": txt, "full_path": "", "source": "sql", "sql_table": table},
+                    ))
+                if points:
+                    qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                done += len(rows_buf)
+                rows_buf = []
+                pct = round(done / total * 100) if total else 0
+                yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
+
+            conn.close()
+            _docs_cache["data"] = None
+            yield sse("done", {"done": True, "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
+        except Exception as e:
+            logger.exception("sql_vectorize error")
+            yield sse("error", {"error": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 @app.route('/sql/vectorize-all', methods=['POST'])
-def sql_vectorize_all_stub():
-    return jsonify({
-        "success": False,
-        "error": "Wektoryzacja wszystkich tabel SQL jest funkcją opcjonalną (stub)."
-    })
+def sql_vectorize_all():
+    """Wektoryzuje wszystkie tabele SQL do Qdrant (SSE)."""
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"}), 503
+    data = request.get_json() or {}
+    cfg = data.get("conn", {})
+
+    def generate():
+        def sse(event, payload):
+            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        try:
+            _ensure_collection_exists()
+            conn = _get_sql_conn(cfg)
+            cur = conn.cursor(as_dict=True)
+
+            cur.execute("""
+                SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY TABLE_NAME
+            """)
+            tables = [r["TABLE_NAME"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables})
+
+            qdrant = get_qdrant_client()
+            total_rows = 0
+
+            for table_idx, table in enumerate(tables):
+                try:
+                    yield sse("table_start", {
+                        "table_start": True,
+                        "table": table,
+                        "table_idx": table_idx,
+                        "total_tables": len(tables),
+                    })
+
+                    active_cols = _sql_text_columns(cur, table)
+                    if not active_cols:
+                        yield sse("table_done", {"table_done": True, "table": table, "rows": 0, "table_idx": table_idx})
+                        continue
+
+                    col_list = ", ".join(f"[{c}]" for c in active_cols)
+                    cur.execute(f"SELECT COUNT(*) AS cnt FROM [{table}]")
+                    table_total = cur.fetchone()["cnt"]
+                    if table_total == 0:
+                        yield sse("table_done", {"table_done": True, "table": table, "rows": 0, "table_idx": table_idx})
+                        continue
+
+                    cur.execute(f"SELECT {col_list} FROM [{table}]")
+                    table_done = 0
+                    rows_buf: list[str] = []
+                    BATCH = 50
+
+                    while True:
+                        batch_rows = cur.fetchmany(BATCH)
+                        if not batch_rows:
+                            break
+                        for row in batch_rows:
+                            rows_buf.append(_sql_row_to_text(table, row))
+
+                        vectors = get_embeddings_batch(rows_buf, batch_size=6)
+                        points = []
+                        for txt, vec in zip(rows_buf, vectors):
+                            if not vec or not any(v != 0.0 for v in vec):
+                                continue
+                            cid = hashlib.md5(txt.encode("utf-8", errors="replace")).hexdigest()
+                            points.append(PointStruct(
+                                id=cid,
+                                vector=vec,
+                                payload={"file": f"[SQL] {table}", "text": txt, "full_path": "", "source": "sql", "sql_table": table},
+                            ))
+                        if points:
+                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+
+                        table_done += len(rows_buf)
+                        total_rows += len(rows_buf)
+                        rows_buf = []
+                        pct = round(table_done / table_total * 100) if table_total else 0
+                        yield sse("progress", {
+                            "progress": True,
+                            "table": table,
+                            "done": table_done,
+                            "total": table_total,
+                            "pct": pct,
+                        })
+
+                    yield sse("table_done", {
+                        "table_done": True,
+                        "table": table,
+                        "rows": table_done,
+                        "table_idx": table_idx,
+                    })
+                except Exception as e:
+                    yield sse("table_error", {"table_error": True, "table": table, "error": str(e)})
+
+            conn.close()
+            _docs_cache["data"] = None
+            yield sse("done", {
+                "done": True,
+                "total_rows": total_rows,
+                "total_tables": len(tables),
+                "msg": f"Zwektoryzowano {total_rows} wierszy z {len(tables)} tabel",
+            })
+        except Exception as e:
+            logger.exception("sql_vectorize_all error")
+            yield sse("error", {"error": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ============================================================
 # /health — endpoint dla diagnostyki (kolorowe kropki, modal startowy,
 # self-update, statusy). Używa istniejących _check_* helpers.
-# Dodano wraz z opcją A dla SQL (sql_configured / sql_available).
 # ============================================================
-
-def _load_sql_config():
-    """Wczytuje .sql_config.json (pomocnicze, bez hasła w odpowiedziach)."""
-    try:
-        p = Path(__file__).parent / ".sql_config.json"
-        if not p.exists():
-            return None
-        data = json.loads(p.read_text())
-        # nigdy nie zwracamy password na zewnątrz
-        return {k: v for k, v in data.items() if k != "password"} if data else None
-    except Exception:
-        return None
 
 
 @app.route('/health', methods=['GET'])

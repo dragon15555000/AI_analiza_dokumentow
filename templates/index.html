@@ -4563,14 +4563,14 @@ function sqlVectorize() {
                         // Obsługa startu wektoryzacji pojedynczej tabeli
                         log.textContent = `Przygotowanie do wektoryzacji tabeli ${ev.table} (${ev.total} wierszy)...`;
                         bar.style.width = '0%';
-                    } else if (ev.done !== undefined) {
+                    } else if (ev.progress !== undefined) {
+                        bar.style.width = ev.pct + '%';
+                        log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
+                    } else if (ev.done === true) {
                         bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
                         if (stopBtn) stopBtn.style.display = 'none';
                         updateStats(); allDocs = [];
-                    } else if (ev.progress !== undefined) {
-                        bar.style.width = ev.pct + '%';
-                        log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
                     } else if (ev.error) {
                         log.innerHTML += `<br><span style="color:red;">❌ ${escapeHtml(ev.error)}</span>`;
                         if (stopBtn) stopBtn.style.display = 'none';
@@ -4655,7 +4655,7 @@ function sqlVectorizeAll() {
                     } else if (ev.table_error !== undefined) {
                         const t = ev.table || 'unknown';
                         log.innerHTML += `❌ ${escapeHtml(t)}: ${escapeHtml(ev.error)}<br>`;
-                    } else if (ev.done !== undefined) {
+                    } else if (ev.done === true) {
                         bar.style.width = '100%';
                         bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
