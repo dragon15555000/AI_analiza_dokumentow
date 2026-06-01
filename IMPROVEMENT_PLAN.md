@@ -2,6 +2,28 @@
 
 Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po dodaniu integracji z OpenRouter.
 
+## Zrealizowane w v2026.12 (01 czerwca 2026)
+
+**Opcja A — pełne wyciszenie błędów SQL + działający Dashboard diagnostyczny (wysoki wpływ na UX)**
+
+- Całkowite odłączenie `sqlLoadSavedConn()` z `window.onload` i `showTab` (na wyraźne żądanie użytkownika po "A")
+- Zakładka "SQL" pokazywana **wyłącznie** gdy `/sql/config` zwróci `has_config: true` (domyślnie ukryta)
+- Przycisk w modalu diagnostycznym (⚙️) do ręcznego włączenia integracji przy pierwszej konfiguracji
+- Bezpieczne stuby JSON dla **wszystkich** endpointów `/sql/*` wywoływanych z UI (`/test`, `/schema`, `/write`, `/vectorize*`)
+- Zaimplementowano brakujący endpoint `/health` w oparciu o istniejące helpery `_check_*` + status SQL
+  - Kolorowe kropki (Qdrant/LLM/OCR) działają
+  - Bogaty modal startowy / diagnostyczny otrzymuje prawdziwe dane
+  - Topbar (wektory, status, wersja) i polling aktualizacji działają poprawnie
+- Dodano `PYMSSQL_AVAILABLE` + wspólny `_load_sql_config()`
+- **Efekt**: błąd `SyntaxError: Unexpected token '<'` / "Nie udało się załadować config" **nigdy nie pojawia się** u użytkowników bez skonfigurowanego SQL Server
+
+**Inne poprawki w tej wersji**
+- Commit + tag v2026.12 + aktualizacja dokumentacji
+
+**Wpływ**: Bardzo wysoki (kończy irytujący spam w konsoli + naprawia cały moduł diagnostyki, który był częściowo martwy)
+
+---
+
 ## Priorytety
 
 ### Faza 1 – Stabilność i podstawy (najwyższy priorytet)
