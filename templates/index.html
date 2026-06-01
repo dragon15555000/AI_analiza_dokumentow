@@ -159,6 +159,16 @@
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
 
+    <!-- Przełącznik Qdrant lokalny/cloud -->
+    <div class="badge-stat" style="background:#2d3561; padding:2px 6px; border-radius:999px; display:flex; align-items:center; gap:5px; font-size:0.72rem;">
+        <span style="color:#a0aec0;">Qdrant:</span>
+        <select id="qdrantModeSelect" onchange="onQdrantModeChange()"
+                style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:999px; cursor:pointer;">
+            <option value="local">🏠 Lokalny</option>
+            <option value="cloud">☁️ Cloud</option>
+        </select>
+    </div>
+
     <!-- Prosty przełącznik LLM + wybór modelu -->
     <div class="badge-stat" style="background:#2d3561; padding:2px 6px; border-radius:999px; display:flex; align-items:center; gap:6px; font-size:0.72rem;">
         <select id="llmProviderSelect" onchange="onLlmProviderChange()" 
@@ -2914,6 +2924,44 @@ function getCurrentLlmProvider() {
     return localStorage.getItem('llm_provider') || 'ollama';
 }
 
+function onQdrantModeChange() {
+    const mode = document.getElementById('qdrantModeSelect').value;
+    const sel = document.getElementById('qdrantModeSelect');
+    sel.disabled = true;
+    fetch('/qdrant/switch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mode})
+    })
+    .then(r => r.json())
+    .then(d => {
+        sel.disabled = false;
+        if (d.success) {
+            fetchHealth();
+        } else {
+            alert('Błąd przełączenia Qdrant: ' + (d.error || 'Nieznany błąd'));
+            loadQdrantMode();
+        }
+    })
+    .catch(() => { sel.disabled = false; loadQdrantMode(); });
+}
+
+function loadQdrantMode() {
+    fetch('/qdrant/mode')
+    .then(r => r.json())
+    .then(d => {
+        const sel = document.getElementById('qdrantModeSelect');
+        if (!sel) return;
+        sel.value = d.mode;
+        const cloudOpt = sel.querySelector('option[value="cloud"]');
+        if (cloudOpt) {
+            cloudOpt.disabled = !d.cloud_available;
+            cloudOpt.title = d.cloud_available ? '' : 'Brak QDRANT_CLOUD_URL w .env';
+        }
+    })
+    .catch(() => {});
+}
+
 function onLlmProviderChange() {
     const sel = document.getElementById('llmProviderSelect');
     if (!sel) return;
@@ -3936,7 +3984,7 @@ function llmConfigSave() {
 }
 
 function openDiagnostics() {
-    fetch('/health')
+    fetch('/health/detailed')
         .then(r => r.json())
         .then(d => showStartupChecklist(d))
         .catch(() => {});
@@ -3999,6 +4047,7 @@ function restartService() {
 window.onload = function() {
     updateStats();
     sqlLoadSavedConn();
+    loadQdrantMode();
     checkHealth();
     setInterval(checkHealth, 30000);
     setTimeout(() => loadSuggestions(false), 2000);

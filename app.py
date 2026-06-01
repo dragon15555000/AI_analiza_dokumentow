@@ -61,6 +61,10 @@ if missing:
 
 QDRANT_URL        = os.environ["QDRANT_URL"]
 QDRANT_KEY        = os.environ["QDRANT_KEY"]
+QDRANT_LOCAL_URL  = os.environ.get("QDRANT_LOCAL_URL", "http://127.0.0.1:6333")
+QDRANT_LOCAL_KEY  = os.environ.get("QDRANT_LOCAL_KEY", "dev-local-key")
+QDRANT_CLOUD_URL  = os.environ.get("QDRANT_CLOUD_URL", "")
+QDRANT_CLOUD_KEY  = os.environ.get("QDRANT_CLOUD_KEY", "")
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
@@ -435,6 +439,38 @@ def _file_parsers_health() -> dict:
         "ocr_for_scans": _ocr_health_status()["available"],
         "note": "Excel: wszystkie arkusze + forensyka; PDF: tekst cyfrowy, potem OCR jeśli skan",
     }
+
+
+@app.route('/qdrant/mode', methods=['GET'])
+def qdrant_mode():
+    is_cloud = bool(QDRANT_CLOUD_URL) and QDRANT_URL == QDRANT_CLOUD_URL
+    return jsonify({
+        "success": True,
+        "mode": "cloud" if is_cloud else "local",
+        "url": QDRANT_URL,
+        "cloud_available": bool(QDRANT_CLOUD_URL),
+    })
+
+
+@app.route('/qdrant/switch', methods=['POST'])
+def qdrant_switch():
+    global QDRANT_URL, QDRANT_KEY, _qdrant_client
+    data = request.get_json(force=True) or {}
+    mode = data.get('mode')
+    if mode == 'local':
+        new_url, new_key = QDRANT_LOCAL_URL, QDRANT_LOCAL_KEY
+    elif mode == 'cloud':
+        if not QDRANT_CLOUD_URL:
+            return jsonify({"success": False, "error": "Brak konfiguracji Qdrant Cloud (QDRANT_CLOUD_URL)"}), 400
+        new_url, new_key = QDRANT_CLOUD_URL, QDRANT_CLOUD_KEY
+    else:
+        return jsonify({"success": False, "error": "Nieprawidłowy tryb. Użyj 'local' lub 'cloud'"}), 400
+    with _qdrant_lock:
+        QDRANT_URL = new_url
+        QDRANT_KEY = new_key
+        _qdrant_client = None
+    logger.info(f"Przełączono Qdrant → {mode} ({new_url})")
+    return jsonify({"success": True, "mode": mode, "url": new_url})
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
