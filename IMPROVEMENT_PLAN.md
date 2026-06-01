@@ -89,9 +89,11 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 - Grupowanie automatyczne (clustering) węzłów
 - **Wpływ**: Wysoki
 
-**3.4 Podgląd dokumentów w wynikach**
-- Kliknięcie w dokument pokazuje podgląd (tekst + ewentualnie obraz dla PDF/zdjęć)
-- Szybki dostęp do oryginalnego pliku
+**3.4 Podgląd dokumentów w wynikach** ✅ (czerwiec 2026)
+- Modal podglądu z lazy-loadingiem (`GET /api/get_context` — chunk z Qdrant po `point_id`)
+- Krótki `snippet` w liście wyników zamiast pełnego tekstu; pełny fragment ładowany on-demand
+- Przycisk „Podgląd” w wynikach wyszukiwania i zakładce Dokumenty; rozwijanie wiersza też lazy-loaduje
+- Filtry przeglądarki: typ pliku (ext) + zakres dat modyfikacji w `/documents` i `/browse`
 
 ### Faza 4 – Jakość kodu i utrzymanie
 

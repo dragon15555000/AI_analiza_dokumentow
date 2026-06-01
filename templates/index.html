@@ -100,6 +100,15 @@
         .chevron.open { transform: rotate(180deg); }
         mark { background: #ffeb3b; color: #000; padding: 1px 3px; border-radius: 3px; font-weight: 600; }
 
+        /* Modal podglądu fragmentu */
+        #contextPreviewModal { display:none; position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:100000; align-items:center; justify-content:center; padding:16px; }
+        #contextPreviewModal .ctx-modal-box { background:#fff; border-radius:12px; max-width:820px; width:100%; max-height:88vh; display:flex; flex-direction:column; box-shadow:0 20px 50px rgba(0,0,0,0.25); }
+        #contextPreviewModal .ctx-modal-head { padding:14px 18px; border-bottom:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+        #contextPreviewModal .ctx-modal-body { padding:16px 18px; overflow-y:auto; font-size:0.92rem; line-height:1.65; white-space:pre-wrap; color:#1e293b; flex:1; }
+        #contextPreviewModal .ctx-modal-foot { padding:10px 18px; border-top:1px solid #e2e8f0; display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; }
+        .doc-filter-bar, .browse-filter-bar { padding:8px 16px 10px; border-bottom:1px solid #f0f0f0; background:#fafbff; }
+        .browse-entry-meta { font-size:0.72rem; color:#64748b; margin-left:auto; white-space:nowrap; }
+
         /* Browser dokumentów */
         .doc-table-wrap { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
         .doc-search-bar { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; display: flex; gap: 10px; align-items: center; }
@@ -391,7 +400,7 @@
             <div id="noiseList" style="max-height:200px;overflow-y:auto;font-size:0.82rem;"></div>
         </div>
         <div class="doc-search-bar">
-            <input type="text" id="docFilterInput" class="form-control" placeholder="Filtruj po nazwie pliku..." oninput="filterDocTable()">
+            <input type="text" id="docFilterInput" class="form-control" placeholder="Filtruj po nazwie pliku..." oninput="applyDocFilters()">
             <span class="text-muted small" id="docCountLabel"></span>
             <button class="btn btn-outline-warning btn-sm ms-2 flex-shrink-0" onclick="scanNoise()" id="scanNoiseBtn"
                 style="font-size:0.8rem;">🔍 Skanuj szum</button>
@@ -402,6 +411,21 @@
                 <button class="btn btn-info btn-sm" onclick="generateSelectedMetadataReportDocx()">📄 Raport (DOCX)</button>
                 <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">Odznacz</button>
             </div>
+        </div>
+        <div class="doc-filter-bar d-flex flex-wrap gap-2 align-items-center">
+            <span class="small text-muted fw-bold">Typ:</span>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="pdf" checked> PDF</label>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="docx" checked> DOCX</label>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="xlsx" checked> XLSX</label>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="csv" checked> CSV</label>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="md" checked> MD</label>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="json" checked> JSON</label>
+            <label class="form-check-label small"><input type="checkbox" class="doc-ext-filter" value="txt" checked> TXT</label>
+            <span class="small text-muted ms-2">Modyf. od</span>
+            <input type="date" id="docModFrom" class="form-control form-control-sm" style="width:140px;" onchange="applyDocFilters()">
+            <span class="small text-muted">do</span>
+            <input type="date" id="docModTo" class="form-control form-control-sm" style="width:140px;" onchange="applyDocFilters()">
+            <button class="btn btn-sm btn-outline-secondary" onclick="resetDocFilters()">Reset</button>
         </div>
         <div style="overflow-x:auto; max-height:75vh; overflow-y:auto;">
             <table class="table table-hover table-sm mb-0">
@@ -1008,6 +1032,21 @@
         <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
       </div>
       <div id="browseCrumb" class="small text-muted mb-2"></div>
+      <div class="browse-filter-bar d-flex flex-wrap gap-2 align-items-center mb-2">
+        <span class="small text-muted fw-bold">Typ pliku:</span>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="pdf" checked> PDF</label>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="docx" checked> DOCX</label>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="xlsx" checked> XLSX</label>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="csv" checked> CSV</label>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="md" checked> MD</label>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="json" checked> JSON</label>
+        <label class="form-check-label small"><input type="checkbox" class="browse-ext-filter" value="txt" checked> TXT</label>
+        <span class="small text-muted ms-1">Modyf. od</span>
+        <input type="date" id="browseModFrom" class="form-control form-control-sm" style="width:130px;">
+        <span class="small text-muted">do</span>
+        <input type="date" id="browseModTo" class="form-control form-control-sm" style="width:130px;">
+        <button class="btn btn-sm btn-outline-primary" onclick="browseDir(document.getElementById('browsePathInput').value)">Filtruj</button>
+      </div>
       <div id="browseList" style="max-height:55vh;overflow-y:auto;border:1px solid #e9ecef;border-radius:6px;"></div>
     </div>
   </div>
@@ -1105,6 +1144,8 @@ if (window.API_KEY_REQUIRED && !sessionStorage.getItem('app_api_key')) {
 }
 
 let activeFileFilter = null;
+let lastSearchQuery = '';
+let lastSearchResults = [];
 let allDocs = [];
 let maxChunks = 1;
 
@@ -1303,7 +1344,9 @@ function extBadge(fname) {
 
 function renderDocTable(docs) {
     const tbody = document.getElementById('docTableBody');
-    document.getElementById('docCountLabel').textContent = `${docs.length} plików`;
+    const total = allDocs.length;
+    document.getElementById('docCountLabel').textContent =
+        docs.length === total ? `${docs.length} plików` : `${docs.length} / ${total} plików (po filtrach)`;
     if (!docs.length) {
         tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Brak wyników</td></tr>';
         return;
@@ -1320,9 +1363,11 @@ function renderDocTable(docs) {
             <td>
                 <div style="font-size:0.78rem;font-weight:700;">${d.chunks}</div>
                 <div class="chunks-bar"><div class="chunks-bar-fill" style="width:${Math.round(d.chunks/maxChunks*100)}%"></div></div>
+                ${d.metadata && d.metadata.modified ? `<div class="text-muted" style="font-size:0.68rem;">${escapeHtml(d.metadata.modified.slice(0,16))}</div>` : ''}
             </td>
             <td class="text-end">
                 <button class="doc-row-btn" onclick="searchByFile('${safe}')">Szukaj</button>
+                <button class="doc-row-btn" onclick="openContextPreview('', '${safe}', '')">👁 Podgląd</button>
                 ${d.file.match(/\.xlsx?$/i) ? `<button class="doc-row-btn" style="color:#d97706;border-color:#fde68a;background:#fffbeb;" onclick="analyzeExcel('${safe}')">🔬 Forensyka</button>` : ''}
                 <button class="doc-row-btn" onclick="showDocMetadata('${safe}', ${i})">📋 Metadane</button>
             </td>
@@ -1331,10 +1376,46 @@ function renderDocTable(docs) {
     onDocCheck();
 }
 
-function filterDocTable() {
-    const q = document.getElementById('docFilterInput').value.toLowerCase();
-    renderDocTable(allDocs.filter(d => d.file.toLowerCase().includes(q)));
+function getDocFilterParams() {
+    const exts = [...document.querySelectorAll('.doc-ext-filter:checked')].map(el => el.value);
+    const modified_after = document.getElementById('docModFrom')?.value || '';
+    const modified_before = document.getElementById('docModTo')?.value || '';
+    return { exts, modified_after, modified_before };
 }
+
+function applyDocFilters() {
+    const q = (document.getElementById('docFilterInput').value || '').toLowerCase();
+    const { exts, modified_after, modified_before } = getDocFilterParams();
+    let docs = allDocs.slice();
+    if (q) docs = docs.filter(d => d.file.toLowerCase().includes(q));
+    if (exts.length) {
+        const allowed = new Set(exts);
+        docs = docs.filter(d => allowed.has(d.file.split('.').pop().toLowerCase()));
+    }
+    if (modified_after) {
+        docs = docs.filter(d => {
+            const m = (d.metadata && d.metadata.modified) ? d.metadata.modified.slice(0, 10) : '';
+            return m && m >= modified_after;
+        });
+    }
+    if (modified_before) {
+        docs = docs.filter(d => {
+            const m = (d.metadata && d.metadata.modified) ? d.metadata.modified.slice(0, 10) : '';
+            return !m || m <= modified_before;
+        });
+    }
+    renderDocTable(docs);
+}
+
+function resetDocFilters() {
+    document.querySelectorAll('.doc-ext-filter').forEach(cb => cb.checked = true);
+    document.getElementById('docModFrom').value = '';
+    document.getElementById('docModTo').value = '';
+    document.getElementById('docFilterInput').value = '';
+    applyDocFilters();
+}
+
+function filterDocTable() { applyDocFilters(); }
 
 function toggleSelectAll(cb) {
     document.querySelectorAll('.doc-check').forEach(c => c.checked = cb.checked);
@@ -2090,31 +2171,109 @@ function formatAiText(text, mode) {
 }
 
 function renderDocResults(results, query, container) {
+    lastSearchQuery = query || '';
+    lastSearchResults = results || [];
     if (!results.length) {
         container.innerHTML = `<div class="alert alert-warning">Brak dokumentów źródłowych.</div>`;
         return;
     }
     container.innerHTML = results.map((item, idx) => {
         const hasPath = item.win_path && item.win_path.length > 3;
+        const snippet = item.snippet || (item.text ? item.text.replace(/<[^>]*>/g, '').slice(0, 200) : '');
         const pathHtml = hasPath
             ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
-                📂 <span style="font-family:monospace;">${item.win_path}</span>
+                📂 <span style="font-family:monospace;">${escapeHtml(item.win_path)}</span>
                 <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
                     style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
                </div>` : '';
         return `<div class="result-card">
             <div class="result-header" onclick="toggleResult(${idx})">
-                <span class="result-fname">📄 ${item.file}</span>
+                <span class="result-fname">📄 ${escapeHtml(item.file)}</span>
                 <span class="result-meta">
+                    <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 result-preview-btn"
+                        style="font-size:0.72rem;"
+                        data-point-id="${escapeHtml(item.point_id || '')}"
+                        data-file="${escapeHtml(item.file)}"
+                        onclick="event.stopPropagation(); previewResultBtn(this)">👁 Podgląd</button>
                     <span class="badge bg-secondary">${(parseFloat(item.score)*100).toFixed(1)}%</span>
                     <span class="chevron" id="chev${idx}">▼</span>
                 </span>
             </div>
-            <div class="result-preview" id="prev${idx}">${item.text.replace(/<[^>]*>/g,'').slice(0,200)}</div>
-            <div class="result-body" id="body${idx}">${item.text}</div>
+            <div class="result-preview" id="prev${idx}">${snippet}</div>
+            <div class="result-body" id="body${idx}" data-loaded="0"><div class="text-muted small py-2">Kliknij nagłówek lub „Podgląd”, aby załadować pełny fragment…</div></div>
             ${pathHtml}
         </div>`;
     }).join('');
+}
+
+function previewResultBtn(btn) {
+    openContextPreview(btn.dataset.pointId || '', btn.dataset.file || '', lastSearchQuery);
+}
+
+function openContextPreview(pointId, file, query) {
+    const modal = document.getElementById('contextPreviewModal');
+    if (!modal) return;
+    document.getElementById('contextPreviewTitle').textContent = file || 'Podgląd dokumentu';
+    document.getElementById('contextPreviewMeta').textContent = 'Ładowanie fragmentu…';
+    document.getElementById('contextPreviewBody').innerHTML =
+        '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
+    document.getElementById('contextPreviewOpenBtn').style.display = 'none';
+    modal.style.display = 'flex';
+
+    const params = new URLSearchParams();
+    if (pointId) params.set('point_id', pointId);
+    if (file) params.set('file', file);
+    if (query) params.set('query', query);
+
+    fetchJson('/api/get_context?' + params.toString())
+        .then(d => {
+            if (!d.success) throw new Error(d.error || 'Błąd podglądu');
+            document.getElementById('contextPreviewTitle').textContent = d.file || file;
+            let meta = [];
+            if (d.source) meta.push('Źródło: ' + d.source);
+            const m = d.metadata || {};
+            if (m.modified) meta.push('Modyf.: ' + m.modified);
+            if (m.size_human) meta.push('Rozmiar: ' + m.size_human);
+            if (d.truncated) meta.push('(skrócono do 12k znaków)');
+            document.getElementById('contextPreviewMeta').textContent = meta.join(' · ');
+            document.getElementById('contextPreviewBody').innerHTML = d.text || '(pusty fragment)';
+            const openBtn = document.getElementById('contextPreviewOpenBtn');
+            if (d.full_path) {
+                openBtn.style.display = '';
+                openBtn.onclick = () => openFile(d.full_path);
+            }
+        })
+        .catch(err => {
+            document.getElementById('contextPreviewMeta').textContent = '';
+            document.getElementById('contextPreviewBody').innerHTML =
+                `<div class="alert alert-danger mb-0">${escapeHtml(String(err.message || err))}</div>`;
+        });
+}
+
+function closeContextPreview() {
+    const modal = document.getElementById('contextPreviewModal');
+    if (modal) modal.style.display = 'none';
+}
+
+function loadResultContext(idx) {
+    const item = lastSearchResults[idx];
+    const body = document.getElementById('body' + idx);
+    if (!item || !body || body.dataset.loaded === '1') return;
+
+    body.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div> Ładowanie…</div>';
+    const params = new URLSearchParams();
+    if (item.point_id) params.set('point_id', item.point_id);
+    if (item.file) params.set('file', item.file);
+    if (lastSearchQuery) params.set('query', lastSearchQuery);
+
+    fetchJson('/api/get_context?' + params.toString())
+        .then(d => {
+            body.innerHTML = d.text || '(brak treści)';
+            body.dataset.loaded = '1';
+        })
+        .catch(err => {
+            body.innerHTML = `<div class="alert alert-warning py-2 mb-0">${escapeHtml(String(err.message || err))}</div>`;
+        });
 }
 
 function renderMarkdownTable(text) {
@@ -2197,12 +2356,26 @@ function toggleResult(idx) {
     const open = body.classList.toggle('show');
     prev.style.display = open ? 'none' : '';
     chev.classList.toggle('open', open);
+    if (open && body.dataset.loaded !== '1') loadResultContext(idx);
 }
 
 // ---- FOLDER BROWSER ----
+function getBrowseFilterQuery() {
+    const exts = [...document.querySelectorAll('.browse-ext-filter:checked')].map(el => el.value);
+    const params = new URLSearchParams();
+    exts.forEach(e => params.append('ext', e));
+    const from = document.getElementById('browseModFrom')?.value;
+    const to = document.getElementById('browseModTo')?.value;
+    if (from) params.set('modified_after', from);
+    if (to) params.set('modified_before', to);
+    return params.toString();
+}
+
 function browseDir(path) {
     if (!path) path = '/mnt';
-    fetch('/browse?path=' + encodeURIComponent(path))
+    const fq = getBrowseFilterQuery();
+    const url = '/browse?path=' + encodeURIComponent(path) + (fq ? '&' + fq : '');
+    fetch(url)
     .then(r => r.json())
     .then(d => {
         if (!d.success) return;
@@ -2245,9 +2418,12 @@ function browseDir(path) {
             } else {
                 const ext = e.name.split('.').pop().toLowerCase();
                 const cls = {'pdf':'ext-pdf','docx':'ext-docx','xlsx':'ext-xlsx','json':'ext-json','md':'ext-md','csv':'ext-csv'}[ext]||'ext-txt';
-                return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.7;">
+                const meta = (e.modified || e.size_kb)
+                    ? `<span class="browse-entry-meta">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
+                return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.85;">
                     <span style="font-size:0.7rem;color:#64748b;">📄</span>
-                    <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                    <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</span>
+                    ${meta}
                     <span class="ext-badge ${cls}">${ext}</span>
                 </div>`;
             }
@@ -2281,9 +2457,12 @@ function browseDirWithAll(path) {
                     </div>`;
                 } else {
                     const ext = e.ext || (e.name.split('.').pop() || '').toLowerCase();
+                    const meta = (e.modified || e.size_kb)
+                        ? `<span class="browse-entry-meta">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
                     return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.75;">
                         <span style="font-size:0.7rem;color:#64748b;">📄</span>
-                        <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
+                        <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</span>
+                        ${meta}
                         <span class="ext-badge">${ext}</span>
                     </div>`;
                 }
@@ -5122,6 +5301,24 @@ window.onload = function() {
         .catch(() => {});
 };
 </script>
+
+<!-- Modal podglądu fragmentu dokumentu (lazy-load /api/get_context) -->
+<div id="contextPreviewModal" onclick="if(event.target===this) closeContextPreview()">
+    <div class="ctx-modal-box" onclick="event.stopPropagation()">
+        <div class="ctx-modal-head">
+            <div>
+                <div id="contextPreviewTitle" style="font-weight:700;font-size:1rem;color:#1e293b;">Podgląd</div>
+                <div id="contextPreviewMeta" class="small text-muted mt-1"></div>
+            </div>
+            <button type="button" onclick="closeContextPreview()" class="btn btn-sm btn-outline-secondary">✕</button>
+        </div>
+        <div id="contextPreviewBody" class="ctx-modal-body"></div>
+        <div class="ctx-modal-foot">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeContextPreview()">Zamknij</button>
+            <button type="button" id="contextPreviewOpenBtn" class="btn btn-sm btn-primary" style="display:none;">Otwórz plik</button>
+        </div>
+    </div>
+</div>
 
 <!-- Modal checklisty startowej -->
 <div id="startupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">

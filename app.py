@@ -1474,6 +1474,7 @@ def _retrieve_search_contexts(
             "text": p.get("text", ""),
             "score": float(point.score),
             "full_path": p.get("full_path", ""),
+            "point_id": str(point.id),
         })
 
     if mode == "detective" and len(raw_contexts) > eff_limit:
@@ -1484,7 +1485,8 @@ def _retrieve_search_contexts(
         {
             "file": c.get("file") or "Nieznany",
             "score": f"{c.get('score', 0):.4f}",
-            "text": highlight_backend(c.get("text", ""), query_text),
+            "point_id": c.get("point_id", ""),
+            "snippet": _search_result_snippet(c.get("text", ""), query_text),
             "full_path": c.get("full_path", ""),
             "win_path": wsl_to_win(c.get("full_path", "")),
         }
@@ -1688,7 +1690,61 @@ def highlight_backend(text: str, query: str) -> str:
             continue
     return escaped
 
-CHUNK_SIZE = 1000
+
+def _search_result_snippet(text: str, query: str, max_len: int = 220) -> str:
+    """Krótki podgląd do listy wyników — pełny tekst przez /api/get_context."""
+    plain = re.sub(r"<[^>]+>", "", text or "")
+    plain = plain.replace("\n", " ").strip()
+    if len(plain) <= max_len:
+        return highlight_backend(plain, query)
+    return highlight_backend(plain[:max_len].rsplit(" ", 1)[0] + "…", query)
+
+
+def _mtime_in_range(path: Path, modified_after: str | None, modified_before: str | None) -> bool:
+    if not modified_after and not modified_before:
+        return True
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+    if modified_after:
+        try:
+            ts = time.mktime(time.strptime(modified_after[:10], "%Y-%m-%d"))
+            if mtime < ts:
+                return False
+        except ValueError:
+            pass
+    if modified_before:
+        try:
+            ts = time.mktime(time.strptime(modified_before[:10], "%Y-%m-%d")) + 86399
+            if mtime > ts:
+                return False
+        except ValueError:
+            pass
+    return True
+
+
+def _doc_modified_iso(doc: dict) -> str:
+    meta = doc.get("metadata") or {}
+    return (meta.get("modified") or "")[:10]
+
+
+def _filter_documents_list(
+    docs: list,
+    ext_filter: list[str] | None = None,
+    modified_after: str = "",
+    modified_before: str = "",
+) -> list:
+    out = docs
+    if ext_filter:
+        allowed = {e.lower().lstrip(".") for e in ext_filter}
+        out = [d for d in out if d.get("file", "").rsplit(".", 1)[-1].lower() in allowed]
+    if modified_after:
+        out = [d for d in out if _doc_modified_iso(d) >= modified_after[:10]]
+    if modified_before:
+        out = [d for d in out if _doc_modified_iso(d) <= modified_before[:10] or not _doc_modified_iso(d)]
+    return out
+
 CHUNK_OVERLAP = 200
 
 def make_chunks(text: str) -> list:
@@ -2209,7 +2265,12 @@ def delete_collection():
 @app.route('/browse', methods=['GET'])
 def browse():
     raw = request.args.get('path', '/mnt').strip()
-    show_all = request.args.get('all', '0') == '1'   # ?all=1 → pokaż wszystkie pliki (nie tylko dokumenty)
+    show_all = request.args.get('all', '0') == '1'
+    ext_filter = [e.lower().lstrip('.') for e in request.args.getlist('ext') if e.strip()]
+    modified_after = request.args.get('modified_after', '').strip()
+    modified_before = request.args.get('modified_before', '').strip()
+    default_doc_exts = ['docx', 'pdf', 'xlsx', 'xls', 'csv', 'md', 'json', 'txt']
+    allowed_exts = ext_filter if ext_filter else default_doc_exts
     p = Path(raw)
 
     if not _path_is_allowed(p if p.exists() else p.parent if p.parent.exists() else Path("/mnt")):
@@ -2234,13 +2295,23 @@ def browse():
                     entries.append({"name": child.name, "path": str(child), "type": "dir"})
                 else:
                     ext = child.suffix.lower().lstrip('.')
-                    is_doc = ext in ['docx','pdf','xlsx','xls','csv','md','json','txt']
+                    is_doc = ext in allowed_exts
                     if show_all or is_doc:
+                        if not _mtime_in_range(child, modified_after or None, modified_before or None):
+                            continue
+                        try:
+                            st = child.stat()
+                            mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+                            size_kb = round(st.st_size / 1024, 1)
+                        except OSError:
+                            mtime, size_kb = "", 0
                         entries.append({
                             "name": child.name,
                             "path": str(child),
                             "type": "file",
-                            "ext": ext
+                            "ext": ext,
+                            "modified": mtime,
+                            "size_kb": size_kb,
                         })
             except PermissionError:
                 permission_denied += 1
@@ -2259,7 +2330,12 @@ def browse():
             "total_children": total_children,
             "permission_denied": permission_denied,
             "has_unlisted_items": has_hidden_or_other or permission_denied > 0,
-            "show_all": show_all
+            "show_all": show_all,
+            "filters": {
+                "ext": allowed_exts if not show_all else [],
+                "modified_after": modified_after or None,
+                "modified_before": modified_before or None,
+            },
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -3030,8 +3106,12 @@ def delete_documents():
 @app.route('/documents', methods=['GET'])
 def get_documents():
     force = request.args.get('force', '0') == '1'
+    ext_filter = request.args.getlist('ext')
+    modified_after = request.args.get('modified_after', '').strip()
+    modified_before = request.args.get('modified_before', '').strip()
     now = time.time()
-    if not force and _docs_cache["data"] and (now - _docs_cache["ts"]) < DOCS_CACHE_TTL:
+    if not force and not ext_filter and not modified_after and not modified_before \
+            and _docs_cache["data"] and (now - _docs_cache["ts"]) < DOCS_CACHE_TTL:
         return jsonify({"success": True, "documents": _docs_cache["data"],
                         "total": len(_docs_cache["data"]), "cached": True})
     try:
@@ -3069,9 +3149,132 @@ def get_documents():
         )
         _docs_cache["data"] = docs
         _docs_cache["ts"]   = now
-        return jsonify({"success": True, "documents": docs, "total": len(docs), "cached": False})
+        filtered = _filter_documents_list(docs, ext_filter or None, modified_after, modified_before)
+        return jsonify({
+            "success": True,
+            "documents": filtered,
+            "total": len(filtered),
+            "total_unfiltered": len(docs),
+            "cached": False,
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/get_context', methods=['GET'])
+def get_context():
+    """Lazy-load fragmentu dokumentu (chunk z Qdrant lub skrót z pliku źródłowego)."""
+    point_id = (request.args.get('point_id') or '').strip()
+    file_name = (request.args.get('file') or '').strip()
+    query = (request.args.get('query') or '').strip()
+    source = (request.args.get('source') or 'chunk').strip().lower()
+
+    if not point_id and not file_name:
+        return jsonify({"success": False, "error": "Wymagany point_id lub file"}), 400
+
+    try:
+        client = get_qdrant_client()
+
+        if point_id and source != 'file':
+            records = client.retrieve(
+                collection_name=ACTIVE_COLLECTION,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+            if records:
+                p = records[0].payload or {}
+                text = p.get("text", "")
+                if query:
+                    text = highlight_backend(text, query)
+                full_path = p.get("full_path", "")
+                return jsonify({
+                    "success": True,
+                    "point_id": point_id,
+                    "file": p.get("file", file_name),
+                    "text": text,
+                    "full_path": full_path,
+                    "win_path": wsl_to_win(full_path),
+                    "metadata": p.get("metadata"),
+                    "source": "qdrant",
+                })
+
+        if file_name:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            if query and source == 'chunk':
+                try:
+                    vector = get_embedding(query)
+                    res = client.query_points(
+                        collection_name=ACTIVE_COLLECTION,
+                        query=vector,
+                        limit=1,
+                        query_filter=Filter(
+                            must=[FieldCondition(key="file", match=MatchValue(value=file_name))]
+                        ),
+                    )
+                    if res.points:
+                        p = res.points[0].payload or {}
+                        text = highlight_backend(p.get("text", ""), query)
+                        full_path = p.get("full_path", "")
+                        return jsonify({
+                            "success": True,
+                            "point_id": str(res.points[0].id),
+                            "file": file_name,
+                            "text": text,
+                            "full_path": full_path,
+                            "win_path": wsl_to_win(full_path),
+                            "metadata": p.get("metadata"),
+                            "source": "qdrant_search",
+                        })
+                except EmbeddingError as e:
+                    return jsonify({"success": False, "error": str(e)})
+
+            scroll_filter = Filter(
+                must=[FieldCondition(key="file", match=MatchValue(value=file_name))]
+            )
+            records, _ = client.scroll(
+                collection_name=ACTIVE_COLLECTION,
+                scroll_filter=scroll_filter,
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if records:
+                p = records[0].payload or {}
+                text = highlight_backend(p.get("text", ""), query) if query else p.get("text", "")
+                full_path = p.get("full_path", "")
+                return jsonify({
+                    "success": True,
+                    "point_id": str(records[0].id),
+                    "file": file_name,
+                    "text": text,
+                    "full_path": full_path,
+                    "win_path": wsl_to_win(full_path),
+                    "metadata": p.get("metadata"),
+                    "source": "qdrant_scroll",
+                })
+
+            path = _find_file_by_name_safe(file_name)
+            if path and path.is_file() and _path_is_allowed(path):
+                excerpt = extract_text(path)[:12000]
+                if query:
+                    excerpt = highlight_backend(excerpt, query)
+                return jsonify({
+                    "success": True,
+                    "file": file_name,
+                    "text": excerpt,
+                    "full_path": str(path),
+                    "win_path": wsl_to_win(str(path)),
+                    "metadata": extract_file_metadata(path),
+                    "source": "file",
+                    "truncated": len(excerpt) >= 12000,
+                })
+
+        return jsonify({"success": False, "error": "Nie znaleziono fragmentu dokumentu"}), 404
+    except Exception as e:
+        logger.exception("get_context")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/export/metadata_report', methods=['POST'])
 def export_metadata_report_docx():

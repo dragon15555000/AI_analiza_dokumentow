@@ -72,6 +72,7 @@ No pytest/ruff in repo — use `py_compile` for sanity checks.
 
 - **Embeddings always use Ollama** (`nomic-embed-text`), even when chat uses OpenRouter. `/health` `embedding.ok` reflects Ollama only.
 - **Detective search**: `POST /search/stream` uses `query` + optional `chat_context`; never append chat history to `query` for embedding.
+- **Context preview**: `GET /api/get_context?point_id=&file=&query=` — lazy-load fragmentu; wyniki wyszukiwania zwracają `snippet` + `point_id`, nie pełny `text`.
 - **Self-update**: `POST /api/update/pull` (localhost only); then `POST /api/update/restart` or `./restart-app.sh --user`.
 - **LLM config from UI** writes `.llm_config.json` — overrides `.env` LLM vars at startup.
 - **Network graph** (D3): `renderNetwork` must stop `networkSimulation` before redraw; strength filter 1–12 matches backend cap. **`POST /network`** returns **SSE** (`progress` → `done`), not JSON — frontend uses `streamSSEPost()`, not `r.json()`. Use `fetchJson()` for JSON endpoints (`/analyze`, `/health`, …) to avoid `Unexpected token '<'` on HTML error pages.
