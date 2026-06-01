@@ -1063,13 +1063,32 @@ function updateHealthStatus() {
                 colEl.textContent = d.active_collection.name;
             }
 
-            // Opcjonalnie: można tu dodać więcej badge'y (np. LLM status)
+            // Aktualizacja kolorowych kropek w nagłówku (opcja A - lepsza widoczność)
+            if (typeof setStatusDot === 'function') {
+                setStatusDot('dotQdrant', d.qdrant_status || (d.qdrant?.ok ? 'ok' : 'error'));
+                setStatusDot('dotLlm',    d.llm_status    || (d.llm?.ok    ? 'ok' : 'error'));
+
+                const ocrDot = document.getElementById('dotOcr');
+                if (ocrDot) {
+                    const ocrOk = d.ocr_available ?? false;
+                    ocrDot.className = 'status-dot ' + (ocrOk ? 'dot-ok' : 'dot-warn');
+                    ocrDot.title = ocrOk
+                        ? 'OCR (Tesseract) — dostępny'
+                        : 'OCR niedostępny';
+                }
+            }
         })
         .catch(() => {
             const statusEl = document.getElementById('statStatus');
             if (statusEl) {
                 statusEl.textContent = 'OFFLINE';
                 statusEl.className = 'text-danger';
+            }
+            if (typeof setStatusDot === 'function') {
+                setStatusDot('dotQdrant', 'error');
+                setStatusDot('dotLlm',    'error');
+                const ocrDot = document.getElementById('dotOcr');
+                if (ocrDot) ocrDot.className = 'status-dot dot-err';
             }
         });
 }
