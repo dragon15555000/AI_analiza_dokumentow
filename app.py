@@ -68,6 +68,8 @@ QDRANT_CLOUD_KEY  = os.environ.get("QDRANT_CLOUD_KEY", "")
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
+EMBED_MODEL       = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+OCR_LANG          = os.environ.get("OCR_LANG", "pol+eng")
 
 # OpenRouter
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -328,7 +330,7 @@ def _check_ollama_health() -> dict:
             data = json.loads(r.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
             has_llm = any(LLM_MODEL in m for m in models)
-            has_embed = any("nomic-embed-text" in m for m in models)
+            has_embed = any(EMBED_MODEL in m for m in models)
             return {
                 "ok": True,
                 "url": OLLAMA_URL,
@@ -442,7 +444,7 @@ def _ocr_health_status() -> dict:
         "tesseract_binary": tesseract_bin,
         "pdf2image": pdf_ok,
         "install_hint": " · ".join(hints) if hints else None,
-        "lang": "pol",
+        "lang": OCR_LANG,
         "note": "Uruchamiane automatycznie gdy PDF ma <20 znaków tekstu lub dla JPG/PNG/TIFF",
     }
 
@@ -828,7 +830,7 @@ def get_embedding(text: str) -> list:
 
     # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
     url = OLLAMA_URL + "/api/embeddings"
-    payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
+    payload = {"model": EMBED_MODEL, "prompt": text[:1500]}
 
     for attempt in range(4):  # max 4 próby
         try:
@@ -1415,7 +1417,7 @@ def extract_text(file_path: Path) -> str:
                     pages = convert_from_path(file_path, dpi=200)
                     ocr_text = []
                     for page_img in pages:
-                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
                         ocr_text.append(page_text)
                     text = "\n\n".join(ocr_text)
                     logger.info(f"[OCR] Zakończono dla: {file_path.name} (Pobrano znaków: {len(text)})")
@@ -1431,7 +1433,7 @@ def extract_text(file_path: Path) -> str:
                 try:
                     from PIL import Image
                     img = Image.open(file_path)
-                    text = pytesseract.image_to_string(img, lang='pol')
+                    text = pytesseract.image_to_string(img, lang=OCR_LANG)
                     logger.info(f"[OCR] Przetworzono obraz: {file_path.name}")
                     return text
                 except ImportError:
@@ -1442,7 +1444,7 @@ def extract_text(file_path: Path) -> str:
                     pages = convert_from_path(file_path, dpi=200)
                     ocr_text = []
                     for page_img in pages:
-                        page_text = pytesseract.image_to_string(page_img, lang='pol')
+                        page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
                         ocr_text.append(page_text)
                     text = "\n\n".join(ocr_text)
                     logger.info(f"[OCR] Przetworzono obraz przez pdf2image: {file_path.name}")
@@ -3923,7 +3925,7 @@ def health_check():
         "llm": llm,
         "embedding": {
             "ok": embedding_ok,
-            "model": "nomic-embed-text" if provider == "ollama" else "via OpenRouter",
+            "model": EMBED_MODEL if provider == "ollama" else "via OpenRouter",
         },
         "active_collection": {
             "name": ACTIVE_COLLECTION,
