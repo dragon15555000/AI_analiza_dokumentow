@@ -196,6 +196,25 @@ Te zmiany znacząco podnoszą poziom „produkcyjności” lokalnego środowiska
 
 ---
 
+## Zrealizowane – v2026.10 (Detektyw / wyszukiwanie śledcze)
+
+- Tryb **Detektyw — briefing śledczy**: sekcje odpowiedzi, tagi anomalii, min. 12 chunków, dywersyfikacja po plikach
+- **`chat_context`** oddzielnie od `query` — historia rozmowy nie psuje embeddingu RAG
+- Merge PR #16, tag release `v2026.10`
+
+---
+
+## Zrealizowane – v2026.11 (dokumentacja, sieć D3, poprawki)
+
+- **README / .env.example / AGENTS.md** — aktualizacja pod Detektywa, self-update, diagnostykę, sieć, Excel
+- **Sieć D3**: zatrzymywanie poprzedniej symulacji, tooltips po zoom, suwak siły 1–12, filtr samotnych węzłów, eksport SVG, responsywna wysokość
+- **Bugfix**: `fetchHealth` → `updateHealthStatus` po przełączeniu Qdrant
+- **Bugfix**: `/health` — `embedding.ok` zawsze z Ollama (nawet przy OpenRouter chat)
+- **Bugfix**: `systemctl --user` w statusie/restartcie usługi
+- **Bugfix**: bezpieczne parsowanie `strength` w `/network`; `git pull` fallback `main`
+
+---
+
 ## Macierz funkcji — OCR i zarządzanie plikami (Excel/PDF)
 
 | Obszar | Stan | Priorytet | Co jest dziś | Co brakuje do 🟢 |

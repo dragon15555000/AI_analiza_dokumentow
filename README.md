@@ -34,13 +34,15 @@ Answer with citations + second-model verification (Critic)
 ## Możliwości / Features
 
 ### Wyszukiwanie i analiza / Search & Analysis
-- **5 trybów analizy** — standardowy, detektyw (anomalie), prawny (przepisy), niespójności, ekstrakcja danych
+- **5 trybów analizy** — standardowy, **detektyw (briefing śledczy)**, prawny (przepisy), niespójności, ekstrakcja danych
+- **Tryb Detektyw** — briefing w sekcjach (*Co wiemy → Analiza → Wnioski → Pytania*), tagi `[ANOMALIA]`, `[ROZBIEŻNOŚĆ]`, `[BRAK DOWODU]`; min. 12 fragmentów z wielu plików; **Tryb rozmowy** (`chat_context` nie psuje embeddingu)
 - **Weryfikacja 2× LLM** — Generator odpowiada, Krytyk sprawdza każde twierdzenie względem źródeł
-- **Wyszukiwanie hybrydowe** — łączy wyszukiwanie semantyczne z wyszukiwaniem po słowach kluczowych
-- **Streaming** — odpowiedź pojawia się słowo po słowie
+- **Wyszukiwanie hybrydowe** — RAG + SQL (gdy skonfigurowana baza)
+- **Streaming** — odpowiedź słowo po słowie + licznik tokenów
 - **Historia zapytań** — podgląd poprzednich pytań i odpowiedzi
+- **Porównanie dwóch dokumentów** — zakładka Porównaj (LLM)
 
-*5 analysis modes — standard, detective (anomalies), legal (regulations), inconsistencies, data extraction · Dual-LLM verification · Hybrid search · Streaming · Query history*
+*5 analysis modes · Detective briefing · Dual-LLM verification · Hybrid RAG+SQL · Streaming · Query history · Document compare*
 
 ### Obsługiwane formaty / Supported formats
 PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD · TXT · obrazy i skany (OCR)
@@ -48,12 +50,11 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 *PDF · DOCX · XLSX/XLS (all sheets + formulas) · CSV · JSON · MD · TXT · scanned images (OCR)*
 
 ### Forensyka Excel / Excel Forensics
-- Wykrywa **ślady Goal Seek** — ekstremalnie precyzyjna liczba to sygnał cofania obliczeń
-- Weryfikuje zgodność formuł z wartościami zapisanymi w pamięci podręcznej
-- Wykrywa **ukryte wiersze i kolumny**
-- Komentarz LLM co dana anomalia może oznaczać
+- Przycisk **Forensyka** przy plikach XLSX w przeglądarce dokumentów
+- Wykrywa **ślady Goal Seek**, nadpisane komórki, rozjazdy SUM/AVERAGE, ukryte wiersze/kolumny, zewnętrzne odwołania
+- Raport z kategoriami, `confidence_pct`, opcjonalny komentarz LLM
 
-*Detects Goal Seek traces, formula vs. cached-value mismatches, hidden rows/columns, with LLM commentary on each finding.*
+*Excel forensics UI · Goal Seek · formula/cache mismatch · hidden rows · LLM commentary.*
 
 ### Baza danych SQL / SQL Integration
 - Konfiguracja połączenia z MS SQL Server / PostgreSQL / MySQL
@@ -70,11 +71,12 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 *Ollama (local Llama3, no rate limits) or OpenRouter (dozens of models incl. free tier). Auto-retry on 429 + optional fallback.*
 
 ### Sieć powiązań / Connection Network
-- LLM wyciąga osoby, firmy, kwoty, umowy i rysuje interaktywny graf (D3.js)
-- Kolory krawędzi: czerwony = przepływ finansowy, fioletowy = zatrudnienie, zielony = przetarg
-- Każda krawędź zawiera cytat z dokumentu jako dowód
+- LLM wyciąga osoby, firmy, kwoty, umowy i rysuje interaktywny graf (**D3.js force-directed**)
+- Filtry: typ węzła, min. siła relacji (1–12), typ relacji, ukrywanie samotnych węzłów
+- Zoom/pan, przeciąganie węzłów, panel dowodów przy kliknięciu krawędzi, eksport **SVG**
+- Kolory krawędzi: finanse / zatrudnienie / przetarg / decyzja — grubość ∝ siła powiązania (liczba dowodów)
 
-*D3.js interactive graph: persons, companies, amounts, contracts · Evidence citations per edge.*
+*D3.js graph · filters · evidence panel · SVG export · strength 1–12.*
 
 ### Zarządzanie bazą / Collection Management
 - Wiele kolekcji — tworzenie, przełączanie, statystyki zużycia
@@ -360,6 +362,27 @@ chmod +x migrate_to_waitress.sh
 ./migrate_to_waitress.sh
 sudo systemctl status ai_analiza
 ```
+
+### Aktualizacja produkcji z GitHub
+
+**Zalecane (WSL / laptop):** `systemd --user` + skrypt:
+
+```bash
+cd ~/projects/AI_analiza_dokumentow   # dostosuj ścieżkę w ai_analiza-user.service
+git fetch origin && git checkout master && git pull origin master
+./restart-app.sh --user
+```
+
+**Z poziomu aplikacji (localhost):** ikona ⚙️ → Diagnostyka → **Aktualizacje** → Sprawdź → Pobierz → Restart  
+Endpointy: `GET /api/update/status`, `POST /api/update/pull`, `POST /api/update/restart`
+
+**Tagi wydania:** `v2026.10` (Detektyw), nowsze — w [Releases](https://github.com/dragon15555000/AI_analiza_dokumentow/releases).
+
+### Diagnostyka
+
+- `GET /health` — Qdrant, LLM, **embedding Ollama** (zawsze wymagany do RAG), OCR, parsery plików
+- Modal startowy + kropki statusu w nagłówku (odświeżanie co 30 s)
+- Przełącznik Qdrant **lokalny / cloud** w UI (`POST /qdrant/switch`)
 
 ---
 
