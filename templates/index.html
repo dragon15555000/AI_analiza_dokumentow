@@ -4191,7 +4191,7 @@ function checkForUpdates() {
     statusEl.textContent = 'Sprawdzam GitHub...';
     btnUpdate.style.display = 'none';
     btnRestart.style.display = 'none';
-    resultBox.textContent = '';
+    resultBox.innerHTML = '';
 
     fetch('/api/update/status')
         .then(r => r.json())
@@ -4207,6 +4207,18 @@ function checkForUpdates() {
 
             if (d.update_available) {
                 statusEl.innerHTML = `<span style="color:#b45309;">Nowa wersja dostępna!</span><br>Lokalna: <strong>${local}</strong> → Zdalna: <strong>${remote}</strong>`;
+
+                // Pokaż changelog jeśli jest
+                if (d.release && d.release.body) {
+                    const changelogHtml = `
+                        <details style="margin-top:8px;">
+                            <summary style="cursor:pointer; font-weight:600; color:#374151;">Pokaż changelog</summary>
+                            <pre style="background:#f8fafc; padding:10px; border-radius:6px; font-size:0.78rem; white-space:pre-wrap; max-height:220px; overflow:auto; margin-top:6px;">${escapeHtml(d.release.body)}</pre>
+                        </details>
+                    `;
+                    resultBox.innerHTML = changelogHtml;
+                }
+
                 btnUpdate.style.display = 'inline-block';
             } else {
                 statusEl.innerHTML = `Jesteś na najnowszej wersji (<strong>${local}</strong>)`;
@@ -4215,6 +4227,12 @@ function checkForUpdates() {
         .catch(() => {
             statusEl.textContent = 'Nie udało się sprawdzić aktualizacji (sprawdź połączenie z internetem)';
         });
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function performUpdate() {
@@ -4259,6 +4277,68 @@ function restartAfterUpdate() {
         .catch(() => {
             resultBox.innerHTML = `Nie udało się zrestartować automatycznie.<br>Użyj: <code>./restart-app.sh --user</code>`;
         });
+}
+
+// ============================================================
+// Automatyczne sprawdzanie aktualizacji co X minut + powiadomienie
+// ============================================================
+
+let updateCheckInterval = null;
+const UPDATE_CHECK_INTERVAL_MS = 20 * 60 * 1000; // co 20 minut
+
+function startAutoUpdateChecks() {
+    // Pierwsze sprawdzenie po 90 sekundach od załadowania strony
+    setTimeout(checkForUpdatesSilent, 90 * 1000);
+
+    // Potem co 20 minut
+    if (updateCheckInterval) clearInterval(updateCheckInterval);
+    updateCheckInterval = setInterval(checkForUpdatesSilent, UPDATE_CHECK_INTERVAL_MS);
+}
+
+function checkForUpdatesSilent() {
+    fetch('/api/update/status')
+        .then(r => r.json())
+        .then(d => {
+            if (d.success && d.update_available) {
+                showUpdateNotification(d);
+            }
+        })
+        .catch(() => {
+            // cicho ignorujemy błędy w tle
+        });
+}
+
+function showUpdateNotification(updateData) {
+    const gearBtn = document.querySelector('button[onclick*="openDiagnostics"]');
+    if (!gearBtn) return;
+
+    // Dodaj czerwoną kropkę / badge jeśli jeszcze nie ma
+    if (!gearBtn.querySelector('.update-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'update-badge';
+        badge.style.cssText = 'position:absolute;top:-2px;right:-2px;background:#ef4444;color:white;font-size:9px;padding:1px 4px;border-radius:999px;';
+        badge.textContent = '!';
+        gearBtn.style.position = 'relative';
+        gearBtn.appendChild(badge);
+
+        // Kliknięcie na gear od razu otwiera modal i sprawdza aktualizacje
+        const originalOnClick = gearBtn.onclick;
+        gearBtn.onclick = function(e) {
+            if (originalOnClick) originalOnClick.call(this, e);
+            setTimeout(() => {
+                const updateText = document.getElementById('updateStatusText');
+                if (updateText) checkForUpdates();
+            }, 800);
+        };
+    }
+}
+
+// Uruchom automatyczne sprawdzanie przy starcie strony
+if (typeof window !== 'undefined') {
+    window.addEventListener('load', () => {
+        // Startujemy sprawdzanie dopiero po pełnym załadowaniu UI
+        setTimeout(startAutoUpdateChecks, 5000);
+    });
 }
 
 // --- LLM Config panel ---

@@ -113,7 +113,7 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 ---
 
 *Plan stworzony: maj 2026*  
-*Ostatnia duża aktualizacja: lipiec 2026 (po releasie v2026.08)*
+*Ostatnia duża aktualizacja: lipiec 2026 (po v2026.09 – self-update + systemd user service)*
 
 ---
 
@@ -168,6 +168,34 @@ Te zmiany znacząco poprawiają codzienne doświadczenie użytkownika, szczegól
 
 ---
 
+## Zrealizowane – Self-update, User Service & Developer Experience (v2026.09)
+
+### Automatyczna aktualizacja z GitHub
+- Dodano system sprawdzania i pobierania aktualizacji bezpośrednio z poziomu aplikacji:
+  - Nowa sekcja **„Aktualizacje”** w modalu diagnostycznym startowym
+  - Automatyczne sprawdzanie GitHub co 20 minut w tle + powiadomienie (kropka na ikonie ⚙️)
+  - Przyciski: **Sprawdź aktualizacje** → **Pobierz aktualizację** → **Zrestartuj aplikację**
+  - Wyświetlanie changelog bezpośrednio z GitHub Releases
+- Endpointy: `/api/update/status`, `/api/update/pull`, `/api/update/restart`
+
+### Lepsze podejście produkcyjne (systemd user service)
+- Utworzono `ai_analiza-user.service` – usługa systemd działająca bez uprawnień roota
+- Stworzono `install-user-service.sh` – jedno polecenie do instalacji całej usługi użytkownika
+- Znacznie rozbudowano `restart-app.sh`:
+  - Pełne wsparcie dla `--user` (zarządzanie user service)
+  - Podkomendy: `logs`, `status`, `restart`
+  - Opcjonalny `git pull` przy restarcie
+- Usługa domyślnie używa **Waitress** (produkcyjny serwer) i nasłuchuje na `0.0.0.0:5000`
+- Lepsze, bardziej eleganckie ładowanie zmiennych z `.env`
+
+### Dokumentacja
+- Dodano obszerną sekcję w README o uruchamianiu jako **systemd --user** (zalecany sposób na WSL/laptopach)
+- Zaktualizowano `AGENTS.md` – nowe wytyczne dla AI coderów dotyczące sposobów uruchamiania aplikacji
+
+Te zmiany znacząco podnoszą poziom „produkcyjności” lokalnego środowiska deweloperskiego, jednocześnie zachowując prostotę dla codziennej pracy.
+
+---
+
 ## Macierz funkcji — OCR i zarządzanie plikami (Excel/PDF)
 
 | Obszar | Stan | Priorytet | Co jest dziś | Co brakuje do 🟢 |
@@ -193,4 +221,4 @@ Te zmiany znacząco poprawiają codzienne doświadczenie użytkownika, szczegól
 - [ ] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
 - [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
 
-*Ostatnia aktualizacja macierzy: lipiec 2026 (po v2026.08)*
+*Ostatnia aktualizacja macierzy: lipiec 2026 (po v2026.09 – self-update + user service)*

@@ -180,10 +180,10 @@ def _git_pull() -> dict:
 def _try_restart_service() -> dict:
     """
     Próbuje zrestartować aplikację.
-    Najpierw próbuje user service, potem zwraca instrukcję.
+    Najpierw próbuje user service (który używa waitress), potem zwraca instrukcję.
     """
     try:
-        # Najpierw spróbuj user service (najczęstszy przypadek)
+        # Najpierw spróbuj user service (najczęstszy i najbardziej produkcyjny przypadek)
         result = subprocess.run(
             ["systemctl", "--user", "restart", "ai_analiza"],
             capture_output=True,
@@ -191,16 +191,58 @@ def _try_restart_service() -> dict:
             timeout=15,
         )
         if result.returncode == 0:
-            return {"success": True, "method": "user-service", "message": "Usługa użytkownika zrestartowana."}
+            return {
+                "success": True,
+                "method": "user-service",
+                "message": "Usługa użytkownika zrestartowana (używa Waitress)."
+            }
     except Exception:
         pass
 
-    # Fallback – nie możemy łatwo zrestartować samego siebie
+    # Fallback
     return {
         "success": False,
         "method": "manual",
-        "message": "Kod zaktualizowany. Zrestartuj aplikację ręcznie (np. ./restart-app.sh --user)."
+        "message": "Kod zaktualizowany. Zrestartuj aplikację ręcznie najlepiej przez: ./restart-app.sh --user"
     }
+
+
+# Proste cache dla GitHub Releases (żeby nie spamować API przy każdym sprawdzeniu)
+_github_release_cache = {"data": None, "timestamp": 0}
+GITHUB_RELEASE_CACHE_SECONDS = 300  # 5 minut
+
+
+def _get_latest_github_release() -> dict | None:
+    """Pobiera informacje o najnowszym releasie z GitHub (z cache)."""
+    import time
+    now = time.time()
+
+    if _github_release_cache["data"] and (now - _github_release_cache["timestamp"] < GITHUB_RELEASE_CACHE_SECONDS):
+        return _github_release_cache["data"]
+
+    try:
+        import urllib.request
+        import json as json_module
+
+        url = "https://api.github.com/repos/dragon15555000/AI_analiza_dokumentow/releases/latest"
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "AI-Analiza-Dokumentow"})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json_module.loads(response.read().decode("utf-8"))
+
+        release_info = {
+            "tag_name": data.get("tag_name"),
+            "name": data.get("name"),
+            "body": data.get("body", ""),           # Markdown changelog
+            "html_url": data.get("html_url"),
+            "published_at": data.get("published_at"),
+        }
+
+        _github_release_cache["data"] = release_info
+        _github_release_cache["timestamp"] = now
+        return release_info
+
+    except Exception:
+        return None
 ALLOWED_DOC_EXTENSIONS = frozenset(
     {"docx", "pdf", "xlsx", "xls", "csv", "md", "json", "txt"}
 )
@@ -4638,31 +4680,41 @@ def service_restart():
 
 @app.route('/api/update/status', methods=['GET'])
 def api_update_status():
-    """Zwraca informację czy dostępna jest nowsza wersja na GitHubie."""
+    """Zwraca informację czy dostępna jest nowsza wersja na GitHubie + changelog."""
     if not _localhost_only():
         return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
 
     local_tag = _get_local_latest_tag()
     remote_tag = _get_remote_latest_tag()
+    release = _get_latest_github_release()
 
     update_available = False
     if remote_tag and local_tag:
-        # Proste porównanie semantyczne (działa dla v2026.xx)
         def version_key(v):
             try:
                 return tuple(int(x) for x in v.lstrip('v').split('.'))
             except Exception:
                 return (0, 0)
-
         update_available = version_key(remote_tag) > version_key(local_tag)
 
-    return jsonify({
+    response = {
         "success": True,
         "local_version": local_tag,
         "remote_version": remote_tag,
         "update_available": update_available,
         "message": "Nowa wersja dostępna" if update_available else "Jesteś na najnowszej wersji"
-    })
+    }
+
+    if release:
+        response["release"] = {
+            "tag_name": release.get("tag_name"),
+            "name": release.get("name"),
+            "body": release.get("body", ""),           # Markdown changelog
+            "html_url": release.get("html_url"),
+            "published_at": release.get("published_at"),
+        }
+
+    return jsonify(response)
 
 
 @app.route('/api/update/pull', methods=['POST'])
