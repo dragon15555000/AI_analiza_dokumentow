@@ -68,9 +68,21 @@ No pytest/ruff in repo — use `py_compile` for sanity checks.
 
 ### Gotchas
 
-- **Embeddings always use Ollama** (`nomic-embed-text`), even when chat uses OpenRouter.
+- **Embeddings always use Ollama** (`nomic-embed-text`), even when chat uses OpenRouter. `/health` `embedding.ok` reflects Ollama only.
+- **Detective search**: `POST /search/stream` uses `query` + optional `chat_context`; never append chat history to `query` for embedding.
+- **Self-update**: `POST /api/update/pull` (localhost only); then `POST /api/update/restart` or `./restart-app.sh --user`.
 - **LLM config from UI** writes `.llm_config.json` — overrides `.env` LLM vars at startup.
+- **Network graph** (D3): `renderNetwork` must stop `networkSimulation` before redraw; strength filter 1–12 matches backend cap.
 - Reinstalling Python packages does not restart Flask/Ollama/Qdrant — restart those after dependency changes.
+
+### Production update (user machine)
+
+```bash
+git fetch origin && git checkout master && git pull origin master
+./restart-app.sh --user
+```
+
+Releases: tags `v2026.10+` on GitHub. See README „Aktualizacja produkcji”.
 
 ---
 

@@ -159,22 +159,29 @@ def _get_local_latest_tag() -> str:
 
 
 def _git_pull() -> dict:
-    """Wykonuje git pull origin master i zwraca wynik."""
-    try:
-        out = subprocess.run(
-            ["git", "pull", "origin", "master"],
-            cwd=Path(__file__).parent,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        return {
-            "success": out.returncode == 0,
-            "stdout": out.stdout.strip(),
-            "stderr": out.stderr.strip(),
-        }
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": str(e)}
+    """Pobiera najnowszy kod z origin (master, potem main jako fallback)."""
+    repo = Path(__file__).parent
+    last: dict = {"success": False, "stdout": "", "stderr": ""}
+    for branch in ("master", "main"):
+        try:
+            out = subprocess.run(
+                ["git", "pull", "origin", branch],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            last = {
+                "success": out.returncode == 0,
+                "stdout": out.stdout.strip(),
+                "stderr": out.stderr.strip(),
+                "branch": branch,
+            }
+            if out.returncode == 0:
+                return last
+        except Exception as e:
+            last = {"success": False, "stdout": "", "stderr": str(e), "branch": branch}
+    return last
 
 
 def _try_restart_service() -> dict:
@@ -1368,6 +1375,13 @@ def verify_endpoint():
     # Przekazujemy provider, żeby weryfikacja też szła przez wybrany model (w tym osobny model_verify)
     result = verify_answer(answer, contexts, query, provider=llm_provider, model=openrouter_model)
     return jsonify(result)
+
+def _safe_int_clamp(val, lo: int, hi: int, default: int = 1) -> int:
+    try:
+        return max(lo, min(hi, int(float(val))))
+    except (TypeError, ValueError):
+        return default
+
 
 def highlight_backend(text: str, query: str) -> str:
     if not query: return text
@@ -2991,7 +3005,7 @@ def build_network():
                 "doc":      (e.get("doc") or "")[:90],
                 "evidence": (e.get("evidence") or "")[:180],
                 "date":     (e.get("date") or "")[:20],
-                "strength": max(1, min(5, int(e.get("strength", 1))))
+                "strength": _safe_int_clamp(e.get("strength", 1), 1, 5, default=1),
             })
 
         clean_edges = []
@@ -4424,8 +4438,13 @@ def health_check():
     else:
         llm = _check_ollama_health()
 
-    embedding_ok = llm.get("has_embedding", False) if provider == "ollama" else True
-    overall_ok = qdrant.get("ok", False) and llm.get("ok", False)
+    ollama_embed = _check_ollama_health()
+    embedding_ok = ollama_embed.get("has_embedding", False)
+    overall_ok = (
+        qdrant.get("ok", False)
+        and llm.get("ok", False)
+        and embedding_ok
+    )
     ocr = _ocr_health_status()
     parsers = _file_parsers_health()
     llm_model = (
@@ -4625,23 +4644,29 @@ def service_status():
         result["active"] = "dev_mode"
         return jsonify(result)
 
-    try:
-        st = subprocess.run(
-            ["systemctl", "is-active", "ai_analiza"],
-            capture_output=True, text=True, timeout=3,
-        )
-        result["active"] = st.stdout.strip()
-    except Exception:
-        result["active"] = "unknown"
+    def _run_systemctl(cmd: list[str]) -> subprocess.CompletedProcess | None:
+        for prefix in (["systemctl", "--user"], ["systemctl"]):
+            try:
+                return subprocess.run(
+                    [*prefix, *cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception:
+                continue
+        return None
 
-    try:
-        logs = subprocess.run(
-            ["journalctl", "-u", "ai_analiza", "-n", "30", "--no-pager", "--output=short"],
-            capture_output=True, text=True, timeout=5,
-        )
-        result["logs"] = logs.stdout
-    except Exception:
-        pass
+    st = _run_systemctl(["is-active", "ai_analiza"])
+    if st is not None:
+        result["active"] = st.stdout.strip()
+        result["systemd_scope"] = "user" if st.args and "--user" in st.args else "system"
+
+    logs_proc = _run_systemctl(
+        ["journalctl", "-u", "ai_analiza", "-n", "30", "--no-pager", "--output=short"]
+    )
+    if logs_proc is not None:
+        result["logs"] = logs_proc.stdout
 
     return jsonify(result)
 
@@ -4658,13 +4683,14 @@ def service_restart():
         time.sleep(0.6)
         try:
             if shutil.which("systemctl"):
-                st = subprocess.run(
-                    ["systemctl", "is-active", "ai_analiza"],
-                    capture_output=True, text=True, timeout=3,
-                )
-                if st.stdout.strip() in ("active", "activating"):
-                    subprocess.run(["systemctl", "restart", "ai_analiza"], timeout=15)
-                    return
+                for prefix in (["systemctl", "--user"], ["systemctl"]):
+                    st = subprocess.run(
+                        [*prefix, "is-active", "ai_analiza"],
+                        capture_output=True, text=True, timeout=3,
+                    )
+                    if st.stdout.strip() in ("active", "activating"):
+                        subprocess.run([*prefix, "restart", "ai_analiza"], timeout=15)
+                        return
             # Tryb dev lub brak systemd — zakończ proces (systemd z Restart=always wznowi)
             os._exit(0)
         except Exception:

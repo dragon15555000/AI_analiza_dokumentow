@@ -526,7 +526,7 @@
           <!-- Siła powiązania -->
           <div class="d-flex align-items-center gap-2">
             <span class="text-muted small">Min. siła:</span>
-            <input type="range" id="networkMinStrength" min="1" max="10" step="1" value="1" style="width:110px;">
+            <input type="range" id="networkMinStrength" min="1" max="12" step="1" value="1" style="width:110px;">
             <span id="networkMinStrengthVal" class="fw-bold" style="min-width:18px;">1</span>
           </div>
 
@@ -536,7 +536,9 @@
             <span id="networkRelationFilters" class="d-inline-flex flex-wrap gap-1"></span>
           </div>
 
+          <label class="form-check-label ms-1"><input type="checkbox" id="networkHideOrphans" checked> Bez samotnych węzłów</label>
           <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="resetNetworkFilters()" style="font-size:0.72rem;">Reset</button>
+          <button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="exportNetworkSvg()" style="font-size:0.72rem;">SVG</button>
         </div>
       </div>
       <div class="mb-2">
@@ -607,7 +609,7 @@
         <div class="spinner-border text-primary"></div>
         <p class="mt-2 small text-muted">LLM ekstrahuje encje i relacje...</p>
       </div>
-      <svg id="networkSvg" style="width:100%;height:500px;display:none;"></svg>
+      <svg id="networkSvg" style="width:100%;height:min(62vh,580px);min-height:480px;display:none;"></svg>
       <div id="nodeTooltip" style="position:absolute;background:#1a1f36;color:#fff;padding:6px 12px;border-radius:6px;font-size:0.8rem;display:none;pointer-events:none;max-width:240px;z-index:10;"></div>
       <div id="evidencePanel" style="display:none;position:absolute;bottom:0;left:0;right:0;background:#fff;border-top:3px solid #4f46e5;padding:12px 16px;z-index:10;">
         <div class="d-flex justify-content-between align-items-center mb-1">
@@ -1975,7 +1977,7 @@ function formatAiText(text, mode) {
         html = html.replace(/^## (.+)$/gm, '<strong style="display:block;margin:1rem 0 0.35rem;color:#92400e;font-size:1.02rem;">$1</strong>');
     }
     html = html.replace(/\n/g,'<br>')
-        .replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|ROZBIEŻNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|BRAK DOWODU|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|SPRZECZNOŚĆ)\]/g,
+        .replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|ROZBIEŻNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|BRAK DOWODU|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|PRZEPIS NIEZGODNY|SPRZECZNOŚĆ)\]/g,
             '<span class="badge" style="background:#fee2e2;color:#b91c1c;font-size:0.78rem;margin:0 2px;">$1</span>');
     return html;
 }
@@ -2687,6 +2689,33 @@ function showEdgeEvidence(d, event) {
 let networkOriginalNodes = [];
 let networkOriginalEdges = [];
 let networkRelationCheckboxes = {}; // label -> checkbox element
+let networkSimulation = null;
+let networkZoomTransform = null;
+
+function showNetworkTooltip(event, html) {
+    const tt = document.getElementById('nodeTooltip');
+    const wrap = document.getElementById('networkSvg')?.parentElement;
+    if (!tt || !wrap) return;
+    const [px, py] = d3.pointer(event, wrap);
+    tt.innerHTML = html;
+    tt.style.display = 'block';
+    tt.style.left = (px + 14) + 'px';
+    tt.style.top  = (py - 8) + 'px';
+}
+
+function exportNetworkSvg() {
+    const svg = document.getElementById('networkSvg');
+    if (!svg || svg.style.display === 'none') {
+        alert('Najpierw zbuduj graf.');
+        return;
+    }
+    const xml = new XMLSerializer().serializeToString(svg);
+    const blob = new Blob([xml], {type: 'image/svg+xml'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `siec_${new Date().toISOString().slice(0,16).replace(/[T:]/g,'_')}.svg`;
+    a.click();
+}
 
 function saveNetworkData(nodes, edges) {
     networkOriginalNodes = JSON.parse(JSON.stringify(nodes)); // głęboka kopia
@@ -2798,8 +2827,24 @@ function applyNetworkFilters(nodes, edges) {
         return true;
     });
 
-    // 3. Po odfiltrowaniu krawędzi — zostaw tylko węzły, które mają choć jedną krawędź (opcjonalnie można wyłączyć)
-    // Dla czytelności zostawiamy wszystkie pasujące węzły nawet jeśli zostały bez krawędzi po filtrach relacji
+    const hideOrphans = document.getElementById('networkHideOrphans')?.checked !== false;
+    if (hideOrphans && filteredEdges.length) {
+        const connected = new Set();
+        filteredEdges.forEach(e => {
+            const sId = (e.source && e.source.id) ? e.source.id : e.source;
+            const tId = (e.target && e.target.id) ? e.target.id : e.target;
+            connected.add(sId);
+            connected.add(tId);
+        });
+        filteredNodes = filteredNodes.filter(n => connected.has(n.id));
+        const nodeIds = new Set(filteredNodes.map(n => n.id));
+        filteredEdges = filteredEdges.filter(e => {
+            const sId = (e.source && e.source.id) ? e.source.id : e.source;
+            const tId = (e.target && e.target.id) ? e.target.id : e.target;
+            return nodeIds.has(sId) && nodeIds.has(tId);
+        });
+    }
+
     return { nodes: filteredNodes, edges: filteredEdges };
 }
 
@@ -2860,6 +2905,12 @@ function initNetworkFilterListeners() {
         };
         strengthSlider._filterListenerAttached = true;
     }
+
+    const orphanCb = document.getElementById('networkHideOrphans');
+    if (orphanCb && !orphanCb._filterListenerAttached) {
+        orphanCb.onchange = renderNetworkWithFilters;
+        orphanCb._filterListenerAttached = true;
+    }
 }
 
 // Uruchom inicjalizację filtrów po załadowaniu strony
@@ -2873,7 +2924,12 @@ function renderNetwork(nodes, edges) {
     const svg  = document.getElementById('networkSvg');
     svg.style.display = '';
     const W = svg.clientWidth || 700;
-    const H = 550;
+    const H = Math.max(480, svg.clientHeight || 550);
+
+    if (networkSimulation) {
+        networkSimulation.stop();
+        networkSimulation = null;
+    }
 
     // Wyczyść poprzedni graf
     d3.select('#networkSvg').selectAll('*').remove();
@@ -2922,11 +2978,16 @@ function renderNetwork(nodes, edges) {
     };
 
     const svgEl = d3.select('#networkSvg')
-        .attr('viewBox', `0 0 ${W} ${H}`)
-        .call(d3.zoom().scaleExtent([0.3, 4]).on('zoom', e =>
-            g.attr('transform', e.transform)));
+        .attr('viewBox', `0 0 ${W} ${H}`);
 
     const g = svgEl.append('g');
+    if (networkZoomTransform) {
+        g.attr('transform', networkZoomTransform);
+    }
+    svgEl.call(d3.zoom().scaleExtent([0.25, 5]).on('zoom', e => {
+        networkZoomTransform = e.transform;
+        g.attr('transform', e.transform);
+    }));
 
     // Markery strzałek
     svgEl.append('defs').append('marker')
@@ -2936,11 +2997,12 @@ function renderNetwork(nodes, edges) {
         .attr('orient','auto')
         .append('path').attr('d','M0,-5L10,0L0,5').attr('fill','#94a3b8');
 
-    const sim = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(edges).id(d => d.id).distance(90))
-        .force('charge', d3.forceManyBody().strength(-200))
+    networkSimulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(edges).id(d => d.id).distance(d => 70 + Math.min((d.strength || 1) * 8, 40)))
+        .force('charge', d3.forceManyBody().strength(-280))
         .force('center', d3.forceCenter(W/2, H/2))
-        .force('collision', d3.forceCollide(38));
+        .force('collision', d3.forceCollide(d => 28 + Math.min((d.degree || 1) * 3, 18)));
+    const sim = networkSimulation;
 
     const link = g.append('g').selectAll('line')
         .data(edges).join('line')
@@ -2958,19 +3020,15 @@ function renderNetwork(nodes, edges) {
         .attr('marker-end','url(#arrow)')
         .style('cursor', d => d.evidence ? 'pointer' : 'default')
         .on('click', (event, d) => { showEdgeEvidence(d, event); })
-        .on('mouseover', (e, d) => {
-            const tt = document.getElementById('nodeTooltip');
-            let html = `<div style="font-weight:700;margin-bottom:2px;">${d.label || ''}`;
+        .on('mouseover', (event, d) => {
+            let html = `<div style="font-weight:700;margin-bottom:2px;">${escapeHtml(d.label || '')}`;
             if (d.strength > 1) html += ` <span style="color:#f59e0b;font-size:0.75rem;">×${d.strength}</span>`;
             html += `</div>`;
-            if (d.date) html += `<div style="color:#16a34a;font-size:0.72rem;">📅 ${d.date}</div>`;
-            if (d.doc) html += `<div style="opacity:0.7;font-size:0.72rem;">📄 ${d.doc}</div>`;
-            if (d.evidence) html += `<div style="margin-top:3px;font-style:italic;font-size:0.78rem;">${d.evidence.slice(0,95)}${d.evidence.length>95?'…':''}</div>`;
+            if (d.date) html += `<div style="color:#16a34a;font-size:0.72rem;">📅 ${escapeHtml(d.date)}</div>`;
+            if (d.doc) html += `<div style="opacity:0.7;font-size:0.72rem;">📄 ${escapeHtml(d.doc)}</div>`;
+            if (d.evidence) html += `<div style="margin-top:3px;font-style:italic;font-size:0.78rem;">${escapeHtml(d.evidence.slice(0,95))}${d.evidence.length>95?'…':''}</div>`;
             if (d.evidence_count > 1) html += `<div style="margin-top:2px;color:#f59e0b;font-size:0.7rem;">+${d.evidence_count-1} innych dowodów</div>`;
-            tt.innerHTML = html;
-            tt.style.display = 'block';
-            tt.style.left = (e.offsetX + 12) + 'px';
-            tt.style.top  = (e.offsetY - 10) + 'px';
+            showNetworkTooltip(event, html);
         })
         .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
 
@@ -2996,12 +3054,10 @@ function renderNetwork(nodes, edges) {
             .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
             .on('drag',  (e, d) => { d.fx=e.x; d.fy=e.y; })
             .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }))
-        .on('mouseover', (e, d) => {
-            const tt = document.getElementById('nodeTooltip');
-            tt.innerHTML = `<strong>${d.label}</strong><br><span style="opacity:0.7">${d.type}</span>`;
-            tt.style.display = 'block';
-            tt.style.left = (e.offsetX + 12) + 'px';
-            tt.style.top  = (e.offsetY - 10) + 'px';
+        .on('mouseover', (event, d) => {
+            showNetworkTooltip(event,
+                `<strong>${escapeHtml(d.label)}</strong><br><span style="opacity:0.7">${escapeHtml(d.type)}</span>` +
+                (d.degree > 2 ? `<br><span style="font-size:0.72rem;">Powiązania: ${d.degree}</span>` : ''));
         })
         .on('mouseout', () => { document.getElementById('nodeTooltip').style.display = 'none'; });
 
@@ -3084,7 +3140,7 @@ function onQdrantModeChange() {
     .then(d => {
         sel.disabled = false;
         if (d.success) {
-            fetchHealth();
+            updateHealthStatus();
         } else {
             alert('Błąd przełączenia Qdrant: ' + (d.error || 'Nieznany błąd'));
             loadQdrantMode();
