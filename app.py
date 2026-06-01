@@ -47,6 +47,186 @@ except ImportError:
     pymssql = None
     PYMSSQL_AVAILABLE = False
 
+# ============================================================
+# PRZYWRÓCONE FUNKCJE BEZPIECZEŃSTWA SQL (po regresie w 3837d5a/ea77923)
+# Z PR #11 + 76481ac — wymagane przez hybrid_stream()
+# Bez nich LLM-generated SQL w hybrydzie jest niebezpieczne.
+# ============================================================
+
+DANGEROUS_SQL_KEYWORDS = {
+    "EXEC", "EXECUTE", "XP_", "SP_", "OPENROWSET", "OPENQUERY",
+    "INTO OUTFILE", "INTO DUMPFILE", "LOAD_FILE", "BENCHMARK",
+    "SLEEP(", "WAITFOR", "SHUTDOWN"
+}
+
+def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str | None]:
+    """Rygorystyczna walidacja bezpieczeństwa zapytań SQL generowanych przez LLM."""
+    if not sql_query or not sql_query.strip():
+        return False, "Puste zapytanie SQL"
+
+    sql_upper = sql_query.strip().upper()
+
+    first_token = sql_upper.split()[0] if sql_upper.split() else ""
+    if first_token not in allowed_first_words:
+        return False, f"Niedozwolone polecenie: {first_token}"
+
+    if sql_upper.count(";") > 1:
+        return False, "Wykryto wiele instrukcji SQL (potencjalne SQL Injection)"
+
+    for dangerous in DANGEROUS_SQL_KEYWORDS:
+        if dangerous in sql_upper:
+            return False, f"Wykryto zabronione słowo kluczowe: {dangerous}"
+
+    if "--" in sql_query or "/*" in sql_query:
+        return False, "Wykryto komentarze SQL — potencjalne obejście walidacji"
+
+    return True, None
+
+
+def _extract_sql_table_refs(sql_query: str) -> set[str]:
+    """Wyciąga nazwy tabel z FROM / JOIN (bez aliasów)."""
+    refs: set[str] = set()
+    pattern = re.compile(
+        r'(?:FROM|JOIN)\s+'
+        r'(?:\[?([\w]+)\]?\.)?'
+        r'\[?([\w]+)\]?',
+        re.IGNORECASE
+    )
+    for schema_part, table_part in pattern.findall(sql_query):
+        if table_part:
+            refs.add(table_part.lower())
+        if schema_part and table_part:
+            refs.add(f"{schema_part}.{table_part}".lower())
+    return refs
+
+
+def _validate_sql_table_refs(sql_query: str, known_tables: set[str]) -> tuple[bool, str | None]:
+    if not known_tables:
+        return True, None
+    refs = _extract_sql_table_refs(sql_query)
+    if not refs:
+        return True, None
+    unknown = sorted(r for r in refs if r not in known_tables)
+    if unknown:
+        sample = ", ".join(sorted(known_tables)[:12])
+        return False, (
+            f"Nieznane tabele w zapytaniu: {', '.join(unknown)}. "
+            f"Dostępne m.in.: {sample}{'…' if len(known_tables) > 12 else ''}"
+        )
+    return True, None
+
+
+def _format_table_key(schema_name: str, table_name: str) -> str:
+    if schema_name:
+        return f"{schema_name}.{table_name}"
+    return table_name
+
+
+def _get_sql_conn(cfg: dict):
+    """Tworzy połączenie z MS SQL Server przez pymssql."""
+    if not PYMSSQL_AVAILABLE:
+        raise RuntimeError("pymssql nie jest zainstalowany")
+    server = cfg.get("server", "127.0.0.1")
+    port   = str(cfg.get("port", 1433))
+    if ":" not in server and "\\" not in server:
+        server = f"{server}:{port}"
+    db = cfg.get("database", "")
+    return pymssql.connect(
+        server   = server,
+        user     = cfg.get("user", ""),
+        password = cfg.get("password", ""),
+        database = db if db else None,
+        timeout  = 15,
+        charset  = "UTF-8"
+    )
+
+
+def _fetch_sql_known_tables(cfg: dict) -> set[str]:
+    """Zwraca znane nazwy tabel do walidacji SQL z LLM."""
+    known: set[str] = set()
+    conn = _get_sql_conn(cfg)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT TABLE_SCHEMA, TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+        """)
+        for schema_name, table_name in cur.fetchall():
+            key = _format_table_key(schema_name, table_name)
+            known.add(key.lower())
+            known.add(table_name.lower())
+    finally:
+        conn.close()
+    return known
+
+
+def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
+    """Buduje opis schematu z INFORMATION_SCHEMA."""
+    conn = _get_sql_conn(cfg)
+    lines: list[str] = []
+    try:
+        cur = conn.cursor()
+        row_limit = max(100, min(max_tables * 40, 4000))
+        cur.execute(f"""
+            SELECT TOP {row_limit} c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            INNER JOIN INFORMATION_SCHEMA.TABLES t
+              ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+            WHERE t.TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
+        """)
+        grouped: dict[str, list[str]] = defaultdict(list)
+        tables_seen: set[str] = set()
+        for schema_name, table_name, col_name, data_type in cur.fetchall():
+            key = _format_table_key(schema_name, table_name)
+            if key not in tables_seen and len(tables_seen) >= max_tables:
+                continue
+            tables_seen.add(key)
+            grouped[key].append(f"{col_name} ({data_type})")
+
+        if not grouped:
+            cur.execute("""
+                SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY TABLE_NAME
+            """)
+            for schema_name, table_name, table_type in cur.fetchall()[:max_tables]:
+                key = _format_table_key(schema_name, table_name)
+                lines.append(f"Tabela: {key} ({table_type})")
+        else:
+            for key in sorted(grouped.keys()):
+                cols = ", ".join(grouped[key][:25])
+                extra = " …" if len(grouped[key]) > 25 else ""
+                lines.append(f"Tabela: {key}\nKolumny: {cols}{extra}")
+    finally:
+        conn.close()
+
+    header = (
+        "UWAGA: Używaj WYŁĄCZNIE poniższych tabel i kolumn. "
+        "Nie wymyślaj nazw, jeśli ich nie ma na liście.\n"
+    )
+    return header + "\n".join(lines)
+
+
+def _resolve_sql_schema(cfg: dict, user_schema: str) -> tuple[str, set[str]]:
+    """Łączy schemat z UI z automatycznym pobraniem z bazy."""
+    known = _fetch_sql_known_tables(cfg)
+    user_schema = (user_schema or "").strip()
+    if user_schema and "Kolumny:" in user_schema:
+        return user_schema, known
+    if user_schema:
+        auto = _build_auto_sql_schema(cfg)
+        merged = f"{user_schema}\n\n--- Pełny schemat z bazy ---\n{auto}"
+        return merged, known
+    return _build_auto_sql_schema(cfg), known
+
+
+# ============================================================
+# KONIEC PRZYWRÓCONYCH FUNKCJI BEZPIECZEŃSTWA SQL
+# ============================================================
+
 app = Flask(__name__)
 
 # === Podstawowe logowanie ===
@@ -397,15 +577,52 @@ def _redact_sql_config(cfg: dict) -> dict:
 
 @app.before_request
 def _require_api_key():
+    # Pełne usunięcie wsparcia dla ?api_key= (zgodnie z zaleceniami audytu bezpieczeństwa).
+    # Klucz API może być przekazywany TYLKO przez nagłówek HTTP "X-API-Key".
+    # Powody: ochrona przed wyciekiem do logów, historii przeglądarki, Referer itd.
+    # Szczególnie ważne dla endpointów SSE (/import/stream, /search/stream, /hybrid/stream).
     if not APP_API_KEY:
         return None
     if request.endpoint == "index":
         return None
-    provided = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
+    provided = request.headers.get("X-API-Key", "")
     if provided != APP_API_KEY:
         return jsonify(
-            {"success": False, "error": "Brak lub nieprawidłowy klucz API (nagłówek X-API-Key)"}
+            {"success": False, "error": "Brak lub nieprawidłowy klucz API (wymagany nagłówek X-API-Key)"}
         ), 401
+    return None
+
+
+def _is_local_request() -> bool:
+    """Sprawdza czy żądanie pochodzi z localhost (bezpieczne dla tras konfiguracyjnych)."""
+    remote = request.remote_addr or ""
+    if remote in ("127.0.0.1", "::1", "localhost"):
+        return True
+    # W kontenerach / reverse proxy często X-Forwarded-For lub X-Real-IP
+    forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first in ("127.0.0.1", "::1", "localhost"):
+            return True
+    return False
+
+
+def _require_config_access():
+    """
+    Ochrona tras konfiguracyjnych (nawet gdy APP_API_KEY jest puste).
+    Wymaga: localhost LUB poprawny klucz API (jeśli jest ustawiony).
+    """
+    if _is_local_request():
+        return None
+    if not APP_API_KEY:
+        # Na produkcji z 0.0.0.0 bez klucza — blokujemy dostęp do konfiguracji
+        return jsonify({
+            "success": False,
+            "error": "Dostęp do konfiguracji tylko z localhost lub po podaniu X-API-Key"
+        }), 403
+    provided = request.headers.get("X-API-Key", "")
+    if provided != APP_API_KEY:
+        return jsonify({"success": False, "error": "Brak lub nieprawidłowy klucz API (wymagany nagłówek X-API-Key)"}), 401
     return None
 
 
@@ -459,6 +676,64 @@ def _apply_llm_config(cfg: dict):
 
 
 _apply_llm_config(_load_llm_config())
+
+
+# ============================================================
+# CHRONIONE TRASY KONFIGURACJI LLM (nawet bez APP_API_KEY)
+# ============================================================
+
+@app.route('/api/config/llm', methods=['GET'])
+def get_llm_config():
+    auth = _require_config_access()
+    if auth:
+        return auth
+
+    cfg = _load_llm_config()
+
+    # Zawsze zwracamy tylko flagi "czy klucz jest ustawiony" — nigdy preview kluczy
+    return jsonify({
+        "success": True,
+        "provider": cfg.get("provider", DEFAULT_LLM_PROVIDER),
+        "ollama_url": cfg.get("ollama_url", OLLAMA_URL),
+        "llm_model": cfg.get("llm_model", LLM_MODEL),
+        "openrouter_model": cfg.get("openrouter_model", OPENROUTER_MODEL),
+        "openrouter_model_verify": cfg.get("openrouter_model_verify", OPENROUTER_MODEL_VERIFY),
+        "openrouter_fallback": cfg.get("openrouter_fallback", OPENROUTER_FALLBACK_TO_OLLAMA),
+
+        # Bezpieczne flagi zamiast podglądów kluczy
+        "openrouter_key_set": bool(cfg.get("openrouter_key")),
+        "app_api_key_set": bool(cfg.get("app_api_key")),
+    })
+
+
+@app.route('/api/config/llm', methods=['POST'])
+def save_llm_config():
+    auth = _require_config_access()
+    if auth:
+        return auth
+
+    data = request.get_json() or {}
+
+    current = _load_llm_config()
+
+    # Aktualizuj tylko dozwolone pola
+    allowed = ["provider", "ollama_url", "llm_model", "openrouter_model",
+               "openrouter_model_verify", "openrouter_fallback"]
+
+    for k in allowed:
+        if k in data:
+            current[k] = data[k]
+
+    # Klucze — zapisujemy tylko jeśli użytkownik je podał (nie nadpisujemy pustymi)
+    if data.get("openrouter_key"):
+        current["openrouter_key"] = data["openrouter_key"]
+    if "app_api_key" in data:
+        current["app_api_key"] = data["app_api_key"] or ""
+
+    _save_llm_config(current)
+    _apply_llm_config(current)
+
+    return jsonify({"success": True, "message": "Konfiguracja LLM zapisana"})
 
 
 # ============================================================
@@ -2338,60 +2613,63 @@ def hybrid_stream():
 
             yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
 
-            # 2. SQL — jeśli konfiguracja dostępna
+            # 2. SQL — jeśli konfiguracja dostępna (z pełnymi guardami bezpieczeństwa)
             sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
             sql_query = ""
 
             if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
-                try:
-                    effective_schema, known_tables = _resolve_sql_schema(conn_cfg, schema_str)
-                    system_sql = (
-                        "Jesteś ekspertem T-SQL (MS SQL Server). "
-                        "Na podstawie schematu bazy generujesz zapytania SELECT. "
-                        "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
-                        "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
-                    )
-                    prompt_sql = (
-                        f"SCHEMAT BAZY:\n{effective_schema}\n\n"
-                        f"PYTANIE: {query_text}\n\n"
-                        "Wygeneruj SELECT:"
-                    )
-                    sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+                if not PYMSSQL_AVAILABLE:
+                    sql_data["error"] = "Moduł pymssql nie jest dostępny — hybrydowe SQL wyłączone"
+                else:
+                    try:
+                        effective_schema, known_tables = _resolve_sql_schema(conn_cfg, schema_str)
 
-                    first_word = sql_query.split()[0].upper() if sql_query.split() else ""
-                    if first_word not in ("SELECT", "WITH"):
-                        sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
-                    else:
-                        is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
-                        if not is_safe:
-                            sql_data["error"] = safe_err or "Niedozwolone zapytanie SQL"
+                        system_sql = (
+                            "Jesteś ekspertem T-SQL (MS SQL Server). "
+                            "Na podstawie schematu bazy generujesz zapytania SELECT. "
+                            "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
+                            "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+                        )
+                        prompt_sql = (
+                            f"SCHEMAT BAZY:\n{effective_schema}\n\n"
+                            f"PYTANIE: {query_text}\n\n"
+                            "Wygeneruj SELECT:"
+                        )
+                        sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+
+                        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+                        if first_word not in ("SELECT", "WITH"):
+                            sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
                         else:
-                            ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
-                            if not ok_tables:
-                                sql_data["error"] = table_err or "Nieznane tabele w SQL"
+                            is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+                            if not is_safe:
+                                sql_data["error"] = safe_err or "Niedozwolone zapytanie SQL"
                             else:
-                                conn = _get_sql_conn(conn_cfg)
-                                cur  = conn.cursor(as_dict=True)
-                                cur.execute(sql_query)
-                                rows = cur.fetchmany(200)
-                                cols = list(rows[0].keys()) if rows else []
+                                ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+                                if not ok_tables:
+                                    sql_data["error"] = table_err or "Nieznane tabele w SQL"
+                                else:
+                                    conn = _get_sql_conn(conn_cfg)
+                                    cur  = conn.cursor(as_dict=True)
+                                    cur.execute(sql_query)
+                                    rows = cur.fetchmany(200)
+                                    cols = list(rows[0].keys()) if rows else []
 
-                                result_rows = []
-                                for row in rows:
-                                    result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+                                    result_rows = []
+                                    for row in rows:
+                                        result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
 
-                                sql_data = {
-                                    "success": True,
-                                    "table": "wynik SQL",
-                                    "columns": cols,
-                                    "rows": result_rows,
-                                    "sql": sql_query[:120],
-                                    "total": len(result_rows)
-                                }
-                                conn.close()
-
-                except Exception as e:
-                    sql_data["error"] = str(e)[:200]
+                                    sql_data = {
+                                        "success": True,
+                                        "table": "wynik SQL",
+                                        "columns": cols,
+                                        "rows": result_rows,
+                                        "sql": sql_query[:120],
+                                        "total": len(result_rows)
+                                    }
+                                    conn.close()
+                    except Exception as e:
+                        sql_data["error"] = str(e)[:200]
 
             yield sse("sql_results", {"sql_results": sql_data})
 
@@ -3078,6 +3356,14 @@ def build_network():
 # ================================================================
 
 # 2026-06-01 — Opcja A dla problemu z SQL config JSON parse errors (na żądanie użytkownika "A"):
+
+# 2026-06-02 — Security remediation (z raportu przegląd PR #9–#18):
+#   - Przywrócono _is_sql_safe, _validate_sql_table_refs, _get_sql_conn i powiązane
+#     helpery SQL (usunięte w 3837d5a/ea77923). Bez nich hybrid_stream() z
+#     LLM-generated SQL był narażony na injection (teraz fail-closed + walidacja).
+#   - Dodano guard PYMSSQL_AVAILABLE w ścieżce hybrydowej.
+#   - Drobne poprawki XSS w network error/evidence panel (escapeHtml).
+# Najwyższy risk z audytu (latent SQL injection) — zaadresowany.
 # - Całkowicie odłączono sqlLoadSavedConn() z window.onload oraz showTab w index.html
 # - Zakładka SQL (#navItemSql) jest domyślnie ukryta (display:none)
 # - ensureSqlTabVisibility() pokazuje ją automatycznie TYLKO gdy /sql/config ma has_config:true

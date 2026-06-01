@@ -1056,12 +1056,6 @@ function escapeHtml(s) {
         .replace(/"/g, '&quot;');
 }
 
-function apiKeyParam() {
-    if (!window.API_KEY_REQUIRED) return '';
-    const k = sessionStorage.getItem('app_api_key') || '';
-    return k ? '&api_key=' + encodeURIComponent(k) : '';
-}
-
 (function installFetchApiKey() {
     if (!window.API_KEY_REQUIRED) return;
     const orig = window.fetch.bind(window);
@@ -1143,23 +1137,32 @@ function _suggestModelForTab(name) {
 }
 
 function showTab(name) {
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabSql','tabCollections','tabImport'].forEach(id => {
+    // Ukrywamy WSZYSTKIE zakładki (w tym raporty) — wcześniej brakowało tabReports
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabReports','tabSql','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
     const el = document.getElementById('tab' + name.charAt(0).toUpperCase() + name.slice(1));
     if (el) el.style.display = '';
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, sql:5, collections:6, import:7};
+
+    // Poprawiona mapa indeksów zakładek (raporty są na pozycji 5)
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
+
     _suggestModelForTab(name);
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
-    // SQL load detached per option A (no unconditional calls; tab shown only for configured users)
+    if (name === 'reports') {
+        setTimeout(() => {
+            try { loadReports(); } catch(e) { console.warn('Reports tab error:', e); }
+        }, 60);
+    }
+    // SQL load detached per option A
 }
 
 // ---- HEALTH DASHBOARD (nowy, bogatszy status) ----
@@ -2309,7 +2312,85 @@ showTab = function(name) {
     }
 };
 
-// ---- IMPORT SSE ----
+// ---- SSE via fetch + ReadableStream (header-friendly, replaces EventSource for auth) ----
+async function streamSSE(url, eventHandlers = {}) {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    let reader;
+    try {
+        const res = await fetch(url, { signal });
+
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            const errMsg = text || `HTTP ${res.status}`;
+            if (eventHandlers.error) eventHandlers.error({ msg: errMsg });
+            return { close: () => controller.abort() };
+        }
+
+        const body = res.body;
+        if (!body) {
+            if (eventHandlers.error) eventHandlers.error({ msg: 'Brak strumienia odpowiedzi' });
+            return { close: () => {} };
+        }
+
+        reader = body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // SSE messages are separated by double newlines
+            let sepIndex;
+            while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+                const rawMessage = buffer.slice(0, sepIndex);
+                buffer = buffer.slice(sepIndex + 2);
+
+                const lines = rawMessage.split('\n');
+                let eventName = 'message';
+                let dataStr = '';
+
+                for (const line of lines) {
+                    if (line.startsWith('event:')) {
+                        eventName = line.slice(6).trim();
+                    } else if (line.startsWith('data:')) {
+                        dataStr = line.slice(5).trim();
+                    }
+                }
+
+                if (dataStr && eventHandlers[eventName]) {
+                    try {
+                        const parsed = JSON.parse(dataStr);
+                        eventHandlers[eventName](parsed);
+                    } catch (e) {
+                        // Fallback if not JSON
+                        eventHandlers[eventName]({ raw: dataStr });
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        if (err.name !== 'AbortError') {
+            if (eventHandlers.error) {
+                eventHandlers.error({ msg: err.message || 'Błąd połączenia SSE' });
+            }
+        }
+    } finally {
+        if (reader) {
+            try { reader.releaseLock(); } catch (_) {}
+        }
+    }
+
+    return {
+        close: () => controller.abort()
+    };
+}
+
+// ---- IMPORT SSE (fetch + ReadableStream - wspiera X-API-Key) ----
 function executeImport() {
     const folderPath = document.getElementById('importPathInput').value.trim();
     if (!folderPath) return;
@@ -2336,11 +2417,63 @@ function executeImport() {
 
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
-    const es = new EventSource('/import/stream?' + params.toString() + apiKeyParam());
+    const url = '/import/stream?' + params.toString();
 
-    // Stop button handler
+    let sseController = null;
+
+    // Używamy fetch + ReadableStream zamiast EventSource (lepsze wsparcie dla X-API-Key)
+    const startStream = async () => {
+        sseController = await streamSSE(url, {
+            'start': (d) => {
+                lbl.textContent = `Przetwarzanie 0 / ${d.total} plików`;
+                log.innerHTML += `<div style="color:#63b3ed;">Znaleziono ${d.total} plików do importu...</div>`;
+            },
+            'file': (d) => {
+                const p = Math.round(d.i / d.total * 100);
+                bar.style.width = p + '%';
+                lbl.textContent = `${d.i} / ${d.total}: ${d.file.length > 40 ? d.file.slice(0,37)+'...' : d.file}`;
+                pct.textContent = p + '%';
+                const color = d.new > 0 ? '#68d391' : '#a0aec0';
+                log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${d.file} — ${d.new} nowych / ${d.chunks} chunków</div>`;
+                log.scrollTop = log.scrollHeight;
+            },
+            'skip': (d) => {
+                log.innerHTML += `<div style="color:#fc8181;">[${d.i}/${d.total}] POMINIĘTO: ${d.file} (${d.reason})</div>`;
+                log.scrollTop = log.scrollHeight;
+            },
+            'done': (d) => {
+                if (sseController) sseController.close();
+                if (stopBtn) stopBtn.style.display = 'none';
+                btn.disabled = false;
+                bar.style.width = '100%';
+                bar.classList.remove('progress-bar-animated');
+                lbl.textContent = 'Zakończono';
+                pct.textContent = '100%';
+                log.innerHTML += `<div style="color:#f6e05e;font-weight:bold;margin-top:6px;">✅ ${d.msg}</div>`;
+                done.classList.remove('d-none');
+                done.innerHTML = `✅ ${d.msg}`;
+                updateStats();
+                allDocs = [];
+            },
+            'error': (d) => {
+                log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg || 'Błąd strumienia'}</div>`;
+                if (sseController) sseController.close();
+                if (stopBtn) stopBtn.style.display = 'none';
+                btn.disabled = false;
+            }
+        });
+    };
+
+    // Start the stream
+    startStream().catch(err => {
+        log.innerHTML += `<div style="color:#fc8181;">❌ Nie udało się rozpocząć importu: ${err.message}</div>`;
+        btn.disabled = false;
+        if (stopBtn) stopBtn.style.display = 'none';
+    });
+
+    // Stop button handler (używa AbortController z wewnątrz streamSSE)
     const stopHandler = () => {
-        es.close();
+        if (sseController) sseController.close();
         if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
         lbl.textContent = 'Anulowano przez użytkownika';
@@ -2349,63 +2482,6 @@ function executeImport() {
     if (stopBtn) {
         stopBtn.onclick = stopHandler;
     }
-
-    es.addEventListener('start', e => {
-        const d = JSON.parse(e.data);
-        lbl.textContent = `Przetwarzanie 0 / ${d.total} plików`;
-        log.innerHTML += `<div style="color:#63b3ed;">Znaleziono ${d.total} plików do importu...</div>`;
-    });
-
-    es.addEventListener('file', e => {
-        const d = JSON.parse(e.data);
-        const p = Math.round(d.i / d.total * 100);
-        bar.style.width = p + '%';
-        lbl.textContent = `${d.i} / ${d.total}: ${d.file.length > 40 ? d.file.slice(0,37)+'...' : d.file}`;
-        pct.textContent = p + '%';
-        const color = d.new > 0 ? '#68d391' : '#a0aec0';
-        log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${d.file} — ${d.new} nowych / ${d.chunks} chunków</div>`;
-        log.scrollTop = log.scrollHeight;
-    });
-
-    es.addEventListener('skip', e => {
-        const d = JSON.parse(e.data);
-        log.innerHTML += `<div style="color:#fc8181;">[${d.i}/${d.total}] POMINIĘTO: ${d.file} (${d.reason})</div>`;
-        log.scrollTop = log.scrollHeight;
-    });
-
-    es.addEventListener('done', e => {
-        const d = JSON.parse(e.data);
-        es.close();
-        if (stopBtn) stopBtn.style.display = 'none';
-        btn.disabled = false;
-        bar.style.width = '100%';
-        bar.classList.remove('progress-bar-animated');
-        lbl.textContent = 'Zakończono';
-        pct.textContent = '100%';
-        log.innerHTML += `<div style="color:#f6e05e;font-weight:bold;margin-top:6px;">✅ ${d.msg}</div>`;
-        done.classList.remove('d-none');
-        done.innerHTML = `✅ ${d.msg}`;
-        updateStats();
-        allDocs = [];
-    });
-
-    es.addEventListener('error', e => {
-        try {
-            const d = JSON.parse(e.data);
-            log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg}</div>`;
-        } catch(_) {}
-        es.close();
-        if (stopBtn) stopBtn.style.display = 'none';
-        btn.disabled = false;
-    });
-
-    es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) return;
-        es.close();
-        if (stopBtn) stopBtn.style.display = 'none';
-        btn.disabled = false;
-        log.innerHTML += `<div style="color:#fc8181;">❌ Połączenie SSE przerwane.</div>`;
-    };
 }
 
 // ---- DYNAMICZNE SUGESTIE ----
@@ -2692,7 +2768,7 @@ function buildNetwork() {
                 ? "<br><small>Spróbuj zmniejszyć liczbę dokumentów (max 8-10) lub użyj mocniejszego modelu przez OpenRouter.</small>"
                 : "";
             document.getElementById('networkPlaceholder').innerHTML =
-                `<div style="color:#dc2626;">❌ ${d.error}${hint}</div>`;
+                `<div style="color:#dc2626;">❌ ${escapeHtml(d.error || '')}${hint}</div>`;
             return;
         }
         if (!d.nodes.length) {
@@ -2743,9 +2819,9 @@ function showEdgeEvidence(d, event) {
         let html = `<div style="font-size:0.8rem;margin-bottom:4px;color:#4f46e5;">Najważniejsze dowody:</div>`;
         d.evidences.slice(0, 5).forEach((ev, i) => {
             html += `<div style="margin:3px 0;padding:4px 6px;background:#f8f9ff;border-radius:3px;border-left:2px solid #64748b;font-size:0.82rem;">`;
-            if (ev.date) html += `<span style="color:#16a34a;">📅 ${ev.date}</span> `;
-            if (ev.doc) html += `<span style="color:#64748b;">${ev.doc}</span><br>`;
-            html += `<span style="font-style:italic;">${(ev.evidence||'').slice(0,140)}</span>`;
+            if (ev.date) html += `<span style="color:#16a34a;">📅 ${escapeHtml(ev.date)}</span> `;
+            if (ev.doc) html += `<span style="color:#64748b;">${escapeHtml(ev.doc)}</span><br>`;
+            html += `<span style="font-style:italic;">${escapeHtml((ev.evidence||'').slice(0,140))}</span>`;
             html += `</div>`;
         });
         if (d.evidences.length > 5) html += `<div class="small text-muted">… i ${d.evidences.length-5} więcej</div>`;
@@ -3750,7 +3826,7 @@ function sqlConnect() {
 
         // Wypełnij select wektoryzacji
         const sel = document.getElementById('sqlVecTable');
-        sel.innerHTML = d.tables.map(t => `<option value="${t.name}">${t.name} (${t.type})</option>`).join('');
+        sel.innerHTML = d.tables.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)} (${escapeHtml(t.type)})</option>`).join('');
     })
     .catch(e => { btn.disabled=false; st.className='small alert alert-danger mt-2'; st.textContent='❌ '+e; });
 }
@@ -4577,13 +4653,13 @@ function llmConfigLoad() {
             document.getElementById('cfgLlmModel').value  = d.llm_model  || '';
             document.getElementById('cfgOrKey').value     = '';  // nigdy nie pokazuj klucza
             const kStatus = document.getElementById('cfgOrKeyStatus');
-            kStatus.textContent = d.openrouter_key_set ? `(ustawiony: ${d.openrouter_key_preview})` : '(nie ustawiony)';
+            kStatus.textContent = d.openrouter_key_set ? '(ustawiony)' : '(nie ustawiony)';
             kStatus.style.color = d.openrouter_key_set ? '#166534' : '#991b1b';
 
             // App API Key
             document.getElementById('cfgAppKey').value = '';
             const appKeyStatus = document.getElementById('cfgAppKeyStatus');
-            appKeyStatus.textContent = d.app_api_key_set ? `(ustawiony: ${d.app_api_key_preview})` : '(nie ustawiony)';
+            appKeyStatus.textContent = d.app_api_key_set ? '(ustawiony)' : '(nie ustawiony)';
             appKeyStatus.style.color = d.app_api_key_set ? '#166534' : '#991b1b';
 
             // Model główny
@@ -4800,26 +4876,11 @@ function runReadyReport(id) {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, llm_provider: getCurrentLlmProvider()})
     }).then(r=>r.json()).then(d => {
-        document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${d.answer || 'Brak danych.'}</div>`;
+        document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(d.answer || 'Brak danych.')}</div>`;
     });
 }
 
 function hideReportResult() { document.getElementById('reportResult').classList.add('d-none'); }
-
-// Bezpieczne nadpisanie showTab (żeby nie rozwalić innych zakładek przy błędzie w raportach)
-try {
-    const _oldShow = showTab;
-    showTab = function(n) { 
-        _oldShow(n); 
-        if (n === 'reports') {
-            setTimeout(() => {
-                try { loadReports(); } catch(e) { console.warn('Reports tab error:', e); }
-            }, 80);
-        }
-    };
-} catch(e) {
-    console.warn('Nie udało się podpiąć zakładki Raporty:', e);
-}
 
 window.onload = function() {
     updateStats();           // jeden dodatkowy update statystyk (główny polling jest w startHealthAutoRefresh)
