@@ -131,14 +131,33 @@ def _sql_conn_configured(cfg: dict) -> bool:
     if not cfg:
         return False
     if _sql_dialect(cfg) == "sqlite":
-        return bool((cfg.get("db_path") or cfg.get("path") or "").strip())
+        raw = cfg.get("db_path") or cfg.get("path") or cfg.get("database") or ""
+        return bool(_normalize_sqlite_path_input(raw))
     return bool(cfg.get("server") and cfg.get("database"))
 
 
-def _resolve_sqlite_path(cfg: dict) -> Path:
-    raw = (cfg.get("db_path") or cfg.get("path") or "").strip()
+def _normalize_sqlite_path_input(raw: str) -> str:
+    """Normalizuje ścieżkę SQLite (WSL: G:\\foo → /mnt/g/foo)."""
+    raw = (raw or "").strip().strip('"').strip("'")
     if not raw:
-        raise ValueError("Brak ścieżki do pliku SQLite (.db)")
+        return raw
+    win = re.match(r"^([A-Za-z]):[\\/](.*)$", raw)
+    if win:
+        drive = win.group(1).lower()
+        rest = win.group(2).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+    return raw
+
+
+def _resolve_sqlite_path(cfg: dict) -> Path:
+    raw = (
+        cfg.get("db_path") or cfg.get("path") or cfg.get("database") or ""
+    ).strip()
+    raw = _normalize_sqlite_path_input(raw)
+    if not raw:
+        raise ValueError(
+            "Podaj ścieżkę do pliku SQLite (.db) — np. /mnt/g/dane/eksport.db"
+        )
     p = Path(raw).expanduser()
     if not p.is_file():
         raise ValueError(f"Plik bazy SQLite nie istnieje: {raw}")
@@ -1312,6 +1331,18 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                     time.sleep(wait)
                 continue
             else:
+                # 400 (zły model/ payload) — opcjonalny fallback na Ollama
+                if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
+                    try:
+                        status = e.response.status_code
+                    except Exception:
+                        status = None
+                    if status == 400:
+                        logger.warning("OpenRouter 400 → fallback do Ollama")
+                        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+                        if isinstance(result, dict):
+                            return result
+                        return {"response": str(result)}
                 break
 
     # Final failure — optional fallback na Ollama (np. generowanie SQL / synteza)
@@ -2486,85 +2517,142 @@ def browse():
 # ============================================================
 
 def _discover_local_drives():
-    """Zwraca listę sensownych punktów startowych (dysków/mountów) bez dodatkowych zależności."""
+    """Zwraca listę sensownych punktów startowych (dysków/mountów) z wskaźnikami dostępności."""
     import string
     drives = []
     sysname = platform.system()
     home = str(Path.home())
 
+    # Helper: sprawdź dostęp i zwróć status
+    def check_access(path_str):
+        try:
+            p = Path(path_str)
+            if p.exists() and p.is_dir():
+                # Spróbuj czytać zawartość — to sygnalizuje prawdziwy dostęp
+                list(p.iterdir())
+                return "✓", True
+        except PermissionError:
+            return "⚠", False
+        except Exception:
+            return "✗", False
+        return "✗", False
+
     try:
         if sysname == "Windows":
             for letter in string.ascii_uppercase:
                 p = Path(f"{letter}:\\")
-                if p.exists():
+                status, accessible = check_access(str(p))
+                if accessible:
                     drives.append({
                         "path": str(p),
-                        "label": f"{letter}:",
+                        "label": f"{letter}: {status}",
                         "kind": "drive",
-                        "icon": "💾"
+                        "icon": "💾",
+                        "accessible": accessible
                     })
         else:
-            # Linux / WSL / macOS
-            candidates = ['/', home, '/mnt', '/media', '/data']
-            for c in candidates:
-                pp = Path(c)
-                if pp.exists() and pp.is_dir():
-                    label = "🏠 Home" if c == home else c
-                    drives.append({"path": str(pp), "label": label, "kind": "dir", "icon": "📁" if c != home else "🏠"})
+            # Linux / WSL / macOS — Home zawsze na górze
+            home_accessible = False
+            try:
+                list(Path(home).iterdir())
+                home_accessible = True
+            except:
+                pass
+            drives.append({
+                "path": home,
+                "label": f"🏠 Home {'✓' if home_accessible else '⚠'}",
+                "kind": "home",
+                "icon": "🏠",
+                "accessible": home_accessible
+            })
 
-            # WSL — dyski Windows widoczne jako /mnt/c, /mnt/d itd.
+            # Inne katalogi bazowe
+            candidates = [('/', '/', '📁'), ('/mnt', 'Montowania WSL', '🪟'), ('/media', 'Nośniki USB', '💾'), ('/data', 'Data', '📂')]
+            for path, label, icon in candidates:
+                pp = Path(path)
+                status, accessible = check_access(path)
+                if pp.exists():
+                    drives.append({
+                        "path": str(pp),
+                        "label": f"{label} {status}",
+                        "kind": "dir",
+                        "icon": icon,
+                        "accessible": accessible
+                    })
+
+            # WSL — dyski Windows (C-J) z agresywnym sondowaniem
+            wsl_drives = []
             mnt = Path("/mnt")
             if mnt.exists():
-                for child in sorted(mnt.iterdir()):
-                    if child.is_dir() and len(child.name) == 1:
-                        letter = child.name.upper()
-                        drives.append({
-                            "path": str(child),
-                            "label": f"{letter}: (Windows)",
-                            "kind": "wsl",
-                            "icon": "🪟"
-                        })
+                # Iteruj dostępne dyski
+                try:
+                    for child in sorted(mnt.iterdir()):
+                        if child.is_dir() and len(child.name) == 1:
+                            letter = child.name.upper()
+                            status, accessible = check_access(str(child))
+                            wsl_drives.append({
+                                "path": str(child),
+                                "label": f"{letter}: (Win) {status}",
+                                "kind": "wsl",
+                                "icon": "🪟",
+                                "accessible": accessible
+                            })
+                except:
+                    pass
 
-                # Agresywne sondowanie liter (C-J) — rozwiązuje problem leniwego montowania
-                # w WSL (dysk G: pojawia się dopiero po pierwszym dostępie).
-                # Użytkownik z dyskiem G: w Windows powinien go teraz zobaczyć
-                # w "Szybki dostęp" nawet jeśli iterdir() go nie zwrócił.
-                for letter in "cdefghij":
+                # Agresywnie sonduj pozostałe litery dysku (C-Z)
+                for letter in "cdefghijklmnopqrstuvwxyz":
                     drive_path = mnt / letter
-                    try:
-                        if drive_path.exists() and drive_path.is_dir():
-                            if not any(d["path"] == str(drive_path) for d in drives):
-                                drives.append({
-                                    "path": str(drive_path),
-                                    "label": f"{letter.upper()}: (Windows)",
-                                    "kind": "wsl",
-                                    "icon": "🪟"
-                                })
-                    except Exception:
-                        pass
+                    if not any(d["path"] == str(drive_path) for d in wsl_drives):
+                        status, accessible = check_access(str(drive_path))
+                        if accessible:
+                            wsl_drives.append({
+                                "path": str(drive_path),
+                                "label": f"{letter.upper()}: (Win) {status}",
+                                "kind": "wsl",
+                                "icon": "🪟",
+                                "accessible": True
+                            })
 
-            # Spróbuj wyciągnąć prawdziwe montowania z /proc/mounts (najlepszy wysiłek)
+            drives.extend(wsl_drives)
+
+            # Montowania dyskowe z /proc/mounts
             try:
                 with open("/proc/mounts") as f:
+                    mounts = []
                     for line in f:
                         parts = line.split()
                         if len(parts) < 3:
                             continue
                         dev, mp, fstype = parts[0], parts[1], parts[2]
-                        # Tylko sensowne systemy plików dyskowych
+                        # Tylko sensowne systemy plików
                         if fstype in ("ext4", "ext3", "xfs", "btrfs", "ntfs", "fuseblk", "vfat") and \
                            mp not in ("/", "/boot", "/boot/efi", "/proc", "/sys", "/dev", "/run"):
                             if len(mp) <= 24 and not any(x in mp for x in ("/snap/", "/docker/", "/tmp/")):
                                 if not any(d["path"] == mp for d in drives):
-                                    drives.append({"path": mp, "label": mp, "kind": "mount", "icon": "💿"})
+                                    status, accessible = check_access(mp)
+                                    mounts.append({
+                                        "path": mp,
+                                        "label": f"{Path(mp).name or mp} {status}",
+                                        "kind": "mount",
+                                        "icon": "💿",
+                                        "accessible": accessible
+                                    })
+                    drives.extend(sorted(mounts, key=lambda x: x["label"]))
             except Exception:
                 pass
+
     except Exception:
         pass
 
-    # Zawsze dodaj Home jeśli nie ma
-    if not any(d["path"] == home for d in drives):
-        drives.insert(0, {"path": home, "label": "🏠 Home", "kind": "dir", "icon": "🏠"})
+    # Sortuj: Home, dostępne dyski, niedostępne dyski
+    drives_sorted = sorted(drives, key=lambda x: (
+        x["kind"] != "home",  # Home na początek
+        not x.get("accessible", False),  # Dostępne przed niedostępnymi
+        x["label"]  # Potem alfabetycznie
+    ))
+
+    return drives_sorted
 
     # Deduplikacja + limit
     seen = set()
@@ -2855,9 +2943,8 @@ def hybrid_stream():
                             f"PYTANIE: {query_text}\n\n"
                             f"Wygeneruj zapytanie SELECT ({dialect_label}):"
                         )
-                        sql_response = _call_ollama(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
-                        sql_query = sql_response.get("response", "") if isinstance(sql_response, dict) else ""
-                        sql_query = _clean_llm_sql(sql_query)
+                        sql_response = call_llm(prompt_sql, system_sql, stream=False, max_tokens=2000, temperature=0.1)
+                        sql_query = _clean_llm_sql(_llm_response_text(sql_response))
 
                         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
                         if first_word not in ("SELECT", "WITH"):
@@ -4690,44 +4777,55 @@ def sql_config_post():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-def _sql_text_columns(cur, table: str, dialect: str) -> list[str]:
-    if dialect == "sqlite":
-        cur.execute(f'PRAGMA table_info("{table}")')
-        text_types = ("TEXT", "CHAR", "CLOB", "VARCHAR", "NVARCHAR", "INT", "INTEGER", "REAL", "FLOAT", "NUMERIC", "DECIMAL", "DATE", "DATETIME")
-        return [r[1] for r in cur.fetchall() if any(t in (r[2] or "").upper() for t in text_types)]
-    cur.execute("""
-        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME=%s AND DATA_TYPE IN
-        ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
-        ORDER BY ORDINAL_POSITION
-    """, (table,))
-    return [r["COLUMN_NAME"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
-
-
-def _sql_list_tables(cur, dialect: str) -> list[dict]:
-    if dialect == "sqlite":
+def _sql_text_columns(conn, table: str, dialect: str) -> list[str]:
+    """Kolumny tekstowe/numeryczne — zwykły kursor (pymssql as_dict nie obsługuje metadanych)."""
+    cur = conn.cursor()
+    try:
+        if dialect == "sqlite":
+            cur.execute(f'PRAGMA table_info("{table}")')
+            text_types = ("TEXT", "CHAR", "CLOB", "VARCHAR", "NVARCHAR", "INT", "INTEGER", "REAL", "FLOAT", "NUMERIC", "DECIMAL", "DATE", "DATETIME")
+            return [r[1] for r in cur.fetchall() if any(t in (r[2] or "").upper() for t in text_types)]
         cur.execute("""
-            SELECT name, type FROM sqlite_master
-            WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
+            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME=%s AND DATA_TYPE IN
+            ('varchar','nvarchar','text','ntext','char','nchar','int','decimal','numeric','float','date','datetime')
+            ORDER BY ORDINAL_POSITION
+        """, (table,))
+        return [r[0] for r in cur.fetchall()]
+    finally:
+        cur.close()
+
+
+def _sql_list_tables(conn, dialect: str) -> list[dict]:
+    cur = conn.cursor()
+    try:
+        if dialect == "sqlite":
+            cur.execute("""
+                SELECT name, type FROM sqlite_master
+                WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+            """)
+            return [{"name": r[0], "type": r[1].upper()} for r in cur.fetchall()]
+        cur.execute("""
+            SELECT TABLE_NAME, TABLE_TYPE
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+            ORDER BY TABLE_NAME
         """)
-        return [{"name": r[0], "type": r[1].upper()} for r in cur.fetchall()]
-    cur.execute("""
-        SELECT TABLE_NAME, TABLE_TYPE
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
-        ORDER BY TABLE_NAME
-    """)
-    return [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+        return [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+    finally:
+        cur.close()
 
 
-def _sql_table_count(cur, table: str, dialect: str) -> int:
+def _sql_table_count(conn, table: str, dialect: str) -> int:
     qtable = _sql_quote_ident(table, dialect)
-    cur.execute(f"SELECT COUNT(*) FROM {qtable}")
-    row = cur.fetchone()
-    if isinstance(row, dict):
-        return int(next(iter(row.values())))
-    return int(row[0])
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(*) AS cnt FROM {qtable}")
+        row = cur.fetchone()
+        return int(row[0])
+    finally:
+        cur.close()
 
 
 def _sql_fetch_table_rows(cur, table: str, columns: list[str], dialect: str, batch: int):
@@ -4759,6 +4857,11 @@ def sql_test():
     """Test połączenia z bazą SQL (MS SQL Server lub SQLite)."""
     cfg = request.get_json() or {}
     try:
+        if _sql_dialect(cfg) == "sqlite" and not _sql_conn_configured(cfg):
+            return jsonify({
+                "success": False,
+                "error": "Podaj ścieżkę do pliku .db (np. /mnt/g/dane/eksport.db)",
+            })
         _require_sql_backend(cfg)
         dialect = _sql_dialect(cfg)
         conn = _get_sql_conn(cfg, readonly=True)
@@ -4769,7 +4872,7 @@ def sql_test():
         else:
             cur.execute("SELECT @@VERSION")
             version = cur.fetchone()[0]
-        tables = _sql_list_tables(cur, dialect)
+        tables = _sql_list_tables(conn, dialect)
         conn.close()
         return jsonify({"success": True, "version": version[:120], "tables": tables, "dialect": dialect})
     except Exception as e:
@@ -4806,7 +4909,7 @@ def sql_schema():
                 {"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
                 for r in cur.fetchall()
             ]
-        row_count = _sql_table_count(cur, table, dialect)
+        row_count = _sql_table_count(conn, table, dialect)
         conn.close()
         return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
     except Exception as e:
@@ -4840,7 +4943,7 @@ def sql_ask():
             f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
             f"Wygeneruj zapytanie SQL ({dialect_label}):"
         )
-        sql_response = call_llm(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+        sql_response = call_llm(prompt_sql, system_sql, stream=False, max_tokens=2000, temperature=0.1)
         sql_query = _clean_llm_sql(_llm_response_text(sql_response))
 
         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
@@ -4881,7 +4984,8 @@ def sql_ask():
             prompt_interp,
             "Jesteś analitykiem danych. Interpretujesz wyniki SQL po polsku.",
             stream=False,
-            model=LLM_MODEL,
+            max_tokens=1500,
+            temperature=0.2,
         )
         interpretation = _llm_response_text(interp)
 
@@ -4931,7 +5035,7 @@ def sql_write():
                 f"ZADANIE: {question}\n\n"
                 "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
             )
-            gen = call_llm(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+            gen = call_llm(prompt_sql, system_sql, stream=False, max_tokens=2000, temperature=0.1)
             sql_query = _clean_llm_sql(_llm_response_text(gen))
 
         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
@@ -5012,17 +5116,17 @@ def sql_vectorize():
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
             conn = _get_sql_conn(cfg, readonly=True)
-            cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
+            data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
             if cols:
                 active_cols = list(cols)
             else:
-                active_cols = _sql_text_columns(cur, table, dialect)
+                active_cols = _sql_text_columns(conn, table, dialect)
             if not active_cols:
                 yield sse("error", {"error": f"Brak kolumn do wektoryzacji w tabeli {table}"})
                 return
 
-            total = _sql_table_count(cur, table, dialect)
+            total = _sql_table_count(conn, table, dialect)
             yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols})
 
             qdrant = get_qdrant_client()
@@ -5030,7 +5134,7 @@ def sql_vectorize():
             rows_buf: list[str] = []
             BATCH = 50
 
-            for row in _sql_fetch_table_rows(cur, table, active_cols, dialect, BATCH):
+            for row in _sql_fetch_table_rows(data_cur, table, active_cols, dialect, BATCH):
                 rows_buf.append(_sql_row_to_text(table, row, label_col))
                 if len(rows_buf) < BATCH:
                     continue
@@ -5100,9 +5204,9 @@ def sql_vectorize_all():
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
             conn = _get_sql_conn(cfg, readonly=True)
-            cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
+            data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
-            tables = [t["name"] for t in _sql_list_tables(cur, dialect)]
+            tables = [t["name"] for t in _sql_list_tables(conn, dialect)]
             yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables})
 
             qdrant = get_qdrant_client()
@@ -5117,12 +5221,12 @@ def sql_vectorize_all():
                         "total_tables": len(tables),
                     })
 
-                    active_cols = _sql_text_columns(cur, table, dialect)
+                    active_cols = _sql_text_columns(conn, table, dialect)
                     if not active_cols:
                         yield sse("table_done", {"table_done": True, "table": table, "rows": 0, "table_idx": table_idx})
                         continue
 
-                    table_total = _sql_table_count(cur, table, dialect)
+                    table_total = _sql_table_count(conn, table, dialect)
                     if table_total == 0:
                         yield sse("table_done", {"table_done": True, "table": table, "rows": 0, "table_idx": table_idx})
                         continue
@@ -5131,7 +5235,7 @@ def sql_vectorize_all():
                     rows_buf: list[str] = []
                     BATCH = 50
 
-                    for row in _sql_fetch_table_rows(cur, table, active_cols, dialect, BATCH):
+                    for row in _sql_fetch_table_rows(data_cur, table, active_cols, dialect, BATCH):
                         rows_buf.append(_sql_row_to_text(table, row))
                         if len(rows_buf) < BATCH:
                             continue
