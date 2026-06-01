@@ -80,13 +80,48 @@ Dostajesz konkretną odpowiedź z cytatami źródłowymi
 
 ## Instalacja
 
+### Szybki start — dev lokalny (Linux, bez Qdrant Cloud)
+
+Wymaga wcześniej zainstalowanego [Ollama](https://ollama.ai/). Skrypt przygotuje `venv`, plik `.env` i binarkę Qdrant w `.local/`:
+
 ```bash
 git clone https://github.com/dragon15555000/AI_analiza_dokumentow.git
 cd AI_analiza_dokumentow
-pip install -r requirements.txt
+chmod +x scripts/setup-local-dev.sh
+./scripts/setup-local-dev.sh --system-deps --pull-models
+```
+
+Na Ubuntu/Debian flaga `--system-deps` doinstaluje `python3.12-venv`, `zstd` i `curl` (sudo).  
+`--pull-models` pobierze `nomic-embed-text` i `llama3` (wymaga działającego `ollama` w PATH).
+
+**Uruchomienie aplikacji** (trzy osobne terminale lub sesje tmux):
+
+```bash
+# Terminal 1
+ollama serve
+
+# Terminal 2 (z katalogu repo)
+cd .local && ./qdrant
+
+# Terminal 3 (z katalogu repo)
+set -a && source .env && set +a && ./venv/bin/python app.py
+```
+
+Sprawdzenie: `curl -s http://127.0.0.1:5000/health` → `"overall":"ok"`.  
+UI: `http://localhost:5000`
+
+Pomoc skryptu: `./scripts/setup-local-dev.sh --help`
+
+### Instalacja z Qdrant Cloud (produkcja / dane w chmurze)
+
+```bash
+git clone https://github.com/dragon15555000/AI_analiza_dokumentow.git
+cd AI_analiza_dokumentow
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
 cp .env.example .env
-nano .env          # wpisz swoje dane Qdrant Cloud
-python app.py
+nano .env          # wpisz QDRANT_URL i QDRANT_KEY z https://cloud.qdrant.io/
+set -a && source .env && set +a && ./venv/bin/python app.py
 ```
 
 Otwórz: `http://localhost:5000`
