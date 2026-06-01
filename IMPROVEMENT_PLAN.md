@@ -240,4 +240,27 @@ Te zmiany znacząco podnoszą poziom „produkcyjności” lokalnego środowiska
 - [ ] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
 - [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
 
-*Ostatnia aktualizacja macierzy: lipiec 2026 (po v2026.09 – self-update + user service)*
+*Ostatnia aktualizacja macierzy: lipiec 2026 (po v2026.09 – self-update + user service + Gotowe raporty śledcze)*
+
+---
+
+## Końcowa recenzja kodu (01.06.2026)
+
+Na prośbę użytkownika przeprowadzono pełną końcową recenzję kodu całej aplikacji.
+
+**Wykonane działania i poprawki:**
+- Dodano nową zakładkę „Raporty śledcze” z 8 gotowymi szablonami demonstracyjnymi możliwości programu.
+- Wprowadzono podstawowe przetwarzanie partiami w `build_network()` (partie po 5 dokumentów) + licznik przetworzonych partii.
+- Ulepszono komunikaty błędów przy budowaniu sieci powiązań.
+- Dodano/ulepszono globalny licznik tokenów w topbarze oraz lepsze liczniki przy odpowiedziach LLM.
+- Zwiększono widoczność pasków postępu przy imporcie/wektoryzacji.
+- Dodano toast/powiadomienie po udanej aktualizacji z GitHub.
+- Poprawiono skrypty `start`, `stop`, `restart-app.sh` i `install-user-service.sh` (kolorowe komunikaty, git pull przy starcie).
+- Dodano zarządzanie App API Key w ustawieniach UI.
+- Zmieniono domyślny provider LLM na OpenRouter (oprócz importu/embeddings).
+- Zaktualizowano dokumentację (README, AGENTS.md, IMPROVEMENT_PLAN.md).
+- Przeprowadzono końcową pełną recenzję kodu i naprawiono pozostałości po wcześniejszych refaktoryzacjach.
+
+**Data zakończenia recenzji:** 01 czerwca 2026
+
+Wszystkie większe zmiany są udokumentowane w commitach tej sesji.
