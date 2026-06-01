@@ -96,23 +96,24 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 
 ## Szybkie zwycięstwa (można zrobić w 1-2 dni)
 
-1. Dodać `waitress` i zaktualizować service (największy ból)
-2. Dodać listę popularnych darmowych modeli w UI (dropdown)
+1. ~~Dodać `waitress` i zaktualizować service~~ ✅ (zrobione)
+2. ~~Dodać listę popularnych darmowych modeli w UI (dropdown)~~ → częściowo zrealizowane przez **dynamiczne sugestie modeli + auto-switch** (v2026.08)
 3. Wyczyścić pozostałe bezpośrednie wywołania Ollama
 4. Dodać prosty licznik tokenów przy OpenRouter
-5. Poprawić komunikaty błędów przy problemach z OpenRouter
+5. ~~Poprawić komunikaty błędów przy problemach z OpenRouter~~ → znacząco ulepszone w diagnostyce startowej + przycisk „Kopiuj diagnostykę” (v2026.08)
 
 ---
 
 ## Uwagi
 
-- Największy zwrot z inwestycji obecnie daje **Faza 1** (stabilność).
-- Po stabilizacji warto mocno iść w **Fazę 3** – to wyróżnia narzędzie jako profesjonalne dla śledczych.
-- OpenRouter to obecnie duży kierunek – warto dobrze go dopracować (Faza 2).
+- Największy zwrot z inwestycji obecnie daje **Faza 1** (stabilność) — w dużej mierze zrealizowana.
+- Po stabilizacji i poprawie użyteczności (v2026.07 + v2026.08) warto rozważyć dalszy rozwój w kierunku **Fazy 3** (funkcje dla śledczych) oraz dopracowanie zaawansowanego zarządzania modelami (Faza 2).
+- OpenRouter + diagnostyka + doświadczenie na WSL to obecnie jedne z najmocniejszych stron narzędzia.
 
 ---
 
-*Plan stworzony: maj 2026*
+*Plan stworzony: maj 2026*  
+*Ostatnia duża aktualizacja: lipiec 2026 (po releasie v2026.08)*
 
 ---
 
@@ -137,6 +138,33 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 - Wyrównano wszystkie wywołania batch embeddings do `batch_size=6`.
 
 Te zmiany znacząco zwiększają niezawodność przy korzystaniu z darmowych modeli OpenRouter.
+
+---
+
+## Zrealizowane – v2026.08 (lipiec 2026)
+
+### Użyteczność i doświadczenie użytkownika
+- **Dynamiczne sugestie modeli + auto-switch** — przy zmianie zakładek aplikacja inteligentnie sugeruje najlepszy model (i może automatycznie przełączać).
+- **Konfiguracja przez `.env`**:
+  - `EMBED_MODEL` — możliwość zmiany modelu embeddingów (domyślnie `nomic-embed-text`)
+  - `OCR_LANG` — łatwa zmiana języka OCR
+- **Lepsze wsparcie dla Windows + WSL**:
+  - Znacznie ulepszone automatyczne wykrywanie dysków Windows (w tym dysk G: przy leniwym montowaniu w WSL)
+  - Agresywne sondowanie liter dysków w `/api/drives`
+
+### Diagnostyka i obserwowalność (duży postęp)
+- Wzbogacona **Diagnostyka startowa** (modal przy uruchomieniu + przycisk ⚙️):
+  - Nowy wiersz **Embedding** (pokazuje czy model embeddingów jest dostępny)
+  - Znacznie lepsze, bardziej precyzyjne komunikaty błędów (np. "model nie istnieje → gotowa komenda `ollama pull`")
+  - Przycisk **„📋 Kopiuj diagnostykę”** — kopiuje czytelne podsumowanie do schowka (bardzo przydatne przy zgłaszaniu problemów)
+  - Wyświetlanie czasu ostatniego sprawdzenia
+  - Wersja aplikacji widoczna w nagłówku modala i w topbarze
+- Kolorowe kropki statusu w nagłówku (Qdrant / LLM / OCR) + automatyczne odświeżanie co 30s
+
+### Inne
+- Wersja aplikacji (`APP_VERSION`) automatycznie odczytywana z tagów git (w trybie dev pokazuje `-dirty`)
+
+Te zmiany znacząco poprawiają codzienne doświadczenie użytkownika, szczególnie na Windows + WSL oraz przy korzystaniu z diagnostyki w razie problemów.
 
 ---
 
@@ -165,4 +193,4 @@ Te zmiany znacząco zwiększają niezawodność przy korzystaniu z darmowych mod
 - [ ] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
 - [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
 
-*Ostatnia aktualizacja macierzy: czerwiec 2026*
+*Ostatnia aktualizacja macierzy: lipiec 2026 (po v2026.08)*
