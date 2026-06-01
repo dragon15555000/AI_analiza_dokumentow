@@ -3793,7 +3793,7 @@ def _excel_goal_seek_hint(stored: float) -> tuple[bool, str, int]:
     )
 
 
-def _excel_sum_range(ws_v, range_spec: str) -> float | None:
+def _excel_sum_range(ws_v, range_spec: str) -> tuple[float, int] | None:
     from openpyxl.utils import range_boundaries
     spec = range_spec.strip().replace("$", "")
     if ":" not in spec:
@@ -3807,7 +3807,7 @@ def _excel_sum_range(ws_v, range_spec: str) -> float | None:
                 if isinstance(c.value, (int, float)):
                     total += float(c.value)
                     count += 1
-        return total if count else None
+        return (total, count) if count else None
     except Exception:
         return None
 
@@ -4117,12 +4117,13 @@ def _excel_forensics(file_path: Path) -> dict:
                         pass
 
                 inner = formula.split("(", 1)
-                if len(inner) == 2 and inner[0].upper().startswith("=SUM"):
+                if len(inner) == 2 and inner[0].upper() == "=SUM":
                     args = inner[1].rstrip(")").replace(";", ",")
                     if ":" in args and "!" not in args.split(":")[0]:
                         range_spec = args.split(",")[0].strip()
-                        total = _excel_sum_range(ws_v, range_spec)
-                        if total is not None and isinstance(stored, (int, float)):
+                        sum_result = _excel_sum_range(ws_v, range_spec)
+                        if sum_result is not None and isinstance(stored, (int, float)):
+                            total, _ = sum_result
                             diff = abs(float(stored) - total)
                             if diff > 0.02:
                                 _excel_add_finding(
@@ -4147,13 +4148,9 @@ def _excel_forensics(file_path: Path) -> dict:
                 if m_avg and isinstance(stored, (int, float)):
                     spec = m_avg.group(1).replace(";", ",").strip()
                     if ":" in spec and "!" not in spec:
-                        total = _excel_sum_range(ws_v, spec)
-                        if total is not None:
-                            from openpyxl.utils import range_boundaries
-                            min_col, min_row, max_col, max_row = range_boundaries(
-                                spec.replace("$", "")
-                            )
-                            cnt = max(1, (max_row - min_row + 1) * (max_col - min_col + 1))
+                        sum_result = _excel_sum_range(ws_v, spec)
+                        if sum_result is not None:
+                            total, cnt = sum_result
                             avg = total / cnt
                             diff = abs(float(stored) - avg)
                             if diff > 0.05:
