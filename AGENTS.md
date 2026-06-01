@@ -12,7 +12,7 @@ Single Flask RAG app (`app.py`) for document Q&A. UI at `http://localhost:5000`.
 |---------|------|--------|
 | **Qdrant** | `6333` (local) or cloud URL | App **exits on import** without `QDRANT_URL` and `QDRANT_KEY`. Collection auto-created on startup if missing (768 dim). |
 | **Ollama** | `11434` | Required for embeddings (`nomic-embed-text`) and default chat (`llama3`). |
-| **Flask app** | `5000` | Dev: `./venv/bin/python app.py` from repo root. Prod: Waitress via `wsgi.py` / `ai_analiza.service`. |
+| **Flask app** | `5000` | **Dev**: `./venv/bin/python app.py`<br>**Polecane (user service)**: `./restart-app.sh --user`<br>**Pełna prod**: Waitress + `ai_analiza-user.service` (systemd --user) lub systemowe `ai_analiza.service`. |
 
 ### First-time VM setup (not in update script)
 
@@ -25,6 +25,27 @@ Then start `ollama serve`, `.local/qdrant`, and `./venv/bin/python app.py` (see 
 `./scripts/setup-local-dev.sh --help` for options.
 
 Optional OCR: `tesseract-ocr`, `tesseract-ocr-pol`, `poppler-utils`.
+
+### Sposoby uruchamiania aplikacji (ważne dla AI)
+
+| Tryb                    | Komenda                              | Kiedy używać                          | Zalety                              |
+|-------------------------|--------------------------------------|---------------------------------------|-------------------------------------|
+| **Dev (prosty)**        | `./venv/bin/python app.py`           | Szybkie testy, debugowanie            | Najprostszy                         |
+| **Zalecany**            | `./restart-app.sh --user`            | Codzienna praca na WSL/laptopie       | Automatyczny restart, dobre logi    |
+| **Produkcyjny (user)**  | `systemctl --user start ai_analiza`  | Dłuższe sesje, testy prod-like        | Najlepsza stabilność bez roota      |
+| **Pełny system**        | `sudo systemctl start ai_analiza`    | Prawdziwy serwer / VM                 | Uruchamia się przy boocie jako root |
+
+**Najczęściej używany przez deweloperów:**
+```bash
+./restart-app.sh --user
+```
+
+Logi wtedy sprawdzasz przez:
+```bash
+./restart-app.sh --user logs
+# lub
+journalctl --user -u ai_analiza -f
+```
 
 ### Security defaults
 

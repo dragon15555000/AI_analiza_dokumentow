@@ -4048,6 +4048,14 @@ function showStartupChecklist(d) {
         const ts = d.timestamp ? new Date(d.timestamp * 1000) : new Date();
         tsEl.textContent = 'Sprawdzono: ' + ts.toLocaleTimeString('pl-PL');
     }
+
+    // Automatycznie sprawdź aktualizacje (z lekkim opóźnieniem)
+    setTimeout(() => {
+        const updateBox = document.getElementById('updateStatusText');
+        if (updateBox && updateBox.textContent.includes('Sprawdzam')) {
+            checkForUpdates();
+        }
+    }, 1200);
 }
 
 // Pomocnicze funkcje do generowania szczegółów
@@ -4150,6 +4158,91 @@ function copyDiagnostics() {
         // Fallback
         prompt('Skopiuj poniższy tekst:', text);
     });
+}
+
+// ============================================================
+// SELF-UPDATE (sprawdzanie i aktualizacja z GitHub)
+// ============================================================
+
+let _updateData = null;
+
+function checkForUpdates() {
+    const statusEl = document.getElementById('updateStatusText');
+    const btnUpdate = document.getElementById('btnUpdateNow');
+    const btnRestart = document.getElementById('btnRestartAfterUpdate');
+    const resultBox = document.getElementById('updateResultBox');
+
+    statusEl.textContent = 'Sprawdzam GitHub...';
+    btnUpdate.style.display = 'none';
+    btnRestart.style.display = 'none';
+    resultBox.textContent = '';
+
+    fetch('/api/update/status')
+        .then(r => r.json())
+        .then(d => {
+            _updateData = d;
+            if (!d.success) {
+                statusEl.textContent = 'Błąd sprawdzania aktualizacji';
+                return;
+            }
+
+            const local = d.local_version || '?';
+            const remote = d.remote_version || '?';
+
+            if (d.update_available) {
+                statusEl.innerHTML = `<span style="color:#b45309;">Nowa wersja dostępna!</span><br>Lokalna: <strong>${local}</strong> → Zdalna: <strong>${remote}</strong>`;
+                btnUpdate.style.display = 'inline-block';
+            } else {
+                statusEl.innerHTML = `Jesteś na najnowszej wersji (<strong>${local}</strong>)`;
+            }
+        })
+        .catch(() => {
+            statusEl.textContent = 'Nie udało się sprawdzić aktualizacji (sprawdź połączenie z internetem)';
+        });
+}
+
+function performUpdate() {
+    const resultBox = document.getElementById('updateResultBox');
+    const btnUpdate = document.getElementById('btnUpdateNow');
+    const btnRestart = document.getElementById('btnRestartAfterUpdate');
+
+    resultBox.textContent = 'Pobieranie aktualizacji...';
+    btnUpdate.disabled = true;
+
+    fetch('/api/update/pull', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                resultBox.innerHTML = `<span style="color:#166534;">✓ ${d.message || 'Zaktualizowano.'}</span>`;
+                btnRestart.style.display = 'inline-block';
+            } else {
+                resultBox.innerHTML = `<span style="color:#991b1b;">Błąd: ${d.error || d.message}</span>`;
+            }
+            btnUpdate.disabled = false;
+        })
+        .catch(() => {
+            resultBox.textContent = 'Błąd sieci podczas aktualizacji.';
+            btnUpdate.disabled = false;
+        });
+}
+
+function restartAfterUpdate() {
+    const resultBox = document.getElementById('updateResultBox');
+    resultBox.textContent = 'Restartowanie aplikacji...';
+
+    fetch('/api/update/restart', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                resultBox.innerHTML = `<span style="color:#166534;">✓ ${d.message}</span><br>Strona powinna się odświeżyć automatycznie...`;
+                setTimeout(() => window.location.reload(), 2500);
+            } else {
+                resultBox.innerHTML = `<span style="color:#b45309;">${d.message}</span><br>Uruchom ręcznie: <code>./restart-app.sh --user</code>`;
+            }
+        })
+        .catch(() => {
+            resultBox.innerHTML = `Nie udało się zrestartować automatycznie.<br>Użyj: <code>./restart-app.sh --user</code>`;
+        });
 }
 
 // --- LLM Config panel ---
@@ -4358,6 +4451,23 @@ window.onload = function() {
                 </div>
             </div>
             <pre id="svcLogsBox" style="display:none;margin-top:10px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:10px;border-radius:6px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+        </div>
+
+        <!-- Sekcja: Aktualizacje -->
+        <div style="margin-top:14px;padding-top:12px;border-top:1px solid #e5e7eb;">
+            <div style="font-weight:600;font-size:0.88rem;color:#374151;margin-bottom:8px;">Aktualizacje</div>
+
+            <div id="updateStatusBox" style="font-size:0.85rem;margin-bottom:8px;">
+                <span id="updateStatusText">Sprawdzam aktualizacje...</span>
+            </div>
+
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button id="btnCheckUpdate" class="btn btn-sm btn-outline-primary" onclick="checkForUpdates()">Sprawdź aktualizacje</button>
+                <button id="btnUpdateNow" class="btn btn-sm btn-success" style="display:none;" onclick="performUpdate()">Pobierz aktualizację</button>
+                <button id="btnRestartAfterUpdate" class="btn btn-sm btn-warning" style="display:none;" onclick="restartAfterUpdate()">Zrestartuj aplikację</button>
+            </div>
+
+            <div id="updateResultBox" style="margin-top:6px;font-size:0.8rem;color:#555;"></div>
         </div>
 
         <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;">

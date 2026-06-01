@@ -106,6 +106,101 @@ def _get_app_version() -> str:
 APP_VERSION = _get_app_version()
 
 _ACTIVE_COLLECTION_FILE = Path(__file__).parent / ".active_collection"
+
+
+# ============================================================
+# UPDATE / SELF-UPDATE HELPERS (for local development)
+# ============================================================
+
+def _get_remote_latest_tag() -> str | None:
+    """Pobiera najnowszy tag z origin (z GitHub)."""
+    try:
+        # Pobierz listę tagów z remote bez pełnego fetcha (szybkie)
+        out = subprocess.check_output(
+            ["git", "ls-remote", "--tags", "--sort=-v:refname", "origin"],
+            cwd=Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+        lines = out.decode().strip().splitlines()
+        for line in lines:
+            # Format: <sha>    refs/tags/v2026.08
+            if "refs/tags/" in line:
+                tag = line.split("refs/tags/")[-1].strip()
+                # Pomijamy annotated tag pointers (kończą się na ^{})
+                if not tag.endswith("^{}"):
+                    return tag
+        return None
+    except Exception:
+        return None
+
+
+def _get_local_latest_tag() -> str:
+    """Zwraca aktualny lokalny tag (lub commit jeśli nie ma tagu)."""
+    try:
+        out = subprocess.check_output(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return out.decode().strip()
+    except Exception:
+        try:
+            out = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=Path(__file__).parent,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            return out.decode().strip()
+        except Exception:
+            return "unknown"
+
+
+def _git_pull() -> dict:
+    """Wykonuje git pull origin master i zwraca wynik."""
+    try:
+        out = subprocess.run(
+            ["git", "pull", "origin", "master"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return {
+            "success": out.returncode == 0,
+            "stdout": out.stdout.strip(),
+            "stderr": out.stderr.strip(),
+        }
+    except Exception as e:
+        return {"success": False, "stdout": "", "stderr": str(e)}
+
+
+def _try_restart_service() -> dict:
+    """
+    Próbuje zrestartować aplikację.
+    Najpierw próbuje user service, potem zwraca instrukcję.
+    """
+    try:
+        # Najpierw spróbuj user service (najczęstszy przypadek)
+        result = subprocess.run(
+            ["systemctl", "--user", "restart", "ai_analiza"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return {"success": True, "method": "user-service", "message": "Usługa użytkownika zrestartowana."}
+    except Exception:
+        pass
+
+    # Fallback – nie możemy łatwo zrestartować samego siebie
+    return {
+        "success": False,
+        "method": "manual",
+        "message": "Kod zaktualizowany. Zrestartuj aplikację ręcznie (np. ./restart-app.sh --user)."
+    }
 ALLOWED_DOC_EXTENSIONS = frozenset(
     {"docx", "pdf", "xlsx", "xls", "csv", "md", "json", "txt"}
 )
@@ -4422,6 +4517,64 @@ def service_restart():
 
     threading.Thread(target=_do_restart, daemon=True).start()
     return jsonify({"success": True, "msg": "Restart zlecony"})
+
+
+# ============================================================
+# SELF-UPDATE ENDPOINTS (sprawdzanie i aktualizacja z GitHub)
+# ============================================================
+
+@app.route('/api/update/status', methods=['GET'])
+def api_update_status():
+    """Zwraca informację czy dostępna jest nowsza wersja na GitHubie."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    local_tag = _get_local_latest_tag()
+    remote_tag = _get_remote_latest_tag()
+
+    update_available = False
+    if remote_tag and local_tag:
+        # Proste porównanie semantyczne (działa dla v2026.xx)
+        def version_key(v):
+            try:
+                return tuple(int(x) for x in v.lstrip('v').split('.'))
+            except Exception:
+                return (0, 0)
+
+        update_available = version_key(remote_tag) > version_key(local_tag)
+
+    return jsonify({
+        "success": True,
+        "local_version": local_tag,
+        "remote_version": remote_tag,
+        "update_available": update_available,
+        "message": "Nowa wersja dostępna" if update_available else "Jesteś na najnowszej wersji"
+    })
+
+
+@app.route('/api/update/pull', methods=['POST'])
+def api_update_pull():
+    """Pobiera najnowszy kod z GitHub (git pull)."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    result = _git_pull()
+    return jsonify({
+        "success": result["success"],
+        "output": result["stdout"],
+        "error": result["stderr"],
+        "message": "Kod zaktualizowany. Zalecany restart aplikacji." if result["success"] else "Błąd podczas aktualizacji."
+    })
+
+
+@app.route('/api/update/restart', methods=['POST'])
+def api_update_restart():
+    """Próbuje zrestartować aplikację po aktualizacji."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    result = _try_restart_service()
+    return jsonify(result)
 
 
 if __name__ == '__main__':

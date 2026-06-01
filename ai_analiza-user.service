@@ -1,0 +1,43 @@
+[Unit]
+Description=AI Analiza Dokumentów (User Service)
+After=network.target
+
+[Service]
+Type=simple
+
+# Working directory
+WorkingDirectory=%h/projects/AI_analiza_dokumentow
+
+# Use the project's virtual environment + make logs unbuffered
+Environment="PATH=%h/projects/AI_analiza_dokumentow/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+# Load all variables from .env file (very elegant for user services)
+EnvironmentFile=%h/projects/AI_analiza_dokumentow/.env
+
+# Start using waitress (production WSGI server) - recommended for normal use
+# 
+# For pure development you can temporarily change this line to:
+# ExecStart=%h/projects/AI_analiza_dokumentow/venv/bin/python app.py
+ExecStart=%h/projects/AI_analiza_dokumentow/venv/bin/python -m waitress \
+    --listen=0.0.0.0:5000 \
+    --threads=6 \
+    --url-scheme=http \
+    --ident="ai-analiza" \
+    wsgi:app
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Resource limits (adjust as needed)
+MemoryMax=3G
+CPUQuota=300%
+
+# Logging (goes to journalctl --user)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-analiza
+
+[Install]
+WantedBy=default.target

@@ -304,6 +304,53 @@ Skrypt VBScript w folderze Windows Startup budzi WSL2 i uruchamia Ollama przy lo
 
 ---
 
+## Uruchamianie jako użytkownik (systemd --user) – zalecane
+
+Dla większości osób pracujących na WSL lub laptopie najlepszym rozwiązaniem jest **usługa użytkownika** (nie wymaga uprawnień roota).
+
+### Instalacja
+
+```bash
+# 1. Skopiuj plik usługi
+mkdir -p ~/.config/systemd/user
+cp ai_analiza-user.service ~/.config/systemd/user/ai_analiza.service
+
+# 2. Przeładuj i włącz usługę
+systemctl --user daemon-reload
+systemctl --user enable --now ai_analiza
+
+# 3. (Opcjonalnie) Uruchamiaj usługę nawet po wylogowaniu
+loginctl enable-linger $USER
+```
+
+### Zarządzanie
+
+```bash
+systemctl --user status ai_analiza          # status
+journalctl --user -u ai_analiza -f          # logi na żywo
+systemctl --user restart ai_analiza         # restart
+systemctl --user stop ai_analiza            # stop
+```
+
+### Wygodny skrypt
+
+W repozytorium znajduje się skrypt `restart-app.sh`, który obsługuje obie metody:
+
+```bash
+./restart-app.sh                 # klasyczny nohup
+./restart-app.sh --user          # systemd user service (zalecane)
+./restart-app.sh --user --stop   # zatrzymaj user service
+```
+
+### Różnice
+
+| Sposób              | Zalety                              | Wady                          |
+|---------------------|-------------------------------------|-------------------------------|
+| `nohup`             | Bardzo prosty                       | Brak automatycznego restartu  |
+| `systemd --user`    | Restart przy błędzie, logi, auto-start | Trochę więcej konfiguracji   |
+
+---
+
 ## Produkcja (Waitress + systemd)
 
 Zamiast Flask dev servera użyj **Waitress** i jednostki `ai_analiza.service`:
