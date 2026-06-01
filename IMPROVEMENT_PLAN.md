@@ -232,7 +232,7 @@ Te zmiany znacząco podnoszą poziom „produkcyjności” lokalnego środowiska
 ## Zrealizowane – v2026.11 (dokumentacja, sieć D3, poprawki)
 
 - **README / .env.example / AGENTS.md** — aktualizacja pod Detektywa, self-update, diagnostykę, sieć, Excel
-- **Sieć D3**: zatrzymywanie poprzedniej symulacji, tooltips po zoom, suwak siły 1–12, filtr samotnych węzłów, eksport SVG, responsywna wysokość
+- **Sieć D3**: zatrzymywanie poprzedniej symulacji, tooltips po zoom, suwak siły 1–12, filtr samotnych węzłów, eksport SVG/CSV, responsywna wysokość, panel hubów + briefing AI, wyszukiwarka węzłów, SSE postępu partii
 - **Bugfix**: `fetchHealth` → `updateHealthStatus` po przełączeniu Qdrant
 - **Bugfix**: `/health` — `embedding.ok` zawsze z Ollama (nawet przy OpenRouter chat)
 - **Bugfix**: `systemctl --user` w statusie/restartcie usługi
@@ -287,5 +287,11 @@ Na prośbę użytkownika przeprowadzono pełną końcową recenzję kodu całej 
 - Przeprowadzono końcową pełną recenzję kodu i naprawiono pozostałości po wcześniejszych refaktoryzacjach.
 
 **Data zakończenia recenzji:** 01 czerwca 2026
+
+### Sieć powiązań — naprawa i rozbudowa (czerwiec 2026, v2026.12)
+
+- **Bugfix**: `/network` zwracał HTML/404 zamiast danych — brak `return Response(SSE)`; frontend parsował HTML jako JSON (`Unexpected token '<'`).
+- **Backend**: pełny prompt ekstrakcji encji, przetwarzanie partiami (5 dokumentów), `_aggregate_network_edges()`, `_network_graph_stats()`, `_network_ai_briefing()`.
+- **Frontend**: `streamSSEPost()` + `fetchJson()`, pasek postępu SSE, panel analityczny (huby, typy, daty), briefing AI, wyszukiwarka węzłów, eksport CSV, 2 nowe scenariusze (niespójności, powiązania kapitałowe).
 
 Wszystkie większe zmiany są udokumentowane w commitach tej sesji.

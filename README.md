@@ -72,11 +72,15 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 
 ### Sieć powiązań / Connection Network
 - LLM wyciąga osoby, firmy, kwoty, umowy i rysuje interaktywny graf (**D3.js force-directed**)
+- **`POST /network`** — strumień SSE (postęp partii po 5 dokumentach) → graf + statystyki + opcjonalny **briefing AI**
+- Panel analityczny: kluczowe węzły (huby), rozkład typów encji, zakres dat, silne relacje
 - Filtry: typ węzła, min. siła relacji (1–12), typ relacji, ukrywanie samotnych węzłów
-- Zoom/pan, przeciąganie węzłów, panel dowodów przy kliknięciu krawędzi, eksport **SVG**
+- Wyszukiwarka węzłów (podświetlanie na grafie), zoom/pan, przeciąganie węzłów
+- Panel dowodów przy kliknięciu krawędzi, eksport **SVG** i **CSV** relacji
+- Gotowe scenariusze (umowy, przepływy, przetargi, niespójności, powiązania kapitałowe)
 - Kolory krawędzi: finanse / zatrudnienie / przetarg / decyzja — grubość ∝ siła powiązania (liczba dowodów)
 
-*D3.js graph · filters · evidence panel · SVG export · strength 1–12.*
+*D3.js graph · SSE progress · AI briefing · hub stats · filters · evidence panel · SVG/CSV export · strength 1–12.*
 
 ### Zarządzanie bazą / Collection Management
 - Wiele kolekcji — tworzenie, przełączanie, statystyki zużycia
