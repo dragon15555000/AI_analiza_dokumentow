@@ -1305,7 +1305,7 @@ let healthInterval = null;
 function updateHealthStatus() {
     if (typeof isHeavyVectorizing !== 'undefined' && isHeavyVectorizing) return;
 
-    fetch('/health')
+    fetch('/health?light=1')
         .then(r => r.json())
         .then(d => {
             if (!d.success) return;
@@ -2767,6 +2767,7 @@ function executeImport() {
     const stopBtn = document.getElementById('importStopBtn');
 
     btn.disabled = true;
+    isHeavyVectorizing = true;
     if (stopBtn) stopBtn.style.display = '';
     wrap.style.display = '';
     done.classList.add('d-none');
@@ -2805,6 +2806,7 @@ function executeImport() {
                 if (sseController) sseController.close();
                 if (stopBtn) stopBtn.style.display = 'none';
                 btn.disabled = false;
+                isHeavyVectorizing = false;
                 bar.style.width = '100%';
                 bar.classList.remove('progress-bar-animated');
                 lbl.textContent = 'Zakończono';
@@ -2820,6 +2822,7 @@ function executeImport() {
                 if (sseController) sseController.close();
                 if (stopBtn) stopBtn.style.display = 'none';
                 btn.disabled = false;
+                isHeavyVectorizing = false;
             }
         });
     };
@@ -2828,6 +2831,7 @@ function executeImport() {
     startStream().catch(err => {
         log.innerHTML += `<div style="color:#fc8181;">❌ Nie udało się rozpocząć importu: ${err.message}</div>`;
         btn.disabled = false;
+        isHeavyVectorizing = false;
         if (stopBtn) stopBtn.style.display = 'none';
     });
 
@@ -2836,6 +2840,7 @@ function executeImport() {
         if (sseController) sseController.close();
         if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
+        isHeavyVectorizing = false;
         lbl.textContent = 'Anulowano przez użytkownika';
         log.innerHTML += `<div style="color:#f59e0b;">⏹ Operacja anulowana.</div>`;
     };
@@ -4586,6 +4591,7 @@ function sqlVectorize() {
     prog.classList.remove('d-none');
     bar.style.width = '0%';
     log.textContent = 'Startowanie...';
+    isHeavyVectorizing = true;
 
     const controller = new AbortController();
 
@@ -4594,6 +4600,7 @@ function sqlVectorize() {
         stopBtn.onclick = () => {
             controller.abort();
             if (stopBtn) stopBtn.style.display = 'none';
+            isHeavyVectorizing = false;
             log.innerHTML += `<br><span style="color:#f59e0b;">⏹ Wektoryzacja anulowana.</span>`;
         };
     }
@@ -4628,15 +4635,18 @@ function sqlVectorize() {
                         bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
                         log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
                         if (stopBtn) stopBtn.style.display = 'none';
+                        isHeavyVectorizing = false;
                         updateStats(); allDocs = [];
                     } else if (ev.error) {
                         log.innerHTML += `<br><span style="color:red;">❌ ${escapeHtml(ev.error)}</span>`;
                         if (stopBtn) stopBtn.style.display = 'none';
+                        isHeavyVectorizing = false;
                     }
                 } catch(e) {}
             }
         }
-    });
+    })
+    .catch(() => { isHeavyVectorizing = false; if (stopBtn) stopBtn.style.display = 'none'; });
 }
 
 function sqlVectorizeAll() {
