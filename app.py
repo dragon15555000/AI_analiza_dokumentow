@@ -2542,7 +2542,7 @@ def _discover_local_drives():
             for letter in string.ascii_uppercase:
                 p = Path(f"{letter}:\\")
                 status, accessible = check_access(str(p))
-                if accessible:
+                if p.exists():  # Pokaż dysk jeśli istnieje, niezależnie od dostępności
                     drives.append({
                         "path": str(p),
                         "label": f"{letter}: {status}",
@@ -2605,13 +2605,13 @@ def _discover_local_drives():
                     drive_path = mnt / letter
                     if not any(d["path"] == str(drive_path) for d in wsl_drives):
                         status, accessible = check_access(str(drive_path))
-                        if accessible:
+                        if drive_path.exists():  # Pokaż dysk jeśli istnieje, niezależnie od dostępności
                             wsl_drives.append({
                                 "path": str(drive_path),
                                 "label": f"{letter.upper()}: (Win) {status}",
                                 "kind": "wsl",
                                 "icon": "🪟",
-                                "accessible": True
+                                "accessible": accessible
                             })
 
             drives.extend(wsl_drives)
