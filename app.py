@@ -257,11 +257,110 @@ def _fetch_sql_known_tables(cfg: dict) -> set[str]:
     return known
 
 
-def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
-    """Buduje opis schematu z INFORMATION_SCHEMA (MS SQL) lub PRAGMA/sqlite_master (SQLite)."""
+SQL_ROW_LIMIT = 100
+SQL_CORRECTION_MAX_RETRIES = 2
+SQL_SCHEMA_MAX_TABLES = 50
+SQL_SCHEMA_MAX_SAMPLES = 5
+SQL_SAMPLE_VALUE_TYPES = frozenset({
+    "date", "datetime", "datetime2", "smalldatetime", "timestamp", "time",
+    "datetimeoffset", "text", "ntext", "varchar", "nvarchar", "char", "nchar",
+})
+
+
+def _sql_limit_instruction(dialect: str) -> str:
+    if dialect == "mssql":
+        return f"ZAWSZE używaj TOP {SQL_ROW_LIMIT} (np. SELECT TOP {SQL_ROW_LIMIT} ...)."
+    return f"ZAWSZE dodaj LIMIT {SQL_ROW_LIMIT} na końcu zapytania."
+
+
+def _ensure_sql_row_limit(sql_query: str, dialect: str, limit: int = SQL_ROW_LIMIT) -> str:
+    sql = (sql_query or "").strip()
+    if not sql:
+        return sql
+    upper = sql.upper()
+    if dialect == "mssql":
+        if re.search(r"\bTOP\s+\d+", upper):
+            return sql
+        idx = upper.rfind("SELECT")
+        if idx < 0:
+            return sql
+        prefix, rest = sql[:idx], sql[idx:]
+        rest = re.sub(
+            r"(?i)^SELECT\s+(DISTINCT\s+)?",
+            lambda m: f"SELECT {m.group(1) or ''}TOP {limit} ",
+            rest,
+            count=1,
+        )
+        return prefix + rest
+    if re.search(r"\bLIMIT\s+\d+", upper):
+        return sql
+    return f"{sql.rstrip(';').strip()} LIMIT {limit}"
+
+
+def _sql_fetch_column_sample(
+    conn, table: str, col: str, col_type: str, dialect: str,
+) -> str | None:
+    ct = (col_type or "").lower().split("(")[0].strip()
+    should_sample = (
+        ct in SQL_SAMPLE_VALUE_TYPES
+        or "date" in ct
+        or "time" in ct
+    )
+    if not should_sample:
+        return None
+    qtable = _sql_quote_ident(table, dialect)
+    qcol = _sql_quote_ident(col, dialect)
+    cur = conn.cursor()
+    try:
+        if dialect == "mssql":
+            cur.execute(
+                f"SELECT TOP 1 CAST({qcol} AS NVARCHAR(200)) AS v "
+                f"FROM {qtable} WHERE {qcol} IS NOT NULL"
+            )
+        else:
+            cur.execute(
+                f"SELECT CAST({qcol} AS TEXT) AS v "
+                f"FROM {qtable} WHERE {qcol} IS NOT NULL LIMIT 1"
+            )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        val = str(row[0]).strip()
+        return val[:80] if val else None
+    except Exception:
+        return None
+    finally:
+        cur.close()
+
+
+def _sql_table_column_samples(
+    conn, table: str, col_parts: list[str], dialect: str,
+    max_samples: int = SQL_SCHEMA_MAX_SAMPLES,
+) -> str:
+    """Próbki wartości tylko dla kolumn dat/tekst (max N na tabelę — bez skanowania wszystkich kolumn)."""
+    samples: list[str] = []
+    for part in col_parts:
+        if len(samples) >= max_samples:
+            break
+        m = re.match(r"([\w]+)\s+\(([^)]+)\)", part)
+        if not m:
+            continue
+        col, ctype = m.group(1), m.group(2)
+        val = _sql_fetch_column_sample(conn, table, col, ctype, dialect)
+        if val:
+            samples.append(f'{col} np. "{val}"')
+    return "; ".join(samples)
+
+
+def _build_sql_schema_entries(
+    cfg: dict,
+    max_tables: int = SQL_SCHEMA_MAX_TABLES,
+    include_samples: bool = True,
+) -> list[dict]:
+    """Pojedyncze wpisy schematu (tabela → tekst) z opcjonalnymi próbkami wartości."""
     dialect = _sql_dialect(cfg)
     conn = _get_sql_conn(cfg)
-    lines: list[str] = []
+    entries: list[dict] = []
     try:
         cur = conn.cursor()
         if dialect == "sqlite":
@@ -279,18 +378,24 @@ def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
                     ORDER BY name LIMIT ?
                 """, (max_tables,))
                 for name, ttype in cur.fetchall():
-                    lines.append(f"Tabela: {name} ({ttype})")
+                    entries.append({
+                        "table": name,
+                        "text": f"Tabela: {name} ({ttype})",
+                    })
             else:
                 for name, ddl in table_rows:
                     cur.execute(f'PRAGMA table_info("{name}")')
-                    cols = [f"{r[1]} ({r[2]})" for r in cur.fetchall()]
+                    col_rows = cur.fetchall()
+                    cols = [f"{r[1]} ({r[2]})" for r in col_rows]
                     col_txt = ", ".join(cols[:25]) + (" …" if len(cols) > 25 else "")
-                    if col_txt:
-                        lines.append(f"Tabela: {name}\nKolumny: {col_txt}")
-                    elif ddl:
-                        lines.append(f"Tabela: {name}\nDDL: {ddl[:400]}")
-                    else:
-                        lines.append(f"Tabela: {name}")
+                    text = f"Tabela: {name}\nKolumny: {col_txt}" if col_txt else f"Tabela: {name}"
+                    if include_samples and col_txt:
+                        samp = _sql_table_column_samples(conn, name, cols[:25], dialect)
+                        if samp:
+                            text += f"\nPrzykładowe wartości: {samp}"
+                    elif ddl and not col_txt:
+                        text = f"Tabela: {name}\nDDL: {ddl[:400]}"
+                    entries.append({"table": name, "text": text})
         else:
             row_limit = max(100, min(max_tables * 40, 4000))
             cur.execute(f"""
@@ -319,24 +424,41 @@ def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
                 """)
                 for schema_name, table_name, table_type in cur.fetchall()[:max_tables]:
                     key = _format_table_key(schema_name, table_name)
-                    lines.append(f"Tabela: {key} ({table_type})")
+                    entries.append({
+                        "table": key,
+                        "text": f"Tabela: {key} ({table_type})",
+                    })
             else:
                 for key in sorted(grouped.keys()):
-                    cols = ", ".join(grouped[key][:25])
-                    extra = " …" if len(grouped[key]) > 25 else ""
-                    lines.append(f"Tabela: {key}\nKolumny: {cols}{extra}")
+                    cols = grouped[key]
+                    col_txt = ", ".join(cols[:25]) + (" …" if len(cols) > 25 else "")
+                    text = f"Tabela: {key}\nKolumny: {col_txt}"
+                    if include_samples:
+                        table_only = key.split(".")[-1]
+                        samp = _sql_table_column_samples(conn, table_only, cols[:25], dialect)
+                        if samp:
+                            text += f"\nPrzykładowe wartości: {samp}"
+                    entries.append({"table": key, "text": text})
     finally:
         conn.close()
+    return entries
 
+
+def _format_sql_schema_text(entries: list[dict]) -> str:
     header = (
         "UWAGA: Używaj WYŁĄCZNIE poniższych tabel i kolumn. "
         "Nie wymyślaj nazw, jeśli ich nie ma na liście.\n"
     )
-    return header + "\n".join(lines)
+    return header + "\n".join(e["text"] for e in entries)
+
+
+def _build_auto_sql_schema(cfg: dict, max_tables: int = SQL_SCHEMA_MAX_TABLES) -> str:
+    entries = _build_sql_schema_entries(cfg, max_tables=max_tables, include_samples=True)
+    return _format_sql_schema_text(entries)
 
 
 def _resolve_sql_schema(cfg: dict, user_schema: str) -> tuple[str, set[str]]:
-    """Łączy schemat z UI z automatycznym pobraniem z bazy."""
+    """Łączy schemat z UI z automatycznym pobraniem z bazy (INFORMATION_SCHEMA + próbki)."""
     known = _fetch_sql_known_tables(cfg)
     user_schema = (user_schema or "").strip()
     if user_schema and "Kolumny:" in user_schema:
@@ -346,6 +468,167 @@ def _resolve_sql_schema(cfg: dict, user_schema: str) -> tuple[str, set[str]]:
         merged = f"{user_schema}\n\n--- Pełny schemat z bazy ---\n{auto}"
         return merged, known
     return _build_auto_sql_schema(cfg), known
+
+
+def _is_numeric_sql_value(val) -> bool:
+    s = str(val or "").strip().replace(",", ".").replace(" ", "")
+    if not s:
+        return False
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _build_sql_chart_config(columns: list[str], rows: list[dict]) -> dict | None:
+    """Heurystyka: wykres słupkowy/kołowy/liniowy dla wyników agregacji."""
+    if not rows or len(columns) < 2 or len(rows) > 50:
+        return None
+
+    label_col = None
+    value_col = None
+    for col in columns:
+        samples = [rows[i].get(col, "") for i in range(min(5, len(rows)))]
+        non_empty = [s for s in samples if str(s).strip()]
+        if non_empty and all(_is_numeric_sql_value(v) for v in non_empty):
+            if value_col is None:
+                value_col = col
+        elif label_col is None:
+            label_col = col
+
+    if (not label_col or not value_col) and len(columns) >= 2:
+        if all(_is_numeric_sql_value(rows[i].get(columns[1], "")) for i in range(min(5, len(rows)))):
+            label_col, value_col = columns[0], columns[1]
+
+    if not label_col or not value_col or label_col == value_col:
+        return None
+
+    labels = [str(r.get(label_col, ""))[:40] for r in rows]
+    data: list[float] = []
+    for r in rows:
+        try:
+            data.append(float(str(r.get(value_col, "")).replace(",", ".").replace(" ", "")))
+        except ValueError:
+            data.append(0.0)
+
+    chart_type = "bar"
+    if 2 <= len(labels) <= 8:
+        chart_type = "pie"
+    label_blob = " ".join(labels[:3]).lower()
+    if any(x in label_blob for x in ("202", "201", "-01", "-02", "sty", "lut", "mar", "kwi")):
+        chart_type = "line"
+
+    return {
+        "type": chart_type,
+        "title": f"{value_col} wg {label_col}",
+        "labels": labels,
+        "datasets": [{"label": value_col, "data": data}],
+    }
+
+
+def _run_text_to_sql_pipeline(
+    cfg: dict,
+    question: str,
+    schema_str: str = "",
+    fetch_limit: int = 500,
+    with_chart: bool = True,
+) -> dict:
+    """Text-to-SQL z auto-korektą, LIMIT/TOP, schematem z próbkami i opcjonalnym wykresem."""
+    dialect = _sql_dialect(cfg)
+    dialect_label = _sql_llm_dialect_label(dialect)
+    effective_schema, known_tables = _resolve_sql_schema(cfg, schema_str)
+
+    limit_hint = _sql_limit_instruction(dialect)
+    system_sql = (
+        f"Jesteś ekspertem SQL ({dialect_label}). "
+        "Generujesz wyłącznie zapytania SELECT (nigdy DELETE/UPDATE/DROP). "
+        f"{limit_hint} "
+        "Używaj formatów dat widocznych w przykładowych wartościach schematu. "
+        "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+    )
+
+    sql_query = ""
+    last_error = ""
+    corrections = 0
+
+    for attempt in range(SQL_CORRECTION_MAX_RETRIES + 1):
+        if attempt == 0:
+            prompt_sql = (
+                f"SCHEMAT BAZY:\n{effective_schema}\n\n"
+                f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
+                f"Wygeneruj zapytanie SQL ({dialect_label}):"
+            )
+        else:
+            corrections = attempt
+            prompt_sql = (
+                f"SCHEMAT BAZY:\n{effective_schema}\n\n"
+                f"PYTANIE: {question}\n\n"
+                f"Twoje poprzednie zapytanie:\n{sql_query}\n\n"
+                f"Serwer bazy zwrócił błąd:\n{last_error}\n\n"
+                "Popraw zapytanie SQL. Zwróć WYŁĄCZNIE poprawiony kod SQL:"
+            )
+
+        sql_response = call_llm(
+            prompt_sql, system_sql, stream=False, max_tokens=2000, temperature=0.1,
+        )
+        sql_query = _clean_llm_sql(_llm_response_text(sql_response))
+        sql_query = _ensure_sql_row_limit(sql_query, dialect)
+
+        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
+        if first_word not in ("SELECT", "WITH"):
+            last_error = f"Niedozwolone polecenie: {first_word}"
+            if attempt >= SQL_CORRECTION_MAX_RETRIES:
+                break
+            continue
+
+        is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
+        if not is_safe:
+            last_error = safe_err or "Niedozwolone zapytanie SQL"
+            if attempt >= SQL_CORRECTION_MAX_RETRIES:
+                break
+            continue
+
+        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
+        if not ok_tables:
+            last_error = table_err or "Nieznane tabele w SQL"
+            if attempt >= SQL_CORRECTION_MAX_RETRIES:
+                break
+            continue
+
+        try:
+            conn = _get_sql_conn(cfg, readonly=True)
+            cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
+            cur.execute(sql_query)
+            result_rows = _sql_rows_to_dicts(cur, fetch_limit)
+            cols = list(result_rows[0].keys()) if result_rows else []
+            conn.close()
+
+            out: dict = {
+                "success": True,
+                "sql": sql_query,
+                "columns": cols,
+                "rows": result_rows,
+                "total": len(result_rows),
+                "truncated": len(result_rows) == fetch_limit,
+                "sql_corrections": corrections,
+            }
+            if with_chart:
+                chart = _build_sql_chart_config(cols, result_rows)
+                if chart:
+                    out["chart"] = chart
+            return out
+        except Exception as e:
+            last_error = str(e)
+            if attempt >= SQL_CORRECTION_MAX_RETRIES:
+                break
+
+    return {
+        "success": False,
+        "error": last_error or "Nie udało się wygenerować poprawnego SQL",
+        "sql": sql_query,
+        "sql_corrections": corrections,
+    }
 
 
 # ============================================================
@@ -2928,51 +3211,25 @@ def hybrid_stream():
                     sql_data["error"] = str(e)
                 else:
                     try:
-                        dialect = _sql_dialect(conn_cfg)
-                        effective_schema, known_tables = _resolve_sql_schema(conn_cfg, schema_str)
-                        dialect_label = _sql_llm_dialect_label(dialect)
-
-                        system_sql = (
-                            f"Jesteś ekspertem SQL ({dialect_label}). "
-                            "Na podstawie schematu bazy generujesz zapytania SELECT. "
-                            "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
-                            "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+                        result = _run_text_to_sql_pipeline(
+                            conn_cfg, query_text, schema_str,
+                            fetch_limit=200, with_chart=False,
                         )
-                        prompt_sql = (
-                            f"SCHEMAT BAZY:\n{effective_schema}\n\n"
-                            f"PYTANIE: {query_text}\n\n"
-                            f"Wygeneruj zapytanie SELECT ({dialect_label}):"
-                        )
-                        sql_response = call_llm(prompt_sql, system_sql, stream=False, max_tokens=2000, temperature=0.1)
-                        sql_query = _clean_llm_sql(_llm_response_text(sql_response))
-
-                        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
-                        if first_word not in ("SELECT", "WITH"):
-                            sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
+                        if result.get("success"):
+                            sql_query = result.get("sql", "")
+                            sql_data = {
+                                "success": True,
+                                "table": "wynik SQL",
+                                "columns": result.get("columns", []),
+                                "rows": result.get("rows", []),
+                                "sql": sql_query[:120],
+                                "total": result.get("total", 0),
+                                "sql_corrections": result.get("sql_corrections", 0),
+                            }
                         else:
-                            is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
-                            if not is_safe:
-                                sql_data["error"] = safe_err or "Niedozwolone zapytanie SQL"
-                            else:
-                                ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
-                                if not ok_tables:
-                                    sql_data["error"] = table_err or "Nieznane tabele w SQL"
-                                else:
-                                    conn = _get_sql_conn(conn_cfg, readonly=True)
-                                    cur  = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
-                                    cur.execute(sql_query)
-                                    result_rows = _sql_rows_to_dicts(cur, 200)
-                                    cols = list(result_rows[0].keys()) if result_rows else []
-
-                                    sql_data = {
-                                        "success": True,
-                                        "table": "wynik SQL",
-                                        "columns": cols,
-                                        "rows": result_rows,
-                                        "sql": sql_query[:120],
-                                        "total": len(result_rows)
-                                    }
-                                    conn.close()
+                            sql_data["error"] = (result.get("error") or "Błąd SQL")[:200]
+                            if result.get("sql"):
+                                sql_data["sql"] = result["sql"][:120]
                     except Exception as e:
                         sql_data["error"] = str(e)[:200]
 
@@ -4927,48 +5184,16 @@ def sql_ask():
     if not question:
         return jsonify({"success": False, "error": "Brak pytania"})
 
-    sql_query = ""
     try:
         _require_sql_backend(cfg)
-        dialect = _sql_dialect(cfg)
-        dialect_label = _sql_llm_dialect_label(dialect)
-        effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
-        system_sql = (
-            f"Jesteś ekspertem SQL ({dialect_label}). "
-            "Generujesz wyłącznie zapytania SELECT (nigdy DELETE/UPDATE/DROP). "
-            "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
+        result = _run_text_to_sql_pipeline(
+            cfg, question, schema, fetch_limit=500, with_chart=True,
         )
-        prompt_sql = (
-            f"SCHEMAT BAZY:\n{effective_schema}\n\n"
-            f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
-            f"Wygeneruj zapytanie SQL ({dialect_label}):"
-        )
-        sql_response = call_llm(prompt_sql, system_sql, stream=False, max_tokens=2000, temperature=0.1)
-        sql_query = _clean_llm_sql(_llm_response_text(sql_response))
+        if not result.get("success"):
+            return jsonify(result)
 
-        first_word = sql_query.split()[0].upper() if sql_query.split() else ""
-        if first_word not in ("SELECT", "WITH"):
-            return jsonify({
-                "success": False,
-                "error": f"LLM wygenerował niedozwolone polecenie: {first_word}",
-                "sql": sql_query,
-            })
-
-        is_safe, safe_err = _is_sql_safe(sql_query, ("SELECT", "WITH"))
-        if not is_safe:
-            return jsonify({"success": False, "error": safe_err or "Niedozwolone zapytanie SQL", "sql": sql_query})
-
-        ok_tables, table_err = _validate_sql_table_refs(sql_query, known_tables)
-        if not ok_tables:
-            return jsonify({"success": False, "error": table_err or "Nieznane tabele w SQL", "sql": sql_query})
-
-        conn = _get_sql_conn(cfg, readonly=True)
-        cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
-        cur.execute(sql_query)
-        result_rows = _sql_rows_to_dicts(cur, 500)
-        cols = list(result_rows[0].keys()) if result_rows else []
-        conn.close()
-
+        sql_query = result["sql"]
+        result_rows = result["rows"]
         preview = "\n".join([
             ", ".join([f"{k}={v}" for k, v in r.items()])
             for r in result_rows[:10]
@@ -4987,19 +5212,10 @@ def sql_ask():
             max_tokens=1500,
             temperature=0.2,
         )
-        interpretation = _llm_response_text(interp)
-
-        return jsonify({
-            "success": True,
-            "sql": sql_query,
-            "columns": cols,
-            "rows": result_rows,
-            "total": len(result_rows),
-            "truncated": len(result_rows) == 500,
-            "interpretation": interpretation,
-        })
+        result["interpretation"] = _llm_response_text(interp)
+        return jsonify(result)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e), "sql": sql_query})
+        return jsonify({"success": False, "error": str(e), "sql": ""})
 
 
 @app.route('/sql/write', methods=['POST'])

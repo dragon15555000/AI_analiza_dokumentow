@@ -6,6 +6,7 @@
     <title>AI Analiza Dokumentów</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <style>
         body { background: #f0f2f5; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
         .topbar { background: #1a1f36; color: #fff; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
@@ -809,7 +810,7 @@
         <div class="mb-2">
           <label class="form-label small fw-bold mb-1">Ścieżka do pliku .db</label>
           <input type="text" id="sqlDbPath" class="form-control form-control-sm" placeholder="/mnt/g/dane/eksport.db">
-          <small class="text-muted">Plik musi być w katalogu dozwolonym przez SEARCH_ROOTS (np. /mnt/g). Połączenie tylko do odczytu.</small>
+          <small class="text-muted">Ścieżka WSL, np. <code>/mnt/g/Mój dysk/plik.db</code> — Windows <code>G:\...</code> też zadziała. Plik w SEARCH_ROOTS. Tylko odczyt.</small>
         </div>
       </div>
       <div class="d-flex gap-2 mb-2">
@@ -1792,8 +1793,9 @@ function executeSearch() {
     }
 
     // Wybierz endpoint na podstawie połączenia SQL
-    const hasSQL = sqlConnIsConfigured(sqlConn);
+    const hasSQL = sqlConnIsConfigured(getActiveSqlConn());
     const endpoint = hasSQL ? '/hybrid/stream' : '/search/stream';
+    const activeConn = getActiveSqlConn();
     const chatCtx = getChatContext();
     const body = {
         query,
@@ -1802,7 +1804,7 @@ function executeSearch() {
         file_filter: activeFileFilter,
         llm_provider: getCurrentLlmProvider(),
         openrouter_model: getCurrentOpenRouterModel(),
-        ...(hasSQL ? {conn: sqlConn, schema: sqlSchema} : {})
+        ...(hasSQL ? {conn: activeConn, schema: sqlSchema} : {})
     };
 
     fetch(endpoint, {
@@ -2376,7 +2378,7 @@ function renderSqlHybridTable(data) {
     }
 
     div.classList.remove('d-none');
-    infoDiv.textContent = `${data.total} wierszy · SQL: ${data.sql}`;
+    infoDiv.textContent = `${data.total} wierszy · SQL: ${data.sql}${data.sql_corrections ? ' · korekta ' + data.sql_corrections + '×' : ''}`;
 
     const cols = data.columns || [];
     const rows = data.rows || [];
@@ -2386,19 +2388,23 @@ function renderSqlHybridTable(data) {
         return;
     }
 
-    const headerHtml = cols.map(c => `<th style="padding:6px;font-weight:600;border-bottom:2px solid #0dcaf0;font-size:0.8rem;white-space:nowrap;">${c}</th>`).join('');
+    const chartId = 'sqlHybridChartCanvas';
+    const chartBlock = data.chart ? renderSqlChartHtml(data.chart, chartId) : '';
+
+    const headerHtml = cols.map(c => `<th style="padding:6px;font-weight:600;border-bottom:2px solid #0dcaf0;font-size:0.8rem;white-space:nowrap;">${escapeHtml(c)}</th>`).join('');
     const rowsHtml = rows.map(r => {
         const cellsHtml = cols.map(c => {
             const val = r[c] !== undefined ? r[c] : '';
-            return `<td style="padding:4px 6px;border-bottom:1px solid #e9ecef;font-size:0.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;">${val}</td>`;
+            return `<td style="padding:4px 6px;border-bottom:1px solid #e9ecef;font-size:0.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(String(val))}</td>`;
         }).join('');
         return `<tr>${cellsHtml}</tr>`;
     }).join('');
 
-    tableDiv.innerHTML = `<table class="table table-sm table-hover" style="margin:0;font-size:0.85rem;">
+    tableDiv.innerHTML = `${chartBlock}<table class="table table-sm table-hover" style="margin:0;font-size:0.85rem;">
         <thead><tr>${headerHtml}</tr></thead>
         <tbody>${rowsHtml}</tbody>
     </table>`;
+    if (data.chart) mountSqlChart(chartId, data.chart);
 }
 
 function openFile(wslPath) {
@@ -4364,13 +4370,23 @@ function sqlClearConn() {
     }
 }
 
+function normalizeSqlitePath(raw) {
+    raw = (raw || '').trim().replace(/^["']|["']$/g, '');
+    const win = raw.match(/^([A-Za-z]):[\\/](.*)$/);
+    if (win) {
+        return '/mnt/' + win[1].toLowerCase() + '/' + win[2].replace(/\\/g, '/');
+    }
+    return raw;
+}
+
 function getSqlConn() {
     const type = document.getElementById('sqlDbType').value || 'mssql';
     if (type === 'sqlite') {
-        return {
-            type: 'sqlite',
-            db_path: document.getElementById('sqlDbPath').value.trim(),
-        };
+        const db_path = normalizeSqlitePath(document.getElementById('sqlDbPath').value);
+        if (db_path !== document.getElementById('sqlDbPath').value.trim()) {
+            document.getElementById('sqlDbPath').value = db_path;
+        }
+        return { type: 'sqlite', db_path };
     }
     return {
         type: 'mssql',
@@ -4382,15 +4398,38 @@ function getSqlConn() {
     };
 }
 
+/** Zawsze bierze aktualne dane z formularza (nie stary stan po „Połącz”). */
+function getActiveSqlConn() {
+    return getSqlConn();
+}
+
+function validateSqlConn(conn) {
+    if (!sqlConnIsConfigured(conn)) {
+        if (conn.type === 'sqlite') {
+            return 'Podaj ścieżkę do pliku SQLite (.db), np. /mnt/g/dane/eksport.db, i kliknij „Połącz”.';
+        }
+        return 'Uzupełnij serwer i nazwę bazy, potem kliknij „Połącz”.';
+    }
+    return null;
+}
+
 function sqlConnect() {
     const btn = document.getElementById('sqlConnectBtn');
     const st  = document.getElementById('sqlConnectStatus');
+    const conn = getSqlConn();
+    const err = validateSqlConn(conn);
+    if (err) {
+        st.className = 'small alert alert-danger mt-2';
+        st.innerHTML = `❌ ${escapeHtml(err)}`;
+        st.classList.remove('d-none');
+        return;
+    }
     btn.disabled = true;
     st.className = 'small alert alert-warning mt-2';
     st.textContent = 'Łączenie...';
     st.classList.remove('d-none');
 
-    sqlConn = getSqlConn();
+    sqlConn = conn;
     fetch('/sql/test', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(sqlConn)
@@ -4441,7 +4480,7 @@ function filterSqlTables() { renderSqlTableList(sqlTables); }
 function sqlLoadSchema(tableName) {
     fetch('/sql/schema', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, table: tableName})
+        body: JSON.stringify({conn: getActiveSqlConn(), table: tableName})
     })
     .then(r=>r.json())
     .then(d => {
@@ -4475,11 +4514,64 @@ function toggleSqlWriteMode(cb) {
         ? 'btn btn-danger px-4' : 'btn btn-primary px-4';
 }
 
+const _sqlChartInstances = {};
+
+function destroySqlChart(canvasId) {
+    if (_sqlChartInstances[canvasId]) {
+        _sqlChartInstances[canvasId].destroy();
+        delete _sqlChartInstances[canvasId];
+    }
+}
+
+function renderSqlChartHtml(chartConfig, canvasId) {
+    if (!chartConfig || typeof Chart === 'undefined') return '';
+    return `<div style="height:260px;margin-bottom:12px;border:1px solid #e8eaf0;border-radius:8px;padding:10px;background:#fafbff;">
+        <div class="small fw-semibold text-muted mb-1">📊 Wizualizacja</div>
+        <canvas id="${canvasId}" style="max-height:220px;"></canvas></div>`;
+}
+
+function mountSqlChart(canvasId, chartConfig) {
+    if (!chartConfig || typeof Chart === 'undefined') return;
+    destroySqlChart(canvasId);
+    const el = document.getElementById(canvasId);
+    if (!el) return;
+    const type = chartConfig.type || 'bar';
+    const palette = ['#4f46e5','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16'];
+    const datasets = (chartConfig.datasets || []).map(ds => ({
+        label: ds.label || '',
+        data: ds.data || [],
+        backgroundColor: type === 'pie' ? palette : 'rgba(79,70,229,0.75)',
+        borderColor: type === 'line' ? '#4f46e5' : (type === 'pie' ? palette : 'rgba(79,70,229,1)'),
+        borderWidth: type === 'line' ? 2 : 1,
+        tension: 0.25,
+    }));
+    _sqlChartInstances[canvasId] = new Chart(el, {
+        type: type === 'pie' ? 'pie' : (type === 'line' ? 'line' : 'bar'),
+        data: { labels: chartConfig.labels || [], datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: { display: !!chartConfig.title, text: chartConfig.title || '', font: { size: 13 } },
+                legend: { display: type === 'pie', position: 'bottom' },
+            },
+            scales: type === 'pie' ? {} : { y: { beginAtZero: true } },
+        },
+    });
+}
+
+function sqlAskMetaHtml(d) {
+    if (!d.sql_corrections) return '';
+    return `<div class="small text-muted mb-2">🤖 auto-korekta SQL: ${d.sql_corrections}×</div>`;
+}
+
 function sqlAsk() {
     const question  = document.getElementById('sqlQuestion').value.trim();
     const writeMode = document.getElementById('sqlWriteMode').checked;
     if (!question) return;
-    if (!sqlConnIsConfigured(sqlConn)) { alert('Najpierw połącz się z bazą SQL.'); return; }
+    const conn = getActiveSqlConn();
+    const connErr = validateSqlConn(conn);
+    if (connErr) { alert(connErr); return; }
     if (isSqliteMode() && document.getElementById('sqlWriteMode').checked) {
         alert('Tryb zapisu nie jest dostępny dla SQLite (baza tylko do odczytu).');
         return;
@@ -4495,7 +4587,7 @@ function sqlAsk() {
     const endpoint = writeMode ? '/sql/write' : '/sql/ask';
     fetch(endpoint, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, question, schema: sqlSchema, confirmed: false})
+        body: JSON.stringify({conn, question, schema: sqlSchema, confirmed: false})
     })
     .then(r=>r.json())
     .then(d => {
@@ -4527,17 +4619,22 @@ function sqlAsk() {
             return;
         }
 
-        // Tryb odczytu — interpretacja + tabela
+        // Tryb odczytu — interpretacja + wykres + tabela
+        const chartId = 'sqlAskChartCanvas';
+        const chartHtml = d.chart ? renderSqlChartHtml(d.chart, chartId) : '';
         result.innerHTML = `
+            ${sqlAskMetaHtml(d)}
             <div style="background:#eef2ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
                 <strong style="color:#4f46e5;font-size:0.88rem;">Interpretacja AI:</strong>
-                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.interpretation.replace(/\n/g,'<br>')}</div>
+                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${escapeHtml(d.interpretation || '').replace(/\n/g,'<br>')}</div>
             </div>
+            ${chartHtml}
             <details class="mb-2">
                 <summary class="small text-muted" style="cursor:pointer;">SQL (${d.total} wierszy${d.truncated?' — obcięte do 500':''})</summary>
-                <pre style="font-size:0.75rem;background:#1a1f36;color:#a0aec0;padding:10px;border-radius:4px;margin-top:6px;overflow-x:auto;">${d.sql}</pre>
+                <pre style="font-size:0.75rem;background:#1a1f36;color:#a0aec0;padding:10px;border-radius:4px;margin-top:6px;overflow-x:auto;">${escapeHtml(d.sql || '')}</pre>
             </details>
-            ${d.rows.length ? renderSqlTable(d.columns, d.rows) : '<div class="alert alert-warning small">Brak wyników.</div>'}`;
+            ${d.rows && d.rows.length ? renderSqlTable(d.columns, d.rows) : '<div class="alert alert-warning small">Brak wyników.</div>'}`;
+        if (d.chart) mountSqlChart(chartId, d.chart);
     })
     .catch(e => { loader.classList.add('d-none'); btn.disabled=false; result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
 }
@@ -4548,7 +4645,7 @@ function sqlConfirmWrite(sql) {
 
     fetch('/sql/write', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, question:'', schema: sqlSchema, confirmed: true, sql})
+        body: JSON.stringify({conn: getActiveSqlConn(), question:'', schema: sqlSchema, confirmed: true, sql})
     })
     .then(r=>r.json())
     .then(d => {
@@ -4582,6 +4679,9 @@ function sqlVectorize() {
     const table    = document.getElementById('sqlVecTable').value;
     const labelCol = document.getElementById('sqlVecLabelCol').value.trim();
     if (!table) return;
+    const conn = getActiveSqlConn();
+    const connErr = validateSqlConn(conn);
+    if (connErr) { alert(connErr); return; }
 
     const prog = document.getElementById('sqlVecProgress');
     const bar  = document.getElementById('sqlVecBar');
@@ -4607,7 +4707,7 @@ function sqlVectorize() {
 
     fetch('/sql/vectorize', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn, table, label_col: labelCol}),
+        body: JSON.stringify({conn, table, label_col: labelCol}),
         signal: controller.signal
     })
     .then(async response => {
@@ -4650,8 +4750,10 @@ function sqlVectorize() {
 }
 
 function sqlVectorizeAll() {
-    if (!sqlConnIsConfigured(sqlConn)) {
-        alert('Najpierw połącz się z bazą SQL');
+    const conn = getActiveSqlConn();
+    const connErr = validateSqlConn(conn);
+    if (connErr) {
+        alert(connErr);
         return;
     }
 
@@ -4687,7 +4789,7 @@ function sqlVectorizeAll() {
     fetch('/sql/vectorize-all', {
         signal: controller.signal,
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({conn: sqlConn})
+        body: JSON.stringify({conn})
     })
     .then(async response => {
         const reader = response.body.getReader();
