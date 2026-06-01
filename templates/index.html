@@ -4826,6 +4826,7 @@ function showStartupChecklist(d) {
 
     modal.style.display = 'flex';
     loadServiceStatus();
+    checkForUpdates();
 
     // Wersja w nagłówku modala
     const modalVer = document.getElementById('modalAppVersion');

@@ -4710,58 +4710,165 @@ def health():
 @app.route('/api/update/status', methods=['GET'])
 def api_update_status():
     """Zwraca status aktualizacji — aktualna wersja, najnowsza, changelog."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
     try:
-        current = _get_app_version()
-        release_info = _get_latest_github_release()
-        latest = release_info.get("tag_name") if release_info else None
-        changelog = release_info.get("body", "") if release_info else ""
+        local_tag = _get_local_latest_tag()
+        remote_tag = _get_remote_latest_tag()
+        release_info = _get_latest_github_release() or {}
+
+        if release_info.get("tag_name"):
+            remote_tag = release_info["tag_name"]
+
+        def _version_key(v: str) -> tuple:
+            try:
+                return tuple(int(x) for x in v.lstrip("v").split("."))
+            except Exception:
+                return (0, 0)
+
+        update_available = bool(
+            remote_tag and local_tag and _version_key(remote_tag) > _version_key(local_tag)
+        )
 
         return jsonify({
-            "current_version": current,
-            "latest_version": latest or current,
-            "update_available": bool(latest and latest != current),
-            "changelog": changelog,
-            "release_url": release_info.get("html_url") if release_info else None
+            "success": True,
+            "local_version": local_tag,
+            "remote_version": remote_tag or local_tag,
+            "current_version": local_tag,
+            "latest_version": remote_tag or local_tag,
+            "update_available": update_available,
+            "release": release_info,
+            "changelog": release_info.get("body", ""),
+            "release_url": release_info.get("html_url"),
+            "message": "Nowa wersja dostępna" if update_available else "Jesteś na najnowszej wersji",
         })
     except Exception as e:
         logger.exception("api_update_status error")
-        return jsonify({
-            "success": False,
-            "error": str(e)[:200]
-        }), 500
+        return jsonify({"success": False, "error": str(e)[:200]}), 500
 
 
 @app.route('/api/update/pull', methods=['POST'])
 def api_update_pull():
     """Pobiera najnowszy kod z GitHub (git pull origin master)."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
     try:
         result = _git_pull()
+        ok = result.get("success", False)
+        msg = result.get("stdout") or result.get("stderr") or (
+            "Kod zaktualizowany. Zalecany restart aplikacji." if ok else "Błąd podczas aktualizacji."
+        )
         return jsonify({
-            "success": result.get("success", False),
-            "message": result.get("stdout") or result.get("stderr") or "Git pull completed",
-            "details": result
+            "success": ok,
+            "message": msg,
+            "output": result.get("stdout", ""),
+            "error": result.get("stderr", "") if not ok else "",
+            "details": result,
         })
     except Exception as e:
         logger.exception("api_update_pull error")
-        return jsonify({
-            "success": False,
-            "error": str(e)[:200]
-        }), 500
+        return jsonify({"success": False, "error": str(e)[:200]}), 500
 
 
 @app.route('/api/update/restart', methods=['POST'])
 def api_update_restart():
     """Restartuje aplikację (poprzez systemd --user service)."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
     try:
         result = _try_restart_service()
         return jsonify({
             "success": result.get("success", False),
             "message": result.get("message", "Restart initiated"),
-            "method": result.get("method", "unknown")
+            "method": result.get("method", "unknown"),
         })
     except Exception as e:
         logger.exception("api_update_restart error")
-        return jsonify({
-            "success": False,
-            "error": str(e)[:200]
-        }), 500
+        return jsonify({"success": False, "error": str(e)[:200]}), 500
+
+
+def _localhost_only() -> bool:
+    """True gdy żądanie pochodzi z localhost (self-update / service API)."""
+    addr = (request.remote_addr or "").strip()
+    if addr in ("127.0.0.1", "::1", "localhost"):
+        return True
+    # Waitress za reverse proxy / WSL — sprawdź X-Forwarded-For tylko jeśli pierwszy hop to localhost
+    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return fwd in ("127.0.0.1", "::1", "localhost")
+
+
+def _systemd_service_state() -> str:
+    """Stan usługi ai_analiza — najpierw user service, potem systemowa."""
+    import shutil
+    if not shutil.which("systemctl"):
+        return "dev_mode"
+    for cmd in (
+        ["systemctl", "--user", "is-active", "ai_analiza"],
+        ["systemctl", "is-active", "ai_analiza"],
+    ):
+        try:
+            st = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            val = (st.stdout or "").strip()
+            if val:
+                return val
+        except Exception:
+            pass
+    if os.environ.get("INVOCATION_ID"):
+        return "active"
+    return "unknown"
+
+
+def _systemd_service_logs(limit: int = 30) -> str:
+    for cmd in (
+        ["journalctl", "--user", "-u", "ai_analiza", "-n", str(limit), "--no-pager", "--output=short"],
+        ["journalctl", "-u", "ai_analiza", "-n", str(limit), "--no-pager", "--output=short"],
+    ):
+        try:
+            logs = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if logs.stdout:
+                return logs.stdout
+        except Exception:
+            pass
+    return ""
+
+
+@app.route('/api/service/status', methods=['GET'])
+def service_status():
+    """Status usługi systemd i ostatnie logi — tylko localhost."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    return jsonify({
+        "success": True,
+        "is_systemd": bool(os.environ.get("INVOCATION_ID")),
+        "active": _systemd_service_state(),
+        "logs": _systemd_service_logs(30),
+    })
+
+
+@app.route('/api/service/restart', methods=['POST'])
+def service_restart():
+    """Restart usługi ai_analiza — tylko localhost."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    def _do_restart():
+        time.sleep(0.6)
+        try:
+            import shutil
+            if shutil.which("systemctl"):
+                for cmd in (
+                    ["systemctl", "--user", "restart", "ai_analiza"],
+                    ["systemctl", "restart", "ai_analiza"],
+                ):
+                    try:
+                        subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                        return
+                    except Exception:
+                        continue
+            os._exit(0)
+        except Exception:
+            os._exit(0)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"success": True, "msg": "Restart zlecony"})
