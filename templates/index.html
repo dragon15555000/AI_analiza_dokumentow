@@ -556,6 +556,29 @@
       </div>
       <div id="networkStats" class="small text-muted mt-2"></div>
 
+      <!-- Postęp budowy grafu -->
+      <div id="networkProgressWrap" class="d-none mt-2">
+        <div class="progress" style="height:6px;">
+          <div id="networkProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+        </div>
+        <div id="networkProgressLabel" class="small text-muted mt-1">Inicjalizacja…</div>
+      </div>
+
+      <!-- Panel analityczny (huby, statystyki, briefing AI) -->
+      <div id="networkInsights" class="d-none mt-2 p-2 rounded" style="background:#f8f9ff;border:1px solid #e0e7ff;font-size:0.78rem;">
+        <div class="fw-bold mb-1" style="color:#4f46e5;">📊 Analiza grafu</div>
+        <div id="networkHubs" class="mb-1"></div>
+        <div id="networkEntityStats" class="text-muted mb-1"></div>
+        <div id="networkBriefing" class="mt-2 p-2 rounded d-none" style="background:#fff;border-left:3px solid #4f46e5;white-space:pre-wrap;line-height:1.45;"></div>
+      </div>
+
+      <div id="networkTools" class="d-none mt-2">
+        <div class="input-group input-group-sm mb-1">
+          <input type="text" id="networkNodeSearch" class="form-control" placeholder="Szukaj węzła na grafie…" oninput="highlightNetworkNode(this.value)">
+          <button class="btn btn-outline-secondary" onclick="exportNetworkCsv()" title="Eksport relacji do CSV">CSV</button>
+        </div>
+      </div>
+
       <hr style="margin:10px 0;">
       <div class="small fw-bold mb-2" style="color:#374151;">Gotowe scenariusze:</div>
       <div class="d-flex flex-column gap-1" id="networkScenarios">
@@ -578,6 +601,14 @@
         <button class="prompt-btn" style="border-color:#fde68a;background:#fffdf0;"
           onclick="runNetworkScenario('Wyciągnij przetargi i zamówienia: oferenci, wyniki, kwoty ofert, powiązania między firmami biorącymi udział')">
           🏆 Przetargi — oferenci i wyniki
+        </button>
+        <button class="prompt-btn" style="border-color:#fecaca;background:#fff5f5;"
+          onclick="runNetworkScenario('Znajdź niespójności: te same kwoty lub daty w różnych dokumentach, rozbieżne strony umowy, brakujące podpisy')">
+          ⚠️ Niespójności i rozbieżności
+        </button>
+        <button class="prompt-btn" style="border-color:#c7d2fe;background:#eef2ff;"
+          onclick="runNetworkScenario('Mapuj powiązania kapitałowe i osobowe: wspólnicy, prezesi, beneficjenci, spółki powiązane')">
+          🔗 Powiązania kapitałowe i osobowe
         </button>
       </div>
 
@@ -613,7 +644,7 @@
       </div>
       <div id="networkLoader" class="d-none position-absolute top-50 start-50 translate-middle text-center">
         <div class="spinner-border text-primary"></div>
-        <p class="mt-2 small text-muted">LLM ekstrahuje encje i relacje...</p>
+        <p id="networkLoaderMsg" class="mt-2 small text-muted">LLM ekstrahuje encje i relacje…</p>
       </div>
       <svg id="networkSvg" style="width:100%;height:min(62vh,580px);min-height:480px;display:none;"></svg>
       <div id="nodeTooltip" style="position:absolute;background:#1a1f36;color:#fff;padding:6px 12px;border-radius:6px;font-size:0.8rem;display:none;pointer-events:none;max-width:240px;z-index:10;"></div>
@@ -2390,6 +2421,93 @@ async function streamSSE(url, eventHandlers = {}) {
     };
 }
 
+/** Bezpieczne parsowanie JSON — unika błędu "Unexpected token '<'" gdy serwer zwraca HTML. */
+async function fetchJson(url, options = {}) {
+    const res = await fetch(url, options);
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        if (text.trim().startsWith('<!')) {
+            throw new Error(`Serwer zwrócił stronę HTML (HTTP ${res.status}) — endpoint może być niedostępny. Zrestartuj aplikację.`);
+        }
+        try {
+            const err = JSON.parse(text);
+            throw new Error(err.error || err.msg || `HTTP ${res.status}`);
+        } catch (e) {
+            if (e.message && !e.message.includes('JSON')) throw e;
+            throw new Error(text.slice(0, 200) || `HTTP ${res.status}`);
+        }
+    }
+    if (!ct.includes('application/json')) {
+        const text = await res.text();
+        if (text.trim().startsWith('<!')) {
+            throw new Error('Oczekiwano JSON, otrzymano stronę HTML — zrestartuj aplikację lub sprawdź endpoint.');
+        }
+        throw new Error('Nieprawidłowy typ odpowiedzi: ' + (ct || 'brak content-type'));
+    }
+    return res.json();
+}
+
+/** SSE POST (sieć powiązań, wyszukiwanie) — strumień z ciałem JSON. */
+async function streamSSEPost(url, body, eventHandlers = {}, signal = null) {
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+        signal,
+    });
+
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        const msg = text.trim().startsWith('<!')
+            ? `Serwer zwrócił HTML (HTTP ${res.status}) — zrestartuj aplikację.`
+            : (text.slice(0, 180) || `HTTP ${res.status}`);
+        if (eventHandlers.error) eventHandlers.error({ error: msg, msg });
+        return;
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+        if (eventHandlers.error) eventHandlers.error({ error: 'Brak strumienia odpowiedzi' });
+        return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let sepIndex;
+            while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+                const rawMessage = buffer.slice(0, sepIndex);
+                buffer = buffer.slice(sepIndex + 2);
+                const lines = rawMessage.split('\n');
+                let eventName = 'message';
+                let dataStr = '';
+                for (const line of lines) {
+                    if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                    else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
+                }
+                if (dataStr && eventHandlers[eventName]) {
+                    try {
+                        eventHandlers[eventName](JSON.parse(dataStr));
+                    } catch (e) {
+                        eventHandlers[eventName]({ raw: dataStr });
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        if (err.name !== 'AbortError' && eventHandlers.error) {
+            eventHandlers.error({ error: err.message || 'Błąd strumienia SSE' });
+        }
+    } finally {
+        try { reader.releaseLock(); } catch (_) {}
+    }
+}
+
 // ---- IMPORT SSE (fetch + ReadableStream - wspiera X-API-Key) ----
 function executeImport() {
     const folderPath = document.getElementById('importPathInput').value.trim();
@@ -2736,61 +2854,166 @@ function runNetworkScenario(prompt) {
     document.getElementById('networkSvg').scrollIntoView({behavior:'smooth', block:'center'});
 }
 
+let networkAbortController = null;
+let networkLastData = null;
+
 function buildNetwork() {
     const query = document.getElementById('networkQuery').value.trim();
     const limit = parseInt(document.getElementById('networkLimit').value);
     if (!query) return;
 
+    if (networkAbortController) networkAbortController.abort();
+    networkAbortController = new AbortController();
+
     document.getElementById('networkPlaceholder').classList.add('d-none');
     document.getElementById('networkSvg').style.display = 'none';
     document.getElementById('networkLoader').classList.remove('d-none');
+    document.getElementById('networkLoaderMsg').textContent = 'Wyszukiwanie dokumentów…';
     document.getElementById('networkStats').textContent = '';
     document.getElementById('networkLegend').classList.add('d-none');
+    document.getElementById('networkInsights').classList.add('d-none');
+    document.getElementById('networkTools').classList.add('d-none');
+    document.getElementById('networkProgressWrap').classList.remove('d-none');
+    document.getElementById('networkProgressBar').style.width = '5%';
+    document.getElementById('networkProgressLabel').textContent = 'Inicjalizacja…';
     document.getElementById('networkBtn').disabled = true;
+    document.getElementById('evidencePanel').style.display = 'none';
 
-    fetch('/network', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            query,
-            limit,
-            llm_provider: getCurrentLlmProvider(),
-            openrouter_model: getCurrentOpenRouterModel()
-        })
-    })
-    .then(r => r.json())
-    .then(d => {
+    const finish = (errMsg) => {
         document.getElementById('networkLoader').classList.add('d-none');
+        document.getElementById('networkProgressWrap').classList.add('d-none');
         document.getElementById('networkBtn').disabled = false;
-        if (!d.success) {
+        networkAbortController = null;
+        if (errMsg) {
             document.getElementById('networkPlaceholder').classList.remove('d-none');
-            const hint = d.error && d.error.includes("Connection") 
-                ? "<br><small>Spróbuj zmniejszyć liczbę dokumentów (max 8-10) lub użyj mocniejszego modelu przez OpenRouter.</small>"
-                : "";
+            const hint = errMsg.includes('Connection') || errMsg.includes('reset')
+                ? '<br><small>Spróbuj zmniejszyć liczbę dokumentów (8–10) lub zmień model OpenRouter.</small>'
+                : '';
             document.getElementById('networkPlaceholder').innerHTML =
-                `<div style="color:#dc2626;">❌ ${escapeHtml(d.error || '')}${hint}</div>`;
-            return;
+                `<div style="color:#dc2626;">❌ ${escapeHtml(errMsg)}${hint}</div>`;
         }
-        if (!d.nodes.length) {
-            document.getElementById('networkPlaceholder').classList.remove('d-none');
-            document.getElementById('networkPlaceholder').innerHTML =
-                '<div>LLM nie znalazł encji w dokumentach. Spróbuj bardziej szczegółowego zapytania.</div>';
-            return;
-        }
-        document.getElementById('networkStats').textContent =
-            `${d.nodes.length} węzłów · ${d.edges.length} relacji · z ${d.sources} dokumentów`;
-        document.getElementById('networkLegend').classList.remove('d-none');
+    };
 
-        // Zapisz oryginalne dane grafu i włącz filtry
-        saveNetworkData(d.nodes, d.edges);
-        renderNetworkWithFilters();
-    })
-    .catch(e => {
-        document.getElementById('networkLoader').classList.add('d-none');
-        document.getElementById('networkBtn').disabled = false;
-        document.getElementById('networkPlaceholder').classList.remove('d-none');
-        document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${escapeHtml(e)}</div>`;
+    streamSSEPost('/network', {
+        query,
+        limit,
+        include_briefing: true,
+        llm_provider: getCurrentLlmProvider(),
+        openrouter_model: getCurrentOpenRouterModel(),
+    }, {
+        progress: (d) => {
+            const pct = d.total ? Math.round((d.processed / d.total) * 85) + 5 : 10;
+            document.getElementById('networkProgressBar').style.width = Math.min(pct, 90) + '%';
+            document.getElementById('networkProgressLabel').textContent = d.message || 'Przetwarzanie…';
+            document.getElementById('networkLoaderMsg').textContent = d.message || 'Analiza…';
+        },
+        done: (d) => {
+            document.getElementById('networkProgressBar').style.width = '100%';
+
+            if (!d.success) {
+                finish(d.error || 'Błąd budowy grafu');
+                return;
+            }
+            if (!d.nodes || !d.nodes.length) {
+                finish(null);
+                document.getElementById('networkPlaceholder').classList.remove('d-none');
+                document.getElementById('networkPlaceholder').innerHTML =
+                    '<div>LLM nie znalazł encji w dokumentach. Spróbuj bardziej szczegółowego zapytania lub mniejszej liczby dokumentów.</div>';
+                return;
+            }
+
+            finish(null);
+            networkLastData = d;
+            document.getElementById('networkStats').textContent =
+                `${d.nodes.length} węzłów · ${d.edges.length} relacji · z ${d.sources} fragmentów`;
+            document.getElementById('networkLegend').classList.remove('d-none');
+            document.getElementById('networkTools').classList.remove('d-none');
+
+            renderNetworkInsights(d);
+            saveNetworkData(d.nodes, d.edges);
+            renderNetworkWithFilters();
+        },
+        error: (d) => {
+            finish(d.error || d.msg || 'Błąd połączenia z serwerem');
+        },
+    }, networkAbortController.signal);
+}
+
+function renderNetworkInsights(d) {
+    const panel = document.getElementById('networkInsights');
+    const stats = d.stats || {};
+    panel.classList.remove('d-none');
+
+    const hubsEl = document.getElementById('networkHubs');
+    if (stats.top_hubs && stats.top_hubs.length) {
+        hubsEl.innerHTML = '<span class="text-muted">Kluczowe węzły:</span> ' +
+            stats.top_hubs.slice(0, 5).map(h => {
+                const safeId = String(h.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                return `<span class="badge bg-light text-dark border me-1" style="cursor:pointer;font-weight:500;"
+                  onclick="highlightNetworkNode('${safeId}')"
+                  title="Siła: ${h.score}">${escapeHtml(h.label)} <small class="text-muted">×${h.score}</small></span>`;
+            }).join('');
+    } else {
+        hubsEl.innerHTML = '';
+    }
+
+    const entEl = document.getElementById('networkEntityStats');
+    const counts = stats.entity_counts || {};
+    const parts = Object.entries(counts).map(([t, n]) => `${t}: ${n}`);
+    let entTxt = parts.join(' · ');
+    if (stats.strong_edges) entTxt += (entTxt ? ' · ' : '') + `silne relacje (≥3): ${stats.strong_edges}`;
+    if (stats.date_span) entTxt += ` · daty: ${stats.date_span.min} → ${stats.date_span.max}`;
+    entEl.textContent = entTxt;
+
+    const briefEl = document.getElementById('networkBriefing');
+    if (d.briefing && d.briefing.trim()) {
+        briefEl.textContent = d.briefing.trim();
+        briefEl.classList.remove('d-none');
+    } else {
+        briefEl.classList.add('d-none');
+        briefEl.textContent = '';
+    }
+}
+
+function highlightNetworkNode(term) {
+    const q = (term || '').trim().toLowerCase();
+    const svg = document.getElementById('networkSvg');
+    if (!svg || svg.style.display === 'none') return;
+
+    d3.select('#networkSvg').selectAll('g g').each(function(d) {
+        if (!d) return;
+        const sel = d3.select(this);
+        const match = !q
+            || (d.label || '').toLowerCase().includes(q)
+            || (d.id || '').toLowerCase().includes(q)
+            || (d.id || '').toLowerCase() === q;
+        sel.selectAll('circle, rect, path')
+            .attr('opacity', match ? 1 : 0.15)
+            .attr('stroke-width', match && q ? 3 : 2);
+        sel.select('text').attr('opacity', match ? 1 : 0.2);
     });
+    d3.select('#networkSvg').selectAll('line')
+        .attr('opacity', q ? 0.25 : 1);
+}
+
+function exportNetworkCsv() {
+    if (!networkLastData || !networkLastData.edges || !networkLastData.edges.length) {
+        alert('Brak danych grafu do eksportu.');
+        return;
+    }
+    const rows = [['source', 'target', 'label', 'strength', 'date', 'doc', 'evidence']];
+    networkLastData.edges.forEach(e => {
+        rows.push([
+            e.source, e.target, e.label || '',
+            e.strength || 1, e.date || '', e.doc || '', (e.evidence || '').replace(/"/g, '""'),
+        ]);
+    });
+    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob(['\ufeff' + csv], {type: 'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `siec_powiazan_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
 }
 
 // Pomocnik do pokazywania panelu z dowodami (obsługuje wiele evidencji + siłę powiązania)
@@ -4872,10 +5095,10 @@ function runReadyReport(id) {
     document.getElementById('reportContent').innerHTML = '<div class="text-center p-4"><div class="spinner-border"></div></div>';
     resDiv.classList.remove('d-none');
 
-    fetch('/analyze', {
+    fetchJson('/analyze', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, llm_provider: getCurrentLlmProvider()})
-    }).then(r=>r.json()).then(d => {
+    }).then(d => {
         document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(d.answer || 'Brak danych.')}</div>`;
     });
 }

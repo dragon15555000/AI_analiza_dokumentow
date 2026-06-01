@@ -3190,23 +3190,186 @@ def export_docx():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+_NETWORK_SYSTEM = (
+    "Jesteś ekspertem analityki śledczej. Twoim zadaniem jest wyciągnięcie jak najbogatszej sieci powiązań z dokumentów.\n\n"
+    "ZASADY BEZWZGLĘDNE:\n"
+    "1. Używaj WYŁĄCZNIE prawdziwych nazw, kwot, dat i faktów z dokumentów.\n"
+    "2. NIGDY nie używaj placeholderów typu 'nazwa', 'firma', 'X', 'osoba A'.\n"
+    "3. Każdy label musi być rzeczywistą wartością z tekstu.\n\n"
+    "FORMAT JSON (zwracaj tylko poprawny JSON):\n"
+    '{\n'
+    '  "nodes": [ {"id": "jan_kowalski", "type": "osoba", "label": "Jan Kowalski"}, ... ],\n'
+    '  "edges": [ {"source": "jan_kowalski", "target": "abc_spolka", "label": "prezes zarządu", '
+    '"doc": "umowa_2023.pdf", "evidence": "Podpisał umowę 12.03.2023", "date": "2023-03-12", "strength": 3}, ... ]\n'
+    '}\n\n'
+    "Typy węzłów (type): osoba, firma, kwota, dokument, przetarg, umowa, inne\n\n"
+    "Bogate typy relacji (label krawędzi) — używaj precyzyjnych:\n"
+    "- prezes / członek zarządu / dyrektor\n"
+    "- podpisał umowę / aneks\n"
+    "- zapłacił / wystawił fakturę / otrzymał płatność\n"
+    "- wygrał przetarg / złożył ofertę\n"
+    "- zlecił / wykonał usługę\n"
+    "- jest właścicielem / beneficjentem\n"
+    "- zatwierdził / skontrolował\n\n"
+    "W polu 'evidence' wstaw krótki, dosłowny cytat z dokumentu.\n"
+    "Jeśli w tekście pojawia się data — dodaj ją w polu 'date' (YYYY-MM-DD lub YYYY-MM).\n"
+    "W polu 'strength' (1-5) podaj siłę powiązania na podstawie dowodów w dokumencie.\n"
+    "id: snake_case, bez polskich znaków, max 40 znaków."
+)
+
+
+def _aggregate_network_edges(raw_edges: list, seen_nodes: dict) -> list:
+    """Grupuje krawędzie, sumuje siłę i zbiera dowody."""
+    edge_groups = defaultdict(list)
+    for e in raw_edges:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not src or not tgt or src not in seen_nodes or tgt not in seen_nodes:
+            continue
+        edge_groups[(src, tgt)].append({
+            "label": (e.get("label") or "")[:40],
+            "doc": (e.get("doc") or "")[:90],
+            "evidence": (e.get("evidence") or "")[:180],
+            "date": (e.get("date") or "")[:20],
+            "strength": _safe_int_clamp(e.get("strength", 1), 1, 5, default=1),
+        })
+
+    clean_edges = []
+    for (src, tgt), items in edge_groups.items():
+        labels = [it["label"] for it in items if it["label"]]
+        main_label = max(set(labels), key=labels.count) if labels else items[0]["label"]
+
+        seen_ev = set()
+        evidences = []
+        for it in items:
+            ev_key = (it["doc"], it["evidence"][:80])
+            if ev_key not in seen_ev:
+                seen_ev.add(ev_key)
+                evidences.append({
+                    "doc": it["doc"],
+                    "evidence": it["evidence"],
+                    "date": it["date"],
+                })
+            if len(evidences) >= 6:
+                break
+
+        total_strength = sum(it["strength"] for it in items) + (len(items) - 1)
+        clean_edges.append({
+            "source": src,
+            "target": tgt,
+            "label": main_label,
+            "doc": items[0]["doc"],
+            "evidence": items[0]["evidence"],
+            "date": items[0]["date"],
+            "strength": max(1, min(12, total_strength)),
+            "evidence_count": len(evidences),
+            "evidences": evidences,
+        })
+
+    clean_edges.sort(key=lambda e: e.get("strength", 1), reverse=True)
+    return clean_edges
+
+
+def _network_graph_stats(nodes: list, edges: list) -> dict:
+    """Statystyki grafu bez dodatkowego wywołania LLM."""
+    degree = defaultdict(int)
+    for e in edges:
+        degree[e["source"]] += e.get("strength", 1)
+        degree[e["target"]] += e.get("strength", 1)
+
+    type_counts = defaultdict(int)
+    for n in nodes:
+        type_counts[n.get("type", "inne")] += 1
+
+    rel_counts = defaultdict(int)
+    for e in edges:
+        rel_counts[e.get("label") or "(bez etykiety)"] += 1
+
+    dates = sorted(d for e in edges if (d := (e.get("date") or "").strip()) and d[0].isdigit())
+
+    hubs = sorted(
+        [{"id": n["id"], "label": n.get("label", n["id"]), "type": n.get("type", "inne"),
+          "score": degree.get(n["id"], 0)}
+         for n in nodes if degree.get(n["id"], 0) > 0],
+        key=lambda h: h["score"],
+        reverse=True,
+    )[:8]
+
+    top_relations = sorted(rel_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+
+    return {
+        "entity_counts": dict(type_counts),
+        "top_hubs": hubs,
+        "top_relations": [{"label": k, "count": v} for k, v in top_relations],
+        "date_span": {"min": dates[0], "max": dates[-1]} if dates else None,
+        "strong_edges": sum(1 for e in edges if e.get("strength", 1) >= 3),
+    }
+
+
+def _network_ai_briefing(query: str, nodes: list, edges: list, stats: dict,
+                         provider=None, model=None) -> str:
+    """Krótki briefing śledczy na podstawie zbudowanego grafu."""
+    if not nodes or not edges:
+        return ""
+
+    hub_lines = ", ".join(f"{h['label']} ({h['score']})" for h in stats.get("top_hubs", [])[:5])
+    rel_lines = ", ".join(f"{r['label']}×{r['count']}" for r in stats.get("top_relations", [])[:5])
+    sample_edges = edges[:12]
+    edge_txt = "\n".join(
+        f"- {e.get('source')} → {e.get('target')}: {e.get('label')} "
+        f"(siła {e.get('strength', 1)}, {e.get('doc', '')})"
+        for e in sample_edges
+    )
+
+    prompt = (
+        f"ZAPYTANIE UŻYTKOWNIKA: {query}\n\n"
+        f"GRAF: {len(nodes)} węzłów, {len(edges)} relacji.\n"
+        f"Kluczowe węzły (huby): {hub_lines or 'brak'}.\n"
+        f"Najczęstsze relacje: {rel_lines or 'brak'}.\n\n"
+        f"Przykładowe krawędzie:\n{edge_txt}\n\n"
+        "Napisz krótki briefing śledczy (max 6 punktów):\n"
+        "1) główne podmioty i ich role,\n"
+        "2) najsilniejsze powiązania finansowe/prawne,\n"
+        "3) potencjalne rozbieżności lub luki [WYMAGA SPRAWDZENIA],\n"
+        "4) 2-3 konkretne pytania do dalszej analizy.\n"
+        "Tylko fakty z grafu — bez wymyślania."
+    )
+    system = (
+        "Jesteś analitykiem śledczym. Pisz po polsku, zwięźle, punktami. "
+        "Oznaczaj niepewności tagiem [WYMAGA SPRAWDZENIA]."
+    )
+    try:
+        result = call_llm(
+            prompt=prompt, system=system, stream=False,
+            provider=provider, model=model, max_tokens=900,
+        )
+        return (result.get("response", "") if isinstance(result, dict) else str(result)).strip()
+    except Exception as e:
+        logger.warning(f"Briefing sieci powiązań: {e}")
+        return ""
+
+
 @app.route('/network', methods=['POST'])
 def build_network():
     """
-    Buduje sieć powiązań partiami (domyślnie po 5 dokumentów).
-    Zwraca SSE z postępem: progress + done.
+    Buduje sieć powiązań partiami (po 5 dokumentów).
+    Zwraca SSE: progress → done (graf + statystyki + opcjonalny briefing AI).
     """
-    data = request.get_json()
+    data = request.get_json() or {}
     query = data.get('query', '').strip()
     limit = min(int(data.get('limit', 10)), 20)
     llm_provider = data.get('llm_provider')
     openrouter_model = data.get("openrouter_model")
+    include_briefing = data.get("include_briefing", True)
     BATCH_SIZE = 5
 
     if not query:
         return jsonify({"success": False, "error": "Brak zapytania"})
 
     def generate():
+        def sse(event, payload):
+            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
         try:
             client = get_qdrant_client()
             try:
@@ -3222,33 +3385,53 @@ def build_network():
             ]
 
             if not all_contexts:
-                yield sse("error", {"error": "Nie znaleziono dokumentów"})
+                yield sse("error", {"error": "Nie znaleziono dokumentów pasujących do zapytania"})
                 return
 
-            batches = [all_contexts[i:i+BATCH_SIZE] for i in range(0, len(all_contexts), BATCH_SIZE)]
+            batches = [all_contexts[i:i + BATCH_SIZE] for i in range(0, len(all_contexts), BATCH_SIZE)]
             total = len(all_contexts)
+            total_batches = len(batches)
 
-            all_nodes = []
-            all_edges = []
-            seen_node_ids = set()
+            seen_nodes = {}
+            raw_edges = []
 
-            system = "Jesteś ekspertem analityki śledczej..."  # (skrócony dla czytelności — w oryginale pełny)
+            yield sse("progress", {
+                "processed": 0,
+                "total": total,
+                "batch": 0,
+                "total_batches": total_batches,
+                "message": f"Znaleziono {total} fragmentów w {total_batches} partiach…",
+            })
 
             for i, batch in enumerate(batches):
                 yield sse("progress", {
-                    "processed": min((i+1)*BATCH_SIZE, total),
+                    "processed": min(i * BATCH_SIZE, total),
                     "total": total,
-                    "message": f"Przetworzono {min((i+1)*BATCH_SIZE, total)}/{total} dokumentów..."
+                    "batch": i + 1,
+                    "total_batches": total_batches,
+                    "message": f"Analiza partii {i + 1}/{total_batches} (LLM ekstrahuje encje)…",
                 })
 
-                batch_str = "\n\n".join([f"[{c['file']}]: {_sanitize_for_prompt(c['text'], 650)}" for c in batch])
-                prompt = f"DOKUMENTY (partia {i+1}):\n{batch_str}\n\nZADANIE: {query}\n\nJSON:"
+                batch_str = "\n\n".join(
+                    f"[{c['file']}]: {_sanitize_for_prompt(c['text'], 800)}" for c in batch
+                )
+                prompt = (
+                    f"DOKUMENTY (partia {i + 1}/{total_batches}):\n{batch_str}\n\n"
+                    f"ZADANIE: {query}\n\n"
+                    "Wyciągnij sieć powiązań używając PRAWDZIWYCH nazw, kwot i danych.\n"
+                    "NIE używaj placeholderów. JSON:"
+                )
 
                 try:
-                    result = call_llm(prompt=prompt, system=system, stream=False,
-                                      provider=llm_provider, model=openrouter_model, max_tokens=2200)
+                    result = call_llm(
+                        prompt=prompt,
+                        system=_NETWORK_SYSTEM,
+                        stream=False,
+                        provider=llm_provider,
+                        model=openrouter_model,
+                        max_tokens=2800,
+                    )
                     raw = result.get("response", "") if isinstance(result, dict) else str(result)
-
                     json_match = re.search(r'\{[\s\S]*\}', raw)
                     if not json_match:
                         continue
@@ -3257,58 +3440,57 @@ def build_network():
 
                     for n in graph.get("nodes", []):
                         nid = str(n.get("id", "")).strip()
-                        if nid and nid not in seen_node_ids:
-                            seen_node_ids.add(nid)
-                            all_nodes.append({
+                        if nid and nid not in seen_nodes:
+                            seen_nodes[nid] = {
                                 "id": nid,
                                 "type": n.get("type", "inne"),
-                                "label": n.get("label", nid)[:40]
-                            })
+                                "label": (n.get("label") or nid)[:40],
+                            }
 
                     for e in graph.get("edges", []):
-                        src = str(e.get("source", "")).strip()
-                        tgt = str(e.get("target", "")).strip()
-                        if src and tgt and src in seen_node_ids and tgt in seen_node_ids:
-                            all_edges.append({
-                                "source": src, "target": tgt,
-                                "label": (e.get("label") or "")[:40],
-                                "doc": (e.get("doc") or "")[:90],
-                                "evidence": (e.get("evidence") or "")[:180],
-                                "date": (e.get("date") or "")[:20],
-                                "strength": max(1, min(5, int(e.get("strength", 1))))
-                            })
+                        raw_edges.append(e)
+
                 except Exception as batch_err:
-                    logger.warning(f"Błąd partii {i+1}: {batch_err}")
+                    logger.warning(f"Błąd partii sieci {i + 1}: {batch_err}")
                     continue
 
-            # Agregacja krawędzi (ta sama co wcześniej)
-            edge_groups = defaultdict(list)
-            for e in all_edges:
-                edge_groups[(e["source"], e["target"])].append(e)
+            clean_nodes = list(seen_nodes.values())
+            clean_edges = _aggregate_network_edges(raw_edges, seen_nodes)
+            stats = _network_graph_stats(clean_nodes, clean_edges)
 
-            clean_edges = []
-            for (src, tgt), items in edge_groups.items():
-                # ... (ta sama logika agregacji co w oryginale)
-                labels = [it["label"] for it in items if it["label"]]
-                main_label = max(set(labels), key=labels.count) if labels else items[0]["label"]
-                total_strength = sum(it["strength"] for it in items) + (len(items) - 1)
-                clean_edges.append({
-                    "source": src, "target": tgt, "label": main_label,
-                    "strength": max(1, min(12, total_strength)),
-                    "evidence_count": len(items)
+            briefing = ""
+            if include_briefing and clean_nodes and clean_edges:
+                yield sse("progress", {
+                    "processed": total,
+                    "total": total,
+                    "batch": total_batches,
+                    "total_batches": total_batches,
+                    "message": "Generuję briefing śledczy AI…",
                 })
-
-            clean_edges.sort(key=lambda e: e.get("strength", 1), reverse=True)
+                briefing = _network_ai_briefing(
+                    query, clean_nodes, clean_edges, stats,
+                    provider=llm_provider, model=openrouter_model,
+                )
 
             yield sse("done", {
-                "nodes": all_nodes,
+                "success": True,
+                "nodes": clean_nodes,
                 "edges": clean_edges,
-                "sources": len(all_contexts)
+                "query": query,
+                "sources": len(all_contexts),
+                "stats": stats,
+                "briefing": briefing,
             })
 
         except Exception as e:
-            logger.exception("Błąd build_network (batched)")
+            logger.exception("Błąd build_network")
             yield sse("error", {"error": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
 
 # ============================================================
