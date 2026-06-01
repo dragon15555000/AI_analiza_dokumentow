@@ -21,7 +21,7 @@ Przygotowuje lokalne dev bez Qdrant Cloud:
   - binarka Qdrant w .local/ (Linux x86_64)
 
 Opcje:
-  --system-deps   Zainstaluj pakiety apt: python3.12-venv, zstd, curl (wymaga sudo)
+  --system-deps   Zainstaluj pakiety apt: python3.X-venv (auto-detect), zstd, curl (wymaga sudo)
   --pull-models   Pobierz modele Ollama: nomic-embed-text, llama3 (wymaga działającego ollama)
   --skip-qdrant   Nie pobieraj binarki Qdrant
   -h, --help      Ta pomoc
@@ -60,19 +60,33 @@ case "$ARCH" in
     ;;
 esac
 
-if [[ "$INSTALL_SYSTEM" -eq 1 ]]; then
-  log "Instalacja pakietów systemowych (sudo)..."
-  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    python3.12-venv zstd curl ca-certificates
-fi
-
 if ! command -v python3 >/dev/null 2>&1; then
   warn "Brak python3. Uruchom ponownie z --system-deps lub zainstaluj Python 3.10+."
   exit 1
 fi
 
+# Wykryj dokładną wersję Pythona (np. 3.12, 3.13)
+PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+log "Python $PY_VER wykryty."
+
+if [[ "$INSTALL_SYSTEM" -eq 1 ]]; then
+  log "Instalacja pakietów systemowych (sudo)..."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  # Próbuj wersjonowany pakiet venv, potem generyczny python3-venv
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    "python${PY_VER}-venv" zstd curl ca-certificates 2>/dev/null || \
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    python3-venv zstd curl ca-certificates
+fi
+
 log "Tworzenie venv i instalacja zależności Python..."
+# Sprawdź czy venv działa; jeśli nie — podpowiedz komendę
+if ! python3 -m venv --without-pip /tmp/_venv_test 2>/dev/null; then
+  warn "python3 -m venv nie działa. Zainstaluj: sudo apt install python${PY_VER}-venv"
+  warn "Lub uruchom skrypt z flagą --system-deps"
+  exit 1
+fi
+rm -rf /tmp/_venv_test
 python3 -m venv venv
 ./venv/bin/pip install -q --upgrade pip
 ./venv/bin/pip install -q -r requirements.txt
