@@ -80,6 +80,7 @@ docker-compose.override.yml
 
 # === Local dev binaries (Qdrant standalone, etc.) ===
 .local/
+qdrant_data/
 
 # === Misc ===
 .sql_config.json
