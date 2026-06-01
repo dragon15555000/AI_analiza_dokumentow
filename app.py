@@ -1745,6 +1745,7 @@ def _filter_documents_list(
         out = [d for d in out if _doc_modified_iso(d) <= modified_before[:10] or not _doc_modified_iso(d)]
     return out
 
+CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
 def make_chunks(text: str) -> list:
