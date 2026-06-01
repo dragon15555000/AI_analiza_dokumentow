@@ -36,6 +36,13 @@ venv.bak/
 # === IDE / Editors ===
 .vscode/
 .idea/
+
+# Aider (lokalna historia i cache)
+.aider.*
+.aider.tags.cache.v4/
+
+# Lokalne backupy UI (nie commitować)
+stary_index.html
 *.swp
 *.swo
 *~
