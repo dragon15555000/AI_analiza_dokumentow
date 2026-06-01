@@ -3833,16 +3833,20 @@ def timeline_endpoint():
             prompt = f"DOKUMENTY:\n{context_str}\n\nWyciągnij chronologię z dokumentów w formacie JSON:"
 
             yield sse("progress", {"message": "Analiza LLM…"})
-            result = call_llm(
-                prompt=prompt,
-                system=system_msg,
-                stream=False,
-                provider=llm_provider,
-                model=openrouter_model,
-                max_tokens=1500
-            )
-
-            raw_resp = result.get("response", str(result)) if isinstance(result, dict) else str(result)
+            try:
+                result = call_llm(
+                    prompt=prompt,
+                    system=system_msg,
+                    stream=False,
+                    provider=llm_provider,
+                    model=openrouter_model,
+                    max_tokens=1500
+                )
+                raw_resp = result.get("response", str(result)) if isinstance(result, dict) else str(result)
+            except Exception as llm_err:
+                logger.exception(f"Timeline LLM error: {llm_err}")
+                yield sse("error", {"error": f"Błąd LLM: {str(llm_err)[:200]}"})
+                return
 
             # Parsowanie JSON'a
             json_match = re.search(r'\[\s*\{.*\}\s*\]', raw_resp, re.DOTALL)
