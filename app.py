@@ -939,6 +939,211 @@ def _path_is_allowed(path: Path) -> bool:
     return False
 
 
+def _path_is_browsable(path: Path) -> bool:
+    """Folder można otworzyć tylko w obrębie SEARCH_ROOTS (bez /mnt, C: itd.)."""
+    return _path_is_allowed(path)
+
+
+def _default_browse_path() -> Path:
+    gd = _google_drive_root()
+    if gd:
+        return gd
+    roots = _resolve_allowed_roots()
+    return roots[0] if roots else Path.home()
+
+
+def _win_to_wsl(path: str) -> str | None:
+    """Konwertuje ścieżkę Windows (G:\\...) na WSL przez wslpath."""
+    path = (path or "").strip().strip('"').strip("'")
+    if not path:
+        return None
+    if path.startswith("/"):
+        return path
+    try:
+        proc = subprocess.run(
+            ["wslpath", "-a", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0:
+            out = proc.stdout.strip()
+            if out:
+                return out
+    except Exception as e:
+        logger.debug("wslpath failed: %s", e)
+    return _normalize_sqlite_path_input(path) or None
+
+
+def _normalize_browse_path(raw: str) -> str:
+    """Akceptuje G:\\... lub /mnt/... — zwraca ścieżkę WSL."""
+    raw = (raw or "").strip().strip('"').strip("'")
+    if not raw:
+        return str(_default_browse_path())
+    if re.match(r"^[A-Za-z]:", raw):
+        wsl = _win_to_wsl(raw)
+        if wsl:
+            return wsl
+    return raw
+
+
+def _google_drive_root() -> Path | None:
+    """Google Drive w WSL: zwykle /mnt/g/Mój dysk (PL) lub /mnt/g/My Drive."""
+    for folder in ("Mój dysk", "My Drive"):
+        candidate = Path("/mnt/g") / folder
+        if candidate.is_dir() and _path_is_allowed(candidate):
+            try:
+                return candidate.resolve()
+            except OSError:
+                return candidate
+    g = Path("/mnt/g")
+    if g.is_dir() and _path_is_allowed(g):
+        try:
+            return g.resolve()
+        except OSError:
+            return g
+    return None
+
+
+def _windows_user_profile() -> Path | None:
+    """Profil użytkownika Windows w WSL: /mnt/c/Users/<login>."""
+    c = Path("/mnt/c")
+    if not c.is_dir():
+        return None
+    for name in (os.environ.get("USER"), os.environ.get("LOGNAME"), os.environ.get("USERNAME")):
+        if not name:
+            continue
+        profile = c / "Users" / name
+        if profile.is_dir() and _path_is_allowed(profile):
+            try:
+                return profile.resolve()
+            except OSError:
+                return profile
+    return None
+
+
+def _pick_windows_folder(initial_wsl: str = "") -> str | None:
+    """Otwiera natywny dialog wyboru folderu Windows (działa z Google Drive G:)."""
+    if platform.system() == "Windows":
+        return None
+    ps_lines = [
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog",
+        "$d.Description = 'Wybierz folder z dokumentami (Google Drive, dysk G:, itp.)'",
+        "$d.ShowNewFolderButton = $false",
+    ]
+    if initial_wsl:
+        win_init = wsl_to_win(_normalize_browse_path(initial_wsl))
+        if win_init:
+            safe = win_init.replace("'", "''")
+            ps_lines.append(f"$d.SelectedPath = '{safe}'")
+    ps_lines += [
+        "$r = $d.ShowDialog()",
+        "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }",
+    ]
+    ps_script = "\n".join(ps_lines)
+    import base64
+    enc = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-STA", "-EncodedCommand", enc],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except FileNotFoundError:
+        return None
+    win_path = (proc.stdout or "").strip()
+    if not win_path or proc.returncode != 0:
+        return None
+    return _win_to_wsl(win_path)
+
+
+def _dir_is_readable(path: Path) -> bool:
+    try:
+        if not path.is_dir():
+            return False
+        with os.scandir(path) as it:
+            next(it, None)
+        return True
+    except (PermissionError, OSError):
+        return False
+
+
+def _friendly_root_label(p: Path) -> str:
+    s = str(p)
+    m = re.match(r"/mnt/([a-z])$", s, re.IGNORECASE)
+    if m:
+        letter = m.group(1).upper()
+        if letter == "G":
+            return "Google Drive (G:)"
+        return f"Dysk {letter}:"
+    if p == Path.home():
+        return "Home"
+    name = p.name
+    return name if name else s
+
+
+def _discover_browse_roots() -> list[dict]:
+    """Punkty startowe — Google Drive, dysk C: (lokalny) + SEARCH_ROOTS."""
+    drives: list[dict] = []
+    seen: set[str] = set()
+
+    gd = _google_drive_root()
+    if gd:
+        sp = str(gd)
+        seen.add(sp)
+        drives.append({
+            "path": sp,
+            "label": "Google Drive (G:)",
+            "kind": "gdrive",
+            "icon": "☁️",
+            "accessible": _dir_is_readable(gd),
+            "importable": True,
+            "priority": 0,
+        })
+
+    profile = _windows_user_profile()
+    if profile:
+        sp = str(profile)
+        if sp not in seen:
+            seen.add(sp)
+            drives.append({
+                "path": sp,
+                "label": "Komputer lokalny (C:)",
+                "kind": "local",
+                "icon": "💻",
+                "accessible": _dir_is_readable(profile),
+                "importable": True,
+                "priority": 1,
+            })
+
+    for i, root in enumerate(_resolve_allowed_roots()):
+        try:
+            sp = str(root.resolve())
+        except OSError:
+            sp = str(root)
+        if sp in seen:
+            continue
+        if gd and sp == "/mnt/g":
+            continue
+        if profile and sp == str(profile):
+            continue
+        seen.add(sp)
+        m = re.match(r"/mnt/([a-z])$", sp, re.IGNORECASE)
+        icon = "💾" if m else "📂"
+        drives.append({
+            "path": sp,
+            "label": _friendly_root_label(root),
+            "kind": "root",
+            "icon": icon,
+            "accessible": _dir_is_readable(root),
+            "importable": True,
+            "priority": i + 2,
+        })
+
+    drives.sort(key=lambda d: (d["priority"], not d["accessible"]))
+    return drives
+
+
 def _validate_extensions(exts: list) -> list[str]:
     out: list[str] = []
     for e in exts:
@@ -2718,35 +2923,56 @@ def delete_collection():
 
 @app.route('/browse', methods=['GET'])
 def browse():
-    raw = request.args.get('path', '/mnt').strip()
+    raw = request.args.get('path', '').strip()
     show_all = request.args.get('all', '0') == '1'
     ext_filter = [e.lower().lstrip('.') for e in request.args.getlist('ext') if e.strip()]
     modified_after = request.args.get('modified_after', '').strip()
     modified_before = request.args.get('modified_before', '').strip()
     default_doc_exts = ['docx', 'pdf', 'xlsx', 'xls', 'csv', 'md', 'json', 'txt']
     allowed_exts = ext_filter if ext_filter else default_doc_exts
-    p = Path(raw)
 
-    if not _path_is_allowed(p if p.exists() else p.parent if p.parent.exists() else Path("/mnt")):
-        return jsonify({"success": False, "error": "Ścieżka poza dozwolonymi katalogami (SEARCH_ROOTS)"})
+    if raw:
+        p = Path(_normalize_browse_path(raw)).expanduser()
+    else:
+        p = _default_browse_path()
 
     if not p.exists() or not p.is_dir():
         parent = p.parent
-        if parent.exists() and parent.is_dir():
+        if parent.exists() and parent.is_dir() and _path_is_browsable(parent):
             p = parent
         else:
-            p = Path('/mnt')
+            p = _default_browse_path()
+
+    try:
+        p = p.resolve()
+    except OSError:
+        p = _default_browse_path()
+
+    if not _path_is_browsable(p):
+        roots_hint = ", ".join(str(r) for r in _resolve_allowed_roots()[:5])
+        return jsonify({
+            "success": False,
+            "error": f"Ścieżka poza dozwolonymi katalogami (SEARCH_ROOTS). Dozwolone: {roots_hint}",
+            "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
+        })
 
     try:
         entries = []
         total_children = 0
         permission_denied = 0
 
-        for child in sorted(p.iterdir()):
+        for child in sorted(p.iterdir(), key=lambda c: (not c.is_dir(), c.name.lower())):
             total_children += 1
             try:
                 if child.is_dir():
-                    entries.append({"name": child.name, "path": str(child), "type": "dir"})
+                    if not _path_is_browsable(child):
+                        continue
+                    entries.append({
+                        "name": child.name,
+                        "path": str(child),
+                        "type": "dir",
+                        "importable": _path_is_allowed(child),
+                    })
                 else:
                     ext = child.suffix.lower().lstrip('.')
                     is_doc = ext in allowed_exts
@@ -2769,27 +2995,66 @@ def browse():
                         })
             except PermissionError:
                 permission_denied += 1
-                pass
 
-        # Lepsza diagnostyka dla pustych / problematycznych dysków (np. /mnt/g w WSL)
         is_empty = (total_children == 0) or (len(entries) == 0 and permission_denied == 0)
         has_hidden_or_other = (total_children > 0) and (len(entries) == 0) and (permission_denied == 0)
 
         return jsonify({
             "success": True,
             "current": str(p),
-            "parent": str(p.parent) if p != p.parent else None,
+            "win_path": wsl_to_win(str(p)),
+            "parent": str(p.parent) if p != p.parent and _path_is_browsable(p.parent) else None,
             "entries": entries,
             "is_empty": is_empty,
             "total_children": total_children,
             "permission_denied": permission_denied,
             "has_unlisted_items": has_hidden_or_other or permission_denied > 0,
             "show_all": show_all,
+            "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
             "filters": {
                 "ext": allowed_exts if not show_all else [],
                 "modified_after": modified_after or None,
                 "modified_before": modified_before or None,
             },
+        })
+    except PermissionError:
+        return jsonify({"success": False, "error": f"Brak uprawnień do odczytu: {p}"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/browse/pick', methods=['POST'])
+def browse_pick_folder():
+    """Natywny dialog Windows — zwraca wybrany folder jako ścieżkę WSL."""
+    data = request.get_json() or {}
+    initial = (data.get("initial") or "").strip()
+    try:
+        if platform.system() == "Windows":
+            return jsonify({
+                "success": False,
+                "error": "Dialog Windows działa z WSL — uruchom aplikację w WSL i otwórz UI w przeglądarce Windows.",
+            }), 400
+        wsl_path = _pick_windows_folder(initial)
+        if not wsl_path:
+            return jsonify({"success": False, "error": "Anulowano lub nie wybrano folderu"})
+        p = Path(wsl_path).expanduser()
+        try:
+            p = p.resolve()
+        except OSError:
+            pass
+        if not p.is_dir():
+            return jsonify({"success": False, "error": f"Folder nie istnieje: {wsl_path}"})
+        if not _path_is_allowed(p):
+            roots_hint = ", ".join(str(r) for r in _resolve_allowed_roots()[:5])
+            return jsonify({
+                "success": False,
+                "error": f"Folder poza SEARCH_ROOTS. Dozwolone: {roots_hint}",
+                "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
+            })
+        return jsonify({
+            "success": True,
+            "path": str(p),
+            "win_path": wsl_to_win(str(p)),
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -2800,161 +3065,24 @@ def browse():
 # ============================================================
 
 def _discover_local_drives():
-    """Zwraca listę sensownych punktów startowych (dysków/mountów) z wskaźnikami dostępności."""
-    import string
-    drives = []
-    sysname = platform.system()
-    home = str(Path.home())
-
-    # Helper: sprawdź dostęp i zwróć status
-    def check_access(path_str):
-        try:
-            p = Path(path_str)
-            if p.exists() and p.is_dir():
-                # Spróbuj czytać zawartość — to sygnalizuje prawdziwy dostęp
-                list(p.iterdir())
-                return "✓", True
-        except PermissionError:
-            return "⚠", False
-        except Exception:
-            return "✗", False
-        return "✗", False
-
-    try:
-        if sysname == "Windows":
-            for letter in string.ascii_uppercase:
-                p = Path(f"{letter}:\\")
-                status, accessible = check_access(str(p))
-                if p.exists():  # Pokaż dysk jeśli istnieje, niezależnie od dostępności
-                    drives.append({
-                        "path": str(p),
-                        "label": f"{letter}: {status}",
-                        "kind": "drive",
-                        "icon": "💾",
-                        "accessible": accessible
-                    })
-        else:
-            # Linux / WSL / macOS — Home zawsze na górze
-            home_accessible = False
-            try:
-                list(Path(home).iterdir())
-                home_accessible = True
-            except:
-                pass
-            drives.append({
-                "path": home,
-                "label": f"🏠 Home {'✓' if home_accessible else '⚠'}",
-                "kind": "home",
-                "icon": "🏠",
-                "accessible": home_accessible
-            })
-
-            # Inne katalogi bazowe
-            candidates = [('/', '/', '📁'), ('/mnt', 'Montowania WSL', '🪟'), ('/media', 'Nośniki USB', '💾'), ('/data', 'Data', '📂')]
-            for path, label, icon in candidates:
-                pp = Path(path)
-                status, accessible = check_access(path)
-                if pp.exists():
-                    drives.append({
-                        "path": str(pp),
-                        "label": f"{label} {status}",
-                        "kind": "dir",
-                        "icon": icon,
-                        "accessible": accessible
-                    })
-
-            # WSL — dyski Windows (C-J) z agresywnym sondowaniem
-            wsl_drives = []
-            mnt = Path("/mnt")
-            if mnt.exists():
-                # Iteruj dostępne dyski
-                try:
-                    for child in sorted(mnt.iterdir()):
-                        if child.is_dir() and len(child.name) == 1:
-                            letter = child.name.upper()
-                            status, accessible = check_access(str(child))
-                            wsl_drives.append({
-                                "path": str(child),
-                                "label": f"{letter}: (Win) {status}",
-                                "kind": "wsl",
-                                "icon": "🪟",
-                                "accessible": accessible
-                            })
-                except:
-                    pass
-
-                # Agresywnie sonduj pozostałe litery dysku (C-Z)
-                for letter in "cdefghijklmnopqrstuvwxyz":
-                    drive_path = mnt / letter
-                    if not any(d["path"] == str(drive_path) for d in wsl_drives):
-                        status, accessible = check_access(str(drive_path))
-                        if drive_path.exists():  # Pokaż dysk jeśli istnieje, niezależnie od dostępności
-                            wsl_drives.append({
-                                "path": str(drive_path),
-                                "label": f"{letter.upper()}: (Win) {status}",
-                                "kind": "wsl",
-                                "icon": "🪟",
-                                "accessible": accessible
-                            })
-
-            drives.extend(wsl_drives)
-
-            # Montowania dyskowe z /proc/mounts
-            try:
-                with open("/proc/mounts") as f:
-                    mounts = []
-                    for line in f:
-                        parts = line.split()
-                        if len(parts) < 3:
-                            continue
-                        dev, mp, fstype = parts[0], parts[1], parts[2]
-                        # Tylko sensowne systemy plików
-                        if fstype in ("ext4", "ext3", "xfs", "btrfs", "ntfs", "fuseblk", "vfat") and \
-                           mp not in ("/", "/boot", "/boot/efi", "/proc", "/sys", "/dev", "/run"):
-                            if len(mp) <= 24 and not any(x in mp for x in ("/snap/", "/docker/", "/tmp/")):
-                                if not any(d["path"] == mp for d in drives):
-                                    status, accessible = check_access(mp)
-                                    mounts.append({
-                                        "path": mp,
-                                        "label": f"{Path(mp).name or mp} {status}",
-                                        "kind": "mount",
-                                        "icon": "💿",
-                                        "accessible": accessible
-                                    })
-                    drives.extend(sorted(mounts, key=lambda x: x["label"]))
-            except Exception:
-                pass
-
-    except Exception:
-        pass
-
-    # Sortuj: Home, dostępne dyski, niedostępne dyski
-    drives_sorted = sorted(drives, key=lambda x: (
-        x["kind"] != "home",  # Home na początek
-        not x.get("accessible", False),  # Dostępne przed niedostępnymi
-        x["label"]  # Potem alfabetycznie
-    ))
-
-    return drives_sorted
-
-    # Deduplikacja + limit
-    seen = set()
-    out = []
-    for d in drives:
-        if d["path"] not in seen:
-            seen.add(d["path"])
-            out.append(d)
-    return out[:14]
+    """Punkty startowe z SEARCH_ROOTS — tylko ścieżki, które da się realnie przeglądać."""
+    return _discover_browse_roots()
 
 
 @app.route('/api/drives')
 def api_drives():
     try:
         drives = _discover_local_drives()
+        default_path = str(_default_browse_path())
+        for drive in drives:
+            drive["win_path"] = wsl_to_win(drive.get("path", ""))
         return jsonify({
             "success": True,
             "platform": platform.system(),
-            "drives": drives
+            "drives": drives,
+            "default_path": default_path,
+            "default_win_path": wsl_to_win(default_path),
+            "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -2963,6 +3091,8 @@ def api_drives():
 @app.route('/import/stream')
 def import_stream():
     folder = request.args.get('folder', '').strip()
+    if folder:
+        folder = _normalize_browse_path(folder)
     exts = request.args.getlist('ext') or ['docx','pdf','xlsx','xls','csv','md','json']
 
     def generate():
@@ -3105,14 +3235,14 @@ def import_folder():
     return jsonify({"success": False, "error": "Użyj /import/stream (SSE)"})
 
 def wsl_to_win(path: str) -> str:
-    """Konwertuje ścieżkę WSL /mnt/g/... na Windows G:\\..."""
+    """Konwertuje ścieżkę WSL /mnt/c/... na Windows C:\\..."""
     if not path:
         return ""
-    m = re.match(r'^/mnt/([a-zA-Z])/(.*)', path)
+    m = re.match(r'^/mnt/([a-zA-Z])(?:/(.*))?$', path)
     if m:
         drive = m.group(1).upper()
-        rest = m.group(2).replace('/', '\\')
-        return f"{drive}:\\{rest}"
+        rest = (m.group(2) or "").replace('/', '\\')
+        return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
     return path
 
 

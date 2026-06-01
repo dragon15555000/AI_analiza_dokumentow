@@ -109,6 +109,10 @@
         #contextPreviewModal .ctx-modal-foot { padding:10px 18px; border-top:1px solid #e2e8f0; display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; }
         .doc-filter-bar, .browse-filter-bar { padding:8px 16px 10px; border-bottom:1px solid #f0f0f0; background:#fafbff; }
         .browse-entry-meta { font-size:0.72rem; color:#64748b; margin-left:auto; white-space:nowrap; }
+        .drive-chip { font-size:0.72rem; border-radius:999px; }
+        .drive-chip.drive-ok { border-color:#86efac; }
+        .drive-chip.drive-warn { opacity:0.55; }
+        .drive-chip.drive-active { border-color:#0d6efd; background:#eef2ff; }
 
         /* Browser dokumentów */
         .doc-table-wrap { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
@@ -1079,20 +1083,33 @@
 <div class="row g-3">
   <div class="col-lg-5">
     <div class="search-card">
-      <h2>Przeglądarka folderów</h2>
+      <h2>Import — wybór folderu</h2>
 
-      <!-- AUTOMATYCZNE MAPOWANIE DYSKÓW LOKALNYCH -->
-      <div class="mb-2">
-        <div class="d-flex align-items-center justify-content-between mb-1">
-          <span class="small fw-bold text-muted">Szybki dostęp — dyski lokalne:</span>
-          <button class="btn btn-sm btn-link p-0" style="font-size:0.7rem;" onclick="loadQuickDrives()" title="Odśwież listę dysków">↻</button>
-        </div>
-        <div id="quickDrives" class="d-flex flex-wrap gap-1" style="min-height:28px;"></div>
+      <div class="mb-3">
+        <button type="button" class="btn btn-primary w-100" id="btnWinFolderPick" onclick="pickFolderWindows()">
+          📂 Wybierz folder w Windows (C:, G: — Google Drive)
+        </button>
+        <div class="small text-muted mt-1">Otwiera standardowe okno Windows — dysk lokalny C:, Google Drive G:, OneDrive itd.</div>
       </div>
 
-      <div class="input-group input-group-sm mb-2">
-        <input type="text" id="browsePathInput" class="form-control font-monospace" value="/mnt" placeholder="/mnt/...">
-        <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
+      <div class="mb-2">
+        <label class="small fw-bold text-muted">Lub wpisz ścieżkę (Windows lub WSL):</label>
+        <div class="input-group input-group-sm">
+          <input type="text" id="browsePathInput" class="form-control font-monospace" value=""
+            placeholder='C:\Users\...\folder  lub  G:\Mój dysk\...  lub  /mnt/c/...'
+            onkeydown="if(event.key==='Enter') browseDir(this.value)">
+          <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
+        </div>
+      </div>
+
+      <div class="mb-2">
+        <div class="d-flex align-items-center justify-content-between mb-1">
+          <span class="small fw-bold text-muted">Skrót:</span>
+          <button class="btn btn-sm btn-link p-0" style="font-size:0.7rem;" onclick="loadQuickDrives(true)" title="Odśwież">↻</button>
+        </div>
+        <div id="quickDrives" class="d-flex flex-wrap gap-1" style="min-height:28px;">
+          <span class="text-muted small">ładowanie...</span>
+        </div>
       </div>
       <div id="browseCrumb" class="small text-muted mb-2"></div>
       <div class="browse-filter-bar d-flex flex-wrap gap-2 align-items-center mb-2">
@@ -1119,8 +1136,10 @@
       <div class="mb-3">
         <label class="form-label small fw-bold">Wybrany folder:</label>
         <div class="input-group">
-          <input type="text" id="importPathInput" class="form-control font-monospace" placeholder="Wybierz folder z przeglądarki lub wpisz ścieżkę..." value="">
-          <button class="btn btn-outline-secondary btn-sm" onclick="browseDir(document.getElementById('importPathInput').value)">Przeglądaj</button>
+          <input type="text" id="importPathInput" class="form-control font-monospace"
+            placeholder='C:\Users\...  lub  G:\Mój dysk\...  — albo wybierz przyciskiem Windows' value="">
+          <button class="btn btn-outline-primary btn-sm" onclick="pickFolderWindows()" title="Dialog Windows">📂</button>
+          <button class="btn btn-outline-secondary btn-sm" onclick="browseDir(document.getElementById('importPathInput').value)">Lista</button>
         </div>
       </div>
       <div class="mb-3">
@@ -2428,6 +2447,57 @@ function toggleResult(idx) {
 }
 
 // ---- FOLDER BROWSER ----
+let _activeBrowsePath = '';
+
+function wslToWin(path) {
+    if (!path) return '';
+    const m = path.match(/^\/mnt\/([a-zA-Z])(?:\/(.*))?$/);
+    if (m) {
+        const rest = (m[2] || '').replace(/\//g, '\\');
+        return rest ? m[1].toUpperCase() + ':\\' + rest : m[1].toUpperCase() + ':\\';
+    }
+    return path;
+}
+
+function normalizeBrowsePath(raw) {
+    return normalizeSqlitePath(raw);
+}
+
+function displayPathForUser(wslPath, winPath) {
+    return winPath || wslToWin(wslPath) || wslPath || '';
+}
+
+async function pickFolderWindows() {
+    const btn = document.getElementById('btnWinFolderPick');
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Otwieram okno Windows...';
+    try {
+        const initial = document.getElementById('importPathInput').value.trim()
+            || document.getElementById('browsePathInput').value.trim();
+        const res = await fetch('/browse/pick', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initial }),
+        });
+        const d = await res.json();
+        if (!d.success) {
+            if (d.error && d.error !== 'Anulowano lub nie wybrano folderu') {
+                alert(d.error);
+            }
+            return;
+        }
+        selectImportFolder(d.path, d.win_path);
+        browseDir(d.path);
+    } catch (e) {
+        alert('Błąd dialogu Windows: ' + e);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+    }
+}
+
 function getBrowseFilterQuery() {
     const exts = [...document.querySelectorAll('.browse-ext-filter:checked')].map(el => el.value);
     const params = new URLSearchParams();
@@ -2439,113 +2509,142 @@ function getBrowseFilterQuery() {
     return params.toString();
 }
 
+function renderBrowseError(d) {
+    const list = document.getElementById('browseList');
+    let html = `<div class="p-3 alert alert-danger small mb-0">${escapeHtml(d.error || 'Nie można otworzyć folderu')}</div>`;
+    const roots = d.allowed_roots || [];
+    if (roots.length) {
+        html += `<div class="p-2 small text-muted">Dozwolone katalogi (SEARCH_ROOTS):<br>` +
+            roots.map(r => `<a href="#" class="me-2" onclick="quickDriveSelect('${String(r).replace(/'/g,"\\'")}');return false">${escapeHtml(r)}</a>`).join('') +
+            `</div>`;
+    }
+    list.innerHTML = html;
+}
+
+function renderBrowseEntries(d) {
+    _activeBrowsePath = d.current;
+    const displayPath = displayPathForUser(d.current, d.win_path);
+    const browseInput = document.getElementById('browsePathInput');
+    browseInput.value = displayPath;
+    browseInput.title = d.current;
+    highlightActiveDrive(d.current);
+
+    const parts = d.current.split('/').filter(Boolean);
+    let acc = '';
+    const segLinks = parts.map(seg => {
+        acc += '/' + seg;
+        const p = acc;
+        return `<a href="#" onclick="browseDir('${p.replace(/'/g,"\\'")}');return false">${escapeHtml(seg)}</a>`;
+    }).join(' / ');
+    const crumb = document.getElementById('browseCrumb');
+    const pathHint = displayPath !== d.current
+        ? `<span class="text-muted" style="font-size:0.7rem;"> (${escapeHtml(displayPath)})</span>` : '';
+    crumb.innerHTML = d.parent
+        ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; ${segLinks || escapeHtml(d.current)}${pathHint}`
+        : ((segLinks || escapeHtml(d.current)) + pathHint);
+
+    const list = document.getElementById('browseList');
+    if (!d.entries || d.entries.length === 0) {
+        let msg = '';
+        if (d.is_empty) {
+            msg = `<div class="p-3 text-muted small">
+                <strong>Ten folder jest pusty.</strong><br>
+                <span style="font-size:0.7rem">Sprawdź montowanie Google Drive w WSL (<code>/mnt/g</code>) — folder musi być dostępny w systemie plików.</span>
+            </div>`;
+        } else if (d.has_unlisted_items) {
+            msg = `<div class="p-3">
+                <div class="small text-warning">Brak plików dokumentów w tym folderze.</div>
+                <div class="small text-muted mt-1">Są inne pliki, ale żaden nie pasuje do wybranych typów (PDF/DOCX/XLSX itp.).</div>
+                <button class="btn btn-sm btn-outline-primary mt-2" onclick="browseDirWithAll('${d.current.replace(/'/g,"\\'")}')">Pokaż wszystkie pliki i foldery</button>
+            </div>`;
+        } else if (d.permission_denied > 0) {
+            msg = `<div class="p-3 text-muted small">Brak uprawnień do odczytu zawartości (${d.permission_denied} elementów pominiętych).</div>`;
+        } else {
+            msg = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
+        }
+        list.innerHTML = msg;
+        return;
+    }
+
+    list.innerHTML = d.entries.map(e => {
+        if (e.type === 'dir') {
+            const chooseBtn = `<button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
+                        onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>`;
+            return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
+                <span style="color:#f59e0b;">📁</span>
+                <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.name)}</span>
+                ${chooseBtn}
+            </div>`;
+        }
+        const ext = e.name.split('.').pop().toLowerCase();
+        const cls = {'pdf':'ext-pdf','docx':'ext-docx','xlsx':'ext-xlsx','json':'ext-json','md':'ext-md','csv':'ext-csv'}[ext]||'ext-txt';
+        const meta = (e.modified || e.size_kb)
+            ? `<span class="browse-entry-meta">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
+        return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.85;">
+            <span style="font-size:0.7rem;color:#64748b;">📄</span>
+            <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</span>
+            ${meta}
+            <span class="ext-badge ${cls}">${ext}</span>
+        </div>`;
+    }).join('');
+}
+
 function browseDir(path) {
-    if (!path) path = '/mnt';
+    path = normalizeBrowsePath(path);
+    const list = document.getElementById('browseList');
+    list.innerHTML = '<div class="p-3 text-muted small"><span class="spinner-border spinner-border-sm me-1"></span> Ładowanie...</div>';
     const fq = getBrowseFilterQuery();
-    const url = '/browse?path=' + encodeURIComponent(path) + (fq ? '&' + fq : '');
+    const url = '/browse?path=' + encodeURIComponent(path || '') + (fq ? '&' + fq : '');
     fetch(url)
     .then(r => r.json())
     .then(d => {
-        if (!d.success) return;
-        document.getElementById('browsePathInput').value = d.current;
-        const crumb = document.getElementById('browseCrumb');
-        crumb.innerHTML = d.parent
-            ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
-            : `<span>${d.current}</span>`;
-        const list = document.getElementById('browseList');
-
-        if (!d.entries || d.entries.length === 0) {
-            let msg = '';
-            if (d.is_empty) {
-                msg = `<div class="p-3 text-muted small">
-                    <strong>Ten folder jest pusty.</strong><br>
-                    <span style="font-size:0.7rem">/mnt/g w WSL często pokazuje się jako pusty, gdy dysk nie jest w pełni zamontowany lub nie ma uprawnień.</span>
-                </div>`;
-            } else if (d.has_unlisted_items) {
-                msg = `<div class="p-3">
-                    <div class="small text-warning">Brak plików dokumentów w tym folderze.</div>
-                    <div class="small text-muted mt-1">Na dysku są pliki, ale żaden nie pasuje do wybranych typów (PDF/DOCX/XLSX itp.).</div>
-                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="browseDirWithAll('${d.current.replace(/'/g,"\\'")}')">Pokaż wszystkie pliki i foldery</button>
-                </div>`;
-            } else if (d.permission_denied > 0) {
-                msg = `<div class="p-3 text-muted small">Brak uprawnień do odczytu zawartości (${d.permission_denied} elementów pominiętych).</div>`;
-            } else {
-                msg = '<div class="p-3 text-muted small">Brak dostępnych elementów</div>';
-            }
-            list.innerHTML = msg;
+        if (!d.success) {
+            renderBrowseError(d);
             return;
         }
-        list.innerHTML = d.entries.map(e => {
-            if (e.type === 'dir') {
-                return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
-                    <span style="color:#f59e0b;">📁</span>
-                    <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
-                    <button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
-                        onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>
-                </div>`;
-            } else {
-                const ext = e.name.split('.').pop().toLowerCase();
-                const cls = {'pdf':'ext-pdf','docx':'ext-docx','xlsx':'ext-xlsx','json':'ext-json','md':'ext-md','csv':'ext-csv'}[ext]||'ext-txt';
-                const meta = (e.modified || e.size_kb)
-                    ? `<span class="browse-entry-meta">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
-                return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.85;">
-                    <span style="font-size:0.7rem;color:#64748b;">📄</span>
-                    <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</span>
-                    ${meta}
-                    <span class="ext-badge ${cls}">${ext}</span>
-                </div>`;
-            }
-        }).join('');
+        renderBrowseEntries(d);
+    })
+    .catch(err => {
+        list.innerHTML = `<div class="p-3 alert alert-danger small">${escapeHtml(String(err))}</div>`;
     });
 }
 
 function browseDirWithAll(path) {
-    if (!path) path = '/mnt';
+    path = normalizeBrowsePath(path || _activeBrowsePath || '');
+    const list = document.getElementById('browseList');
+    list.innerHTML = '<div class="p-3 text-muted small">Ładowanie...</div>';
     fetch('/browse?path=' + encodeURIComponent(path) + '&all=1')
         .then(r => r.json())
         .then(d => {
-            if (!d.success) return;
-            document.getElementById('browsePathInput').value = d.current;
-            const crumb = document.getElementById('browseCrumb');
-            crumb.innerHTML = d.parent
-                ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; <span>${d.current}</span>`
-                : `<span>${d.current}</span>`;
-            const list = document.getElementById('browseList');
-            if (!d.entries || !d.entries.length) {
-                list.innerHTML = '<div class="p-3 text-muted small">Folder jest pusty lub brak uprawnień.</div>';
+            if (!d.success) {
+                renderBrowseError(d);
                 return;
             }
-            list.innerHTML = d.entries.map(e => {
-                if (e.type === 'dir') {
-                    return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
-                        <span style="color:#f59e0b;">📁</span>
-                        <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${e.name}</span>
-                        <button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
-                            onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>
-                    </div>`;
-                } else {
-                    const ext = e.ext || (e.name.split('.').pop() || '').toLowerCase();
-                    const meta = (e.modified || e.size_kb)
-                        ? `<span class="browse-entry-meta">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
-                    return `<div class="d-flex align-items-center px-3 py-1 border-bottom bg-light" style="gap:8px;opacity:0.75;">
-                        <span style="font-size:0.7rem;color:#64748b;">📄</span>
-                        <span class="small text-muted flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</span>
-                        ${meta}
-                        <span class="ext-badge">${ext}</span>
-                    </div>`;
-                }
-            }).join('');
+            renderBrowseEntries(d);
         });
 }
 
-function selectImportFolder(path) {
-    document.getElementById('importPathInput').value = path;
+function selectImportFolder(path, winPath) {
+    const display = displayPathForUser(path, winPath);
+    const importInput = document.getElementById('importPathInput');
+    importInput.value = display;
+    importInput.title = path;
+    const browseInput = document.getElementById('browsePathInput');
+    browseInput.value = display;
+    browseInput.title = path;
 }
 
-// ---- AUTOMATYCZNE DYSKI LOKALNE (Import tab) ----
+// ---- SZYBKI DOSTĘP (SEARCH_ROOTS) ----
 let quickDrivesLoaded = false;
 
-function loadQuickDrives() {
+function highlightActiveDrive(path) {
+    document.querySelectorAll('#quickDrives .drive-chip').forEach(btn => {
+        const p = btn.dataset.path || '';
+        btn.classList.toggle('drive-active', path === p || (p && path.startsWith(p + '/')));
+    });
+}
+
+function loadQuickDrives(forceBrowse) {
     const container = document.getElementById('quickDrives');
     if (!container) return;
     container.innerHTML = '<span class="text-muted small">ładowanie...</span>';
@@ -2554,31 +2653,47 @@ function loadQuickDrives() {
         .then(r => r.json())
         .then(d => {
             if (!d.success || !d.drives || !d.drives.length) {
-                container.innerHTML = '<span class="text-muted small">Nie wykryto dysków</span>';
+                container.innerHTML = '<span class="text-muted small">Brak katalogów w SEARCH_ROOTS (.env)</span>';
                 return;
             }
             container.innerHTML = d.drives.map(drive => {
                 const safePath = drive.path.replace(/'/g, "\\'");
-                const title = drive.path;
-                return `<button class="btn btn-sm btn-outline-secondary py-0 px-2" 
-                            style="font-size:0.72rem; border-radius:999px;"
-                            title="${title}"
-                            onclick="quickDriveSelect('${safePath}')">
-                        ${drive.icon || '💾'} ${drive.label}
+                const safeWin = (drive.win_path || '').replace(/'/g, "\\'");
+                const cls = drive.accessible ? 'drive-ok' : 'drive-warn';
+                const hint = (drive.win_path || drive.path) + (drive.importable ? '' : ' · tylko nawigacja');
+                return `<button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 drive-chip ${cls}"
+                            data-path="${escapeHtml(drive.path)}"
+                            title="${escapeHtml(hint)}"
+                            onclick="quickDriveSelect('${safePath}', ${drive.importable ? 'true' : 'false'}, '${safeWin}')">
+                        ${drive.icon || '💾'} ${escapeHtml(drive.label)}${drive.accessible ? '' : ' ⚠'}
                     </button>`;
             }).join(' ');
             quickDrivesLoaded = true;
+            window.quickDrivesLoaded = true;
+
+            if (d.default_path) {
+                const displayDefault = d.default_win_path || displayPathForUser(d.default_path);
+                document.getElementById('browsePathInput').value = displayDefault;
+                document.getElementById('browsePathInput').title = d.default_path;
+                if (forceBrowse || !_activeBrowsePath) {
+                    browseDir(d.default_path);
+                }
+            }
         })
         .catch(() => {
-            container.innerHTML = '<span class="text-muted small">Błąd pobierania dysków</span>';
+            container.innerHTML = '<span class="text-muted small">Błąd pobierania katalogów</span>';
         });
-    window.quickDrivesLoaded = true;
 }
 
-function quickDriveSelect(path) {
-    // Ustaw oba inputy + od razu otwórz przeglądarkę
-    document.getElementById('browsePathInput').value = path;
-    document.getElementById('importPathInput').value = path;
+function quickDriveSelect(path, setImport, winPath) {
+    const display = displayPathForUser(path, winPath);
+    document.getElementById('browsePathInput').value = display;
+    document.getElementById('browsePathInput').title = path;
+    if (setImport) {
+        const importInput = document.getElementById('importPathInput');
+        importInput.value = display;
+        importInput.title = path;
+    }
     browseDir(path);
 }
 
@@ -2587,7 +2702,7 @@ const _origShowTab = showTab;
 showTab = function(name) {
     _origShowTab(name);
     if (name === 'import' && !window.quickDrivesLoaded) {
-        setTimeout(() => { if (document.getElementById('quickDrives')) loadQuickDrives(); }, 120);
+        setTimeout(() => { if (document.getElementById('quickDrives')) loadQuickDrives(true); }, 80);
     }
 };
 
