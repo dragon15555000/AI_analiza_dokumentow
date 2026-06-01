@@ -239,6 +239,9 @@
         <a class="nav-link" href="#" onclick="showTab('network'); return false;">Sieć powiązań</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('timeline'); return false;">Oś czasu</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('reports'); return false;">Raporty śledcze</a>
     </li>
     <li class="nav-item" id="navItemSql" style="display:none;">
@@ -683,6 +686,49 @@
     </div>
   </div>
 </div>
+</div>
+
+<!-- TAB: OŚ CZASU / CHRONOLOGIA -->
+<div id="tabTimeline" class="main-wrap" style="display:none;">
+  <div class="row g-3">
+    <div class="col-lg-4">
+      <div class="search-card">
+        <h2>Oś czasu / Chronologia</h2>
+        <p class="small text-muted">Aplikacja przeszukuje bazę w poszukiwaniu dat (RegEx), a LLM układa je w chronologiczny ciąg zdarzeń.</p>
+        <div class="mb-3">
+          <label class="form-label small fw-bold mb-1">Czego dotyczy chronologia? (opcjonalne)</label>
+          <input type="text" id="timelineQuery" class="form-control form-control-sm" placeholder="np. budowa drogi XYZ, przetarg...">
+        </div>
+        <div class="mb-3">
+          <select class="form-select form-select-sm" id="timelineLimit">
+            <option value="15">Przeszukaj 15 fragmentów</option>
+            <option value="25" selected>Przeszukaj 25 fragmentów</option>
+            <option value="40">Przeszukaj 40 fragmentów (może zająć dłużej)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary w-100" onclick="generateTimeline()" id="timelineBtn">Generuj Oś Czasu</button>
+      </div>
+
+      <div id="timelineStatus" class="search-card mt-3 d-none" style="background:#f8f9ff;border:1px solid #e0e7ff;">
+        <div class="d-flex align-items-center gap-2">
+          <div class="spinner-border spinner-border-sm text-primary"></div>
+          <span class="small fw-semibold text-primary" id="timelineStatusText">Wyszukiwanie dat (RegEx) i analiza LLM...</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-8">
+      <div class="search-card" style="min-height:500px; background: #fafbff;">
+        <h5 class="mb-4" style="color:#1e293b; font-weight:700;">Chronologia zdarzeń</h5>
+        <div id="timelineResult">
+          <div class="text-center py-5 text-muted">
+            <div style="font-size:2.5rem;">⏳</div>
+            <div class="mt-2">Wpisz temat i kliknij "Generuj Oś Czasu"</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- TAB: Raporty śledcze (Gotowe szablony analityczne) -->
@@ -3464,6 +3510,89 @@ function initNetworkFilterListeners() {
         orphanCb.onchange = renderNetworkWithFilters;
         orphanCb._filterListenerAttached = true;
     }
+}
+
+// ============================================================
+// OŚ CZASU / TIMELINE
+// ============================================================
+let timelineAbortController = null;
+
+function generateTimeline() {
+    const query = document.getElementById('timelineQuery').value.trim();
+    const limit = parseInt(document.getElementById('timelineLimit').value) || 25;
+
+    if (timelineAbortController) timelineAbortController.abort();
+    timelineAbortController = new AbortController();
+
+    document.getElementById('timelineStatus').classList.remove('d-none');
+    document.getElementById('timelineResult').innerHTML = '';
+    document.getElementById('timelineBtn').disabled = true;
+
+    const finish = (errMsg) => {
+        document.getElementById('timelineStatus').classList.add('d-none');
+        document.getElementById('timelineBtn').disabled = false;
+        timelineAbortController = null;
+        if (errMsg) {
+            document.getElementById('timelineResult').innerHTML =
+                `<div class="alert alert-danger">❌ ${escapeHtml(errMsg)}</div>`;
+        }
+    };
+
+    streamSSEPost('/timeline', {
+        query,
+        limit,
+        llm_provider: getCurrentLlmProvider(),
+        openrouter_model: getCurrentOpenRouterModel(),
+    }, {
+        progress: (d) => {
+            document.getElementById('timelineStatusText').textContent = d.message || 'Przetwarzanie…';
+        },
+        done: (d) => {
+            if (!d.success) {
+                finish(d.error || 'Błąd generowania osi czasu');
+                return;
+            }
+            finish(null);
+            renderTimeline(d);
+        },
+        error: (d) => {
+            finish(d.error || d.msg || 'Błąd połączenia z serwerem');
+        },
+    }, timelineAbortController.signal);
+}
+
+function renderTimeline(data) {
+    if (!data.timeline || !data.timeline.length) {
+        document.getElementById('timelineResult').innerHTML =
+            '<div class="alert alert-info">ℹ️ Nie znaleziono dat w przeszukanych dokumentach.</div>';
+        return;
+    }
+
+    const timeline = data.timeline;
+    let html = '<div style="position:relative;padding-left:40px;">';
+
+    timeline.forEach((event, idx) => {
+        const dateStr = event.date || '(bez daty)';
+        const eventText = escapeHtml(event.event || '(brak opisu)');
+        const entityText = event.entity ? ` <span class="badge bg-light text-dark">${escapeHtml(event.entity)}</span>` : '';
+        const docText = event.doc ? `<small class="text-muted d-block mt-1">📄 ${escapeHtml(event.doc)}</small>` : '';
+
+        html += `
+            <div style="position:relative;margin-bottom:20px;padding-bottom:20px;border-left:2px solid #cbd5e1;padding-left:20px;">
+                <div style="position:absolute;left:-12px;top:4px;width:20px;height:20px;background:#4f46e5;border-radius:50%;border:3px solid #fff;"></div>
+                <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">
+                    📅 ${escapeHtml(dateStr)}
+                </div>
+                <div style="color:#374151;margin-bottom:6px;">
+                    ${eventText}${entityText}
+                </div>
+                ${docText}
+            </div>
+        `;
+    });
+
+    html += '</div>';
+    document.getElementById('timelineResult').innerHTML = html;
 }
 
 // Uruchom inicjalizację filtrów po załadowaniu strony
