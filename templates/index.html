@@ -3788,26 +3788,11 @@ function setStatusDot(id, state) {
     el.title = {ok:'Połączono', error:'Brak połączenia', no_key:'Brak klucza API'}[state] || state;
 }
 
+// checkHealth zachowana dla kompatybilności (np. konsola) — deleguje do ujednoliconego updateHealthStatus
 function checkHealth() {
-    fetch('/health')
-        .then(r => r.json())
-        .then(d => {
-            setStatusDot('dotQdrant', d.qdrant);
-            setStatusDot('dotLlm',    d.llm);
-            const ocrDot = document.getElementById('dotOcr');
-            if (ocrDot) {
-                const ocr = d.ocr || {};
-                const ok = ocr.available ?? d.ocr_available ?? false;
-                ocrDot.className = 'status-dot ' + (ok ? 'dot-ok' : 'dot-warn');
-                ocrDot.title = ok
-                    ? `OCR (Tesseract) — dostępny · język: ${ocr.lang || 'pol'}`
-                    : `OCR niedostępny · ${ocr.install_hint || 'sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils'}`;
-            }
-        })
-        .catch(() => {
-            setStatusDot('dotQdrant', 'error');
-            setStatusDot('dotLlm',    'error');
-        });
+    if (typeof updateHealthStatus === 'function') {
+        updateHealthStatus();
+    }
 }
 
 // --- Adaptive context detection ---
@@ -3844,16 +3829,17 @@ function dismissContextBanner() {
 // --- Startup checklist modal ---
 function buildCheckRow(label, state, detail) {
     const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid #f1f5f9';
     const icon = {ok:'✅', error:'❌', no_key:'⚠️', warn:'⚠️'}[state] || '⬜';
     const color = {ok:'#166534', error:'#991b1b', no_key:'#92400e', warn:'#92400e'}[state] || '#6c757d';
     const tdIcon = document.createElement('td');
-    tdIcon.style.cssText = 'width:32px;font-size:1.1rem;';
+    tdIcon.style.cssText = 'width:32px;font-size:1.1rem;padding:5px 2px;';
     tdIcon.textContent = icon;
     const tdLabel = document.createElement('td');
-    tdLabel.style.cssText = 'font-weight:600;padding:4px 8px;';
+    tdLabel.style.cssText = 'font-weight:600;padding:5px 8px;white-space:nowrap;';
     tdLabel.textContent = label;
     const tdDetail = document.createElement('td');
-    tdDetail.style.cssText = `font-size:0.82rem;color:${color};`;
+    tdDetail.style.cssText = `font-size:0.82rem;color:${color};padding:5px 4px;line-height:1.3;`;
     tdDetail.textContent = detail;
     tr.append(tdIcon, tdLabel, tdDetail);
     return tr;
@@ -3861,74 +3847,127 @@ function buildCheckRow(label, state, detail) {
 
 function showStartupChecklist(d) {
     const modal = document.getElementById('startupModal');
-    const tbody = document.getElementById('startupCheckBody');
-    tbody.innerHTML = '';
+    const connectionsBody = document.getElementById('startupConnectionsBody');
+    const componentsBody = document.getElementById('startupComponentsBody');
 
-    const qdrantOk = (d.qdrant && typeof d.qdrant === 'object')
-        ? !!d.qdrant.ok
-        : (d.qdrant_status === 'ok' || d.qdrant === 'ok');
-    const llmState = d.llm_status
-        || ((d.llm && typeof d.llm === 'object') ? (d.llm.ok ? 'ok' : (d.provider === 'openrouter' && !d.llm.ok ? 'error' : 'error')) : d.llm);
+    if (!connectionsBody || !componentsBody) {
+        // Bezpieczny fallback (nie powinien się zdarzyć po pełnej implementacji modala)
+        console.warn('Brak elementów tabel w #startupModal — sprawdź HTML');
+        return;
+    }
 
-    const llmLabel = d.llm_provider === 'openrouter' ? `OpenRouter (${d.llm_model || ''})` : `Ollama (${d.llm_model || ''})`;
-    const llmDetail = {ok:'Połączono', error:'Nie odpowiada — sprawdź Ollama / OpenRouter', no_key:'Brak klucza OPENROUTER_API_KEY w .env'}[llmState] || llmState;
+    connectionsBody.innerHTML = '';
+    componentsBody.innerHTML = '';
 
-    const collName = d.collection || d.active_collection?.name || '?';
-    const vecCount = d.vectors_count ?? d.active_collection?.points ?? 0;
-    const qdrantDetail = qdrantOk
-        ? `Połączono · kolekcja "${collName}" · ${Number(vecCount).toLocaleString('pl')} wektorów`
-        : (d.qdrant_error || d.qdrant?.error || 'Błąd połączenia — sprawdź QDRANT_URL i QDRANT_KEY w .env');
-    const qdrantPortInfo = d.ports && d.ports.qdrant ? ` (port: ${d.ports.qdrant})` : '';
+    // Ogólny status
+    const overallEl = document.getElementById('startupOverallStatus');
+    if (overallEl) {
+        const overall = d.overall || 'degraded';
+        if (overall === 'ok') {
+            overallEl.innerHTML = `<strong style="color:#166534;">🟢 System gotowy do pracy</strong>`;
+            overallEl.style.background = '#f0fdf4';
+            overallEl.style.borderLeft = '4px solid #22c55e';
+        } else {
+            overallEl.innerHTML = `<strong style="color:#854d0e;">🟡 Wymaga uwagi</strong>`;
+            overallEl.style.background = '#fefce8';
+            overallEl.style.borderLeft = '4px solid #eab308';
+        }
+    }
 
-    const llmDetailFull = llmDetail + (d.llm_provider==='openrouter' ? ` · ${llmLabel}` : '')
-        + (d.llm_error || d.llm?.error ? ` — ${d.llm_error || d.llm?.error}` : '');
+    // === Połączenia ===
+    const qdrantOk = (d.qdrant && typeof d.qdrant === 'object') ? !!d.qdrant.ok : (d.qdrant_status === 'ok' || d.qdrant === 'ok');
+    let qdrantDetail;
+    if (qdrantOk) {
+        const points = Number(d.vectors_count ?? d.active_collection?.points ?? 0);
+        const coll = d.collection || d.active_collection?.name || '?';
+        if (points === 0) {
+            qdrantDetail = `Połączono · kolekcja "${coll}" jest pusta — zaimportuj dokumenty (pierwsze wyszukiwanie będzie puste)`;
+        } else {
+            qdrantDetail = `Połączono · kolekcja "${coll}" · ${points.toLocaleString('pl')} wektorów`;
+        }
+    } else {
+        qdrantDetail = d.qdrant_error || d.qdrant?.error || 'Błąd połączenia — sprawdź QDRANT_URL i QDRANT_KEY (lub docker logs qdrant)';
+    }
 
-    const sqlPortInfo = d.ports && d.ports.sql ? ` · port ${d.ports.sql}` : '';
-    const sqlDetail = d.sql_configured
-        ? `Skonfigurowany: ${d.sql_server||''} / ${d.sql_database||}${sqlPortInfo}`
-        : 'Nie skonfigurowany (opcjonalne — zakładka SQL)';
+    connectionsBody.append(
+        buildCheckRow('Qdrant', qdrantOk ? 'ok' : 'error', qdrantDetail),
+        buildCheckRow('LLM', d.llm_status || (d.llm?.ok ? 'ok' : 'error'), getLlmDetail(d)),
+        buildCheckRow('SQL Server', d.sql_configured ? 'ok' : 'warn', getSqlDetail(d))
+    );
 
-    // Port summary row
-    const ports = d.ports || {};
-    const portNames = Object.keys(ports);
-    const portSummary = portNames.length
-        ? portNames.map(k => `${k}: ${ports[k]==='ok'?'✅':'❌'}`).join('  ')
-        : 'brak danych';
-    const allPortsOk = portNames.length && portNames.every(k => ports[k] === 'ok');
+    // === Komponenty ===
+    const ocrOk = (d.ocr && d.ocr.available) ?? d.ocr_available ?? false;
+    const parsersOk = (d.file_parsers && d.file_parsers.pdf_text && d.file_parsers.excel) ?? false;
 
-    const ocr = d.ocr || {};
-    const ocrOk = ocr.available ?? d.ocr_available;
-    const ocrDetail = ocrOk
-        ? (ocr.note || 'Skany PDF i obrazy (język pol)')
-        : (ocr.install_hint || 'Opcjonalne: sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils · pip install pytesseract pdf2image');
-
-    const fp = d.file_parsers || {};
-    const parsersOk = fp.pdf_text && fp.excel;
-    const parsersDetail = parsersOk
-        ? (fp.note || 'PDF (tekst) · Excel (forensyka) · DOCX')
-        : 'Brak pdfplumber/openpyxl — pip install -r requirements.txt';
-
-    tbody.append(
-        buildCheckRow('Qdrant', qdrantOk ? 'ok' : 'error', qdrantDetail + qdrantPortInfo),
-        buildCheckRow('LLM', llmState, llmDetailFull),
-        buildCheckRow('SQL Server',
-            d.sql_configured ? 'ok' : 'warn',
-            sqlDetail),
-        buildCheckRow('Pliki Excel/PDF',
-            parsersOk ? 'ok' : 'warn',
-            parsersDetail),
-        buildCheckRow('OCR (Tesseract)',
-            ocrOk ? 'ok' : 'warn',
-            ocrDetail),
-        buildCheckRow('Porty', allPortsOk ? 'ok' : 'warn', portSummary)
+    componentsBody.append(
+        buildCheckRow('Pliki Excel/PDF', parsersOk ? 'ok' : 'warn', getParsersDetail(d)),
+        buildCheckRow('OCR (Tesseract)', ocrOk ? 'ok' : 'warn', getOcrDetail(d))
     );
 
     modal.style.display = 'flex';
     loadServiceStatus();
 }
 
+// Pomocnicze funkcje do generowania szczegółów
+function getLlmDetail(d) {
+    const provider = d.llm_provider || d.provider || 'ollama';
+    const model = d.llm_model || '';
+    const state = d.llm_status || (d.llm?.ok ? 'ok' : 'error');
+
+    if (state === 'ok') {
+        return provider === 'openrouter' 
+            ? `Połączono · OpenRouter (${model})` 
+            : `Połączono · Ollama (${model})`;
+    }
+    if (state === 'no_key') return 'Brak klucza OPENROUTER_API_KEY — przełącz na Ollama lub dodaj klucz w panelu LLM Config';
+    const err = d.llm_error || d.llm?.error || '';
+    if (err.toLowerCase().includes('429') || err.toLowerCase().includes('rate')) {
+        return 'OpenRouter: rate limit (429) — włącz Fallback do Ollama lub poczekaj chwilę';
+    }
+    return err || 'Nie odpowiada — sprawdź Ollama (docker) lub konfigurację OpenRouter';
+}
+
+function getSqlDetail(d) {
+    if (!d.sql_configured) return 'Nie skonfigurowany (funkcja opcjonalna — bezpieczne pominąć)';
+    const portState = d.ports && d.ports.sql;
+    if (portState === 'error') {
+        return `Skonfigurowany (${d.sql_server || ''}/${d.sql_database || ''}) — port niedostępny (firewall / SQL nie działa)`;
+    }
+    const port = d.ports?.sql ? ` · port ${d.ports.sql}` : '';
+    return `Skonfigurowany: ${d.sql_server || ''} / ${d.sql_database || ''}${port}`;
+}
+
+function getParsersDetail(d) {
+    const fp = d.file_parsers || {};
+    if (fp.pdf_text && fp.excel) return 'Dostępne · PDF (tekst) · Excel (forensyka + metadane) · DOCX';
+    const missing = [];
+    if (!fp.pdf_text) missing.push('pdfplumber');
+    if (!fp.excel) missing.push('openpyxl');
+    return `Brak bibliotek: ${missing.join(', ')} — ./venv/bin/pip install ${missing.join(' ')}`;
+}
+
+function getOcrDetail(d) {
+    const ocr = d.ocr || {};
+    if (ocr.available ?? d.ocr_available) {
+        return ocr.note || 'Dostępny · skany PDF i obrazy (język: pol)';
+    }
+    return ocr.install_hint || 'Opcjonalne: sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils';
+}
+
 function closeStartupModal() {
     document.getElementById('startupModal').style.display = 'none';
+}
+
+function refreshStartupChecklist() {
+    const modal = document.getElementById('startupModal');
+    if (modal) modal.style.display = 'none'; // chwilowe ukrycie na czas fetch
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => showStartupChecklist(d))
+        .catch(() => {
+            if (modal) modal.style.display = 'flex';
+            alert('Nie udało się odświeżyć diagnostyki');
+        });
 }
 
 // --- LLM Config panel ---
@@ -4013,7 +4052,8 @@ function llmConfigSave() {
 }
 
 function openDiagnostics() {
-    fetch('/health/detailed')
+    // Używa /health (bogate dane dla modala diagnostycznego: qdrant/llm/ocr/sql/parsers + statusy)
+    fetch('/health')
         .then(r => r.json())
         .then(d => showStartupChecklist(d))
         .catch(() => {});
@@ -4074,14 +4114,14 @@ function restartService() {
 }
 
 window.onload = function() {
-    updateStats();
+    updateStats();           // jeden dodatkowy update statystyk (główny polling jest w startHealthAutoRefresh)
     sqlLoadSavedConn();
     loadQdrantMode();
-    checkHealth();
-    setInterval(checkHealth, 30000);
+    // UWAGA: usunięto duplikat checkHealth + setInterval — polling jest teraz wyłącznie w startHealthAutoRefresh (DOMContentLoaded)
+    // która używa updateHealthStatus z poprawną normalizacją obiektów z /health
     setTimeout(() => loadSuggestions(false), 2000);
     setTimeout(() => loadCollectionProfile(), 3000);
-    // Pokaż checklistę startową
+    // Pokaż checklistę startową (bogaty modal diagnostyczny)
     fetch('/health')
         .then(r => r.json())
         .then(d => showStartupChecklist(d))
@@ -4091,28 +4131,53 @@ window.onload = function() {
 
 <!-- Modal checklisty startowej -->
 <div id="startupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:580px;width:94%;box-shadow:0 8px 32px rgba(0,0,0,0.18);max-height:90vh;overflow-y:auto;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
-            <h5 style="margin:0;font-size:1.05rem;font-weight:700;color:#1a1f36;">Diagnostyka startowa</h5>
-            <button onclick="closeStartupModal()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:#6c757d;line-height:1;">✕</button>
-        </div>
-        <table style="width:100%;border-collapse:collapse;">
-            <tbody id="startupCheckBody"></tbody>
-        </table>
+    <div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:620px;width:94%;box-shadow:0 10px 40px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto;">
 
-        <!-- Zarządzanie usługą -->
-        <hr style="margin:18px 0 14px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-            <div style="font-size:0.82rem;color:#6c757d;">
-                Usługa: <strong id="svcStatusLabel" style="color:#6c757d;">sprawdzam…</strong>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <button class="btn btn-sm btn-outline-secondary" onclick="toggleServiceLogs()" id="svcLogsBtn">📋 Logi</button>
-                <button class="btn btn-sm btn-warning" onclick="restartService()" id="svcRestartBtn">🔄 Restartuj</button>
-                <button class="btn btn-sm btn-primary" onclick="closeStartupModal()">OK, zaczynam pracę</button>
+        <!-- Nagłówek -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <h4 style="margin:0;font-size:1.1rem;font-weight:700;color:#1a1f36;">Diagnostyka startowa</h4>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <button onclick="refreshStartupChecklist()" title="Odśwież dane z /health"
+                        style="background:none;border:1px solid #cbd5e1;border-radius:6px;font-size:0.75rem;padding:2px 8px;cursor:pointer;color:#475569;">⟳ Odśwież</button>
+                <button onclick="closeStartupModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#666;line-height:1;">✕</button>
             </div>
         </div>
-        <pre id="svcLogsBox" style="display:none;margin-top:12px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:12px;border-radius:8px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+
+        <!-- Ogólny status -->
+        <div id="startupOverallStatus" style="margin-bottom:16px;padding:10px 14px;border-radius:8px;font-weight:600;font-size:0.95rem;">
+            <!-- wypełniane dynamicznie przez JS -->
+        </div>
+
+        <!-- Sekcja: Połączenia -->
+        <div style="margin-bottom:12px;">
+            <div style="font-weight:600;font-size:0.88rem;color:#374151;margin-bottom:6px;">Połączenia</div>
+            <table style="width:100%;border-collapse:collapse;" id="startupConnectionsBody"></table>
+        </div>
+
+        <!-- Sekcja: Komponenty -->
+        <div style="margin-bottom:12px;">
+            <div style="font-weight:600;font-size:0.88rem;color:#374151;margin-bottom:6px;">Komponenty</div>
+            <table style="width:100%;border-collapse:collapse;" id="startupComponentsBody"></table>
+        </div>
+
+        <!-- Sekcja: Usługa systemowa -->
+        <div style="margin-top:14px;padding-top:12px;border-top:1px solid #e5e7eb;">
+            <div style="font-weight:600;font-size:0.88rem;color:#374151;margin-bottom:8px;">Usługa systemowa</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                <div style="font-size:0.82rem;color:#6c757d;">
+                    Status: <strong id="svcStatusLabel" style="color:#6c757d;">sprawdzam…</strong>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-sm btn-outline-secondary" onclick="toggleServiceLogs()" id="svcLogsBtn">📋 Logi</button>
+                    <button class="btn btn-sm btn-warning" onclick="restartService()" id="svcRestartBtn">🔄 Restartuj</button>
+                </div>
+            </div>
+            <pre id="svcLogsBox" style="display:none;margin-top:10px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:10px;border-radius:6px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+        </div>
+
+        <div style="margin-top:18px;text-align:right;">
+            <button onclick="closeStartupModal()" class="btn btn-primary">OK, zaczynam pracę</button>
+        </div>
     </div>
 </div>
 
