@@ -122,7 +122,34 @@ def _format_table_key(schema_name: str, table_name: str) -> str:
     return table_name
 
 
-def _get_sql_conn(cfg: dict):
+def _sql_dialect(cfg: dict) -> str:
+    t = (cfg.get("type") or cfg.get("db_type") or "mssql").strip().lower()
+    return "sqlite" if t == "sqlite" else "mssql"
+
+
+def _sql_conn_configured(cfg: dict) -> bool:
+    if not cfg:
+        return False
+    if _sql_dialect(cfg) == "sqlite":
+        return bool((cfg.get("db_path") or cfg.get("path") or "").strip())
+    return bool(cfg.get("server") and cfg.get("database"))
+
+
+def _resolve_sqlite_path(cfg: dict) -> Path:
+    raw = (cfg.get("db_path") or cfg.get("path") or "").strip()
+    if not raw:
+        raise ValueError("Brak ścieżki do pliku SQLite (.db)")
+    p = Path(raw).expanduser()
+    if not p.is_file():
+        raise ValueError(f"Plik bazy SQLite nie istnieje: {raw}")
+    if not _path_is_allowed(p):
+        raise ValueError("Ścieżka poza dozwolonymi katalogami (SEARCH_ROOTS)")
+    if p.suffix.lower() not in (".db", ".sqlite", ".sqlite3"):
+        raise ValueError("Dozwolone rozszerzenia pliku SQLite: .db, .sqlite, .sqlite3")
+    return p.resolve()
+
+
+def _get_mssql_conn(cfg: dict):
     """Tworzy połączenie z MS SQL Server przez pymssql."""
     if not PYMSSQL_AVAILABLE:
         raise RuntimeError("pymssql nie jest zainstalowany")
@@ -141,65 +168,144 @@ def _get_sql_conn(cfg: dict):
     )
 
 
+def _get_sql_conn(cfg: dict, readonly: bool = True):
+    """Połączenie z MS SQL Server lub SQLite (domyślnie read-only dla SQLite)."""
+    if _sql_dialect(cfg) == "sqlite":
+        path = _resolve_sqlite_path(cfg)
+        mode = "ro" if readonly else "rw"
+        conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True, timeout=15)
+        conn.row_factory = sqlite3.Row
+        return conn
+    return _get_mssql_conn(cfg)
+
+
+def _require_sql_backend(cfg: dict) -> None:
+    if _sql_dialect(cfg) == "mssql" and not PYMSSQL_AVAILABLE:
+        raise RuntimeError("Moduł pymssql nie jest zainstalowany")
+
+
+def _sql_quote_ident(name: str, dialect: str) -> str:
+    if dialect == "mssql":
+        return f"[{name}]"
+    return f'"{name}"'
+
+
+def _sql_rows_to_dicts(cur, limit: int = 500) -> list[dict]:
+    rows = cur.fetchmany(limit)
+    out: list[dict] = []
+    for row in rows:
+        if isinstance(row, dict):
+            item = row
+        elif hasattr(row, "keys"):
+            item = {k: row[k] for k in row.keys()}
+        else:
+            cols = [d[0] for d in (cur.description or [])]
+            item = {cols[i]: row[i] for i in range(len(cols))}
+        out.append({k: (str(v) if v is not None else "") for k, v in item.items()})
+    return out
+
+
+def _sql_llm_dialect_label(dialect: str) -> str:
+    return "SQLite" if dialect == "sqlite" else "T-SQL (MS SQL Server)"
+
+
 def _fetch_sql_known_tables(cfg: dict) -> set[str]:
     """Zwraca znane nazwy tabel do walidacji SQL z LLM."""
     known: set[str] = set()
+    dialect = _sql_dialect(cfg)
     conn = _get_sql_conn(cfg)
     try:
         cur = conn.cursor()
-        cur.execute("""
-            SELECT TABLE_SCHEMA, TABLE_NAME
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
-        """)
-        for schema_name, table_name in cur.fetchall():
-            key = _format_table_key(schema_name, table_name)
-            known.add(key.lower())
-            known.add(table_name.lower())
+        if dialect == "sqlite":
+            cur.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+            """)
+            for (table_name,) in cur.fetchall():
+                known.add(table_name.lower())
+        else:
+            cur.execute("""
+                SELECT TABLE_SCHEMA, TABLE_NAME
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+            """)
+            for schema_name, table_name in cur.fetchall():
+                key = _format_table_key(schema_name, table_name)
+                known.add(key.lower())
+                known.add(table_name.lower())
     finally:
         conn.close()
     return known
 
 
 def _build_auto_sql_schema(cfg: dict, max_tables: int = 80) -> str:
-    """Buduje opis schematu z INFORMATION_SCHEMA."""
+    """Buduje opis schematu z INFORMATION_SCHEMA (MS SQL) lub PRAGMA/sqlite_master (SQLite)."""
+    dialect = _sql_dialect(cfg)
     conn = _get_sql_conn(cfg)
     lines: list[str] = []
     try:
         cur = conn.cursor()
-        row_limit = max(100, min(max_tables * 40, 4000))
-        cur.execute(f"""
-            SELECT TOP {row_limit} c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS c
-            INNER JOIN INFORMATION_SCHEMA.TABLES t
-              ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
-            WHERE t.TABLE_TYPE IN ('BASE TABLE','VIEW')
-            ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
-        """)
-        grouped: dict[str, list[str]] = defaultdict(list)
-        tables_seen: set[str] = set()
-        for schema_name, table_name, col_name, data_type in cur.fetchall():
-            key = _format_table_key(schema_name, table_name)
-            if key not in tables_seen and len(tables_seen) >= max_tables:
-                continue
-            tables_seen.add(key)
-            grouped[key].append(f"{col_name} ({data_type})")
-
-        if not grouped:
+        if dialect == "sqlite":
             cur.execute("""
-                SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
-                ORDER BY TABLE_NAME
-            """)
-            for schema_name, table_name, table_type in cur.fetchall()[:max_tables]:
-                key = _format_table_key(schema_name, table_name)
-                lines.append(f"Tabela: {key} ({table_type})")
+                SELECT name, sql FROM sqlite_master
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                LIMIT ?
+            """, (max_tables,))
+            table_rows = cur.fetchall()
+            if not table_rows:
+                cur.execute("""
+                    SELECT name, type FROM sqlite_master
+                    WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+                    ORDER BY name LIMIT ?
+                """, (max_tables,))
+                for name, ttype in cur.fetchall():
+                    lines.append(f"Tabela: {name} ({ttype})")
+            else:
+                for name, ddl in table_rows:
+                    cur.execute(f'PRAGMA table_info("{name}")')
+                    cols = [f"{r[1]} ({r[2]})" for r in cur.fetchall()]
+                    col_txt = ", ".join(cols[:25]) + (" …" if len(cols) > 25 else "")
+                    if col_txt:
+                        lines.append(f"Tabela: {name}\nKolumny: {col_txt}")
+                    elif ddl:
+                        lines.append(f"Tabela: {name}\nDDL: {ddl[:400]}")
+                    else:
+                        lines.append(f"Tabela: {name}")
         else:
-            for key in sorted(grouped.keys()):
-                cols = ", ".join(grouped[key][:25])
-                extra = " …" if len(grouped[key]) > 25 else ""
-                lines.append(f"Tabela: {key}\nKolumny: {cols}{extra}")
+            row_limit = max(100, min(max_tables * 40, 4000))
+            cur.execute(f"""
+                SELECT TOP {row_limit} c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS c
+                INNER JOIN INFORMATION_SCHEMA.TABLES t
+                  ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+                WHERE t.TABLE_TYPE IN ('BASE TABLE','VIEW')
+                ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
+            """)
+            grouped: dict[str, list[str]] = defaultdict(list)
+            tables_seen: set[str] = set()
+            for schema_name, table_name, col_name, data_type in cur.fetchall():
+                key = _format_table_key(schema_name, table_name)
+                if key not in tables_seen and len(tables_seen) >= max_tables:
+                    continue
+                tables_seen.add(key)
+                grouped[key].append(f"{col_name} ({data_type})")
+
+            if not grouped:
+                cur.execute("""
+                    SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+                    ORDER BY TABLE_NAME
+                """)
+                for schema_name, table_name, table_type in cur.fetchall()[:max_tables]:
+                    key = _format_table_key(schema_name, table_name)
+                    lines.append(f"Tabela: {key} ({table_type})")
+            else:
+                for key in sorted(grouped.keys()):
+                    cols = ", ".join(grouped[key][:25])
+                    extra = " …" if len(grouped[key]) > 25 else ""
+                    lines.append(f"Tabela: {key}\nKolumny: {cols}{extra}")
     finally:
         conn.close()
 
@@ -2727,15 +2833,19 @@ def hybrid_stream():
             sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
             sql_query = ""
 
-            if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
-                if not PYMSSQL_AVAILABLE:
-                    sql_data["error"] = "Moduł pymssql nie jest dostępny — hybrydowe SQL wyłączone"
+            if conn_cfg and _sql_conn_configured(conn_cfg):
+                try:
+                    _require_sql_backend(conn_cfg)
+                except RuntimeError as e:
+                    sql_data["error"] = str(e)
                 else:
                     try:
+                        dialect = _sql_dialect(conn_cfg)
                         effective_schema, known_tables = _resolve_sql_schema(conn_cfg, schema_str)
+                        dialect_label = _sql_llm_dialect_label(dialect)
 
                         system_sql = (
-                            "Jesteś ekspertem T-SQL (MS SQL Server). "
+                            f"Jesteś ekspertem SQL ({dialect_label}). "
                             "Na podstawie schematu bazy generujesz zapytania SELECT. "
                             "Używaj TYLKO tabel i kolumn z podanego schematu — nigdy nie wymyślaj nazw. "
                             "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
@@ -2743,10 +2853,11 @@ def hybrid_stream():
                         prompt_sql = (
                             f"SCHEMAT BAZY:\n{effective_schema}\n\n"
                             f"PYTANIE: {query_text}\n\n"
-                            "Wygeneruj SELECT:"
+                            f"Wygeneruj zapytanie SELECT ({dialect_label}):"
                         )
                         sql_response = _call_ollama(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
                         sql_query = sql_response.get("response", "") if isinstance(sql_response, dict) else ""
+                        sql_query = _clean_llm_sql(sql_query)
 
                         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
                         if first_word not in ("SELECT", "WITH"):
@@ -2760,15 +2871,11 @@ def hybrid_stream():
                                 if not ok_tables:
                                     sql_data["error"] = table_err or "Nieznane tabele w SQL"
                                 else:
-                                    conn = _get_sql_conn(conn_cfg)
-                                    cur  = conn.cursor(as_dict=True)
+                                    conn = _get_sql_conn(conn_cfg, readonly=True)
+                                    cur  = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
                                     cur.execute(sql_query)
-                                    rows = cur.fetchmany(200)
-                                    cols = list(rows[0].keys()) if rows else []
-
-                                    result_rows = []
-                                    for row in rows:
-                                        result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
+                                    result_rows = _sql_rows_to_dicts(cur, 200)
+                                    cols = list(result_rows[0].keys()) if result_rows else []
 
                                     sql_data = {
                                         "success": True,
@@ -4539,7 +4646,7 @@ def analyze_excel():
 # ================================================================
 
 # ============================================================
-# MODUŁ SQL — MS SQL Server (Text-to-SQL + wektoryzacja do Qdrant)
+# MODUŁ SQL — MS SQL Server + SQLite (Text-to-SQL + wektoryzacja do Qdrant)
 # ============================================================
 
 @app.route('/sql/config', methods=['GET'])
@@ -4547,16 +4654,18 @@ def sql_config_get():
     """Zwraca zapisaną konfigurację SQL lub informację, że jej nie ma."""
     try:
         cfg = _load_sql_config()
-        if cfg and cfg.get("server"):
+        if cfg and _sql_conn_configured(cfg):
             safe = _redact_sql_config(cfg)
             return jsonify({
                 "success": True,
                 "has_config": True,
                 "config": {
+                    "type": safe.get("type", "mssql"),
                     "server": safe.get("server", ""),
                     "port": safe.get("port", 1433),
                     "database": safe.get("database", ""),
                     "user": safe.get("user", ""),
+                    "db_path": safe.get("db_path", ""),
                 },
             })
         return jsonify({"success": True, "has_config": False})
@@ -4570,7 +4679,7 @@ def sql_config_post():
     try:
         data = request.get_json() or {}
         existing = _load_sql_config()
-        for k in ["server", "port", "database", "user"]:
+        for k in ["type", "server", "port", "database", "user", "db_path"]:
             if k in data:
                 existing[k] = data[k]
         if data.get("password"):
@@ -4581,7 +4690,11 @@ def sql_config_post():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-def _sql_text_columns(cur, table: str) -> list[str]:
+def _sql_text_columns(cur, table: str, dialect: str) -> list[str]:
+    if dialect == "sqlite":
+        cur.execute(f'PRAGMA table_info("{table}")')
+        text_types = ("TEXT", "CHAR", "CLOB", "VARCHAR", "NVARCHAR", "INT", "INTEGER", "REAL", "FLOAT", "NUMERIC", "DECIMAL", "DATE", "DATETIME")
+        return [r[1] for r in cur.fetchall() if any(t in (r[2] or "").upper() for t in text_types)]
     cur.execute("""
         SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME=%s AND DATA_TYPE IN
@@ -4589,6 +4702,49 @@ def _sql_text_columns(cur, table: str) -> list[str]:
         ORDER BY ORDINAL_POSITION
     """, (table,))
     return [r["COLUMN_NAME"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+
+
+def _sql_list_tables(cur, dialect: str) -> list[dict]:
+    if dialect == "sqlite":
+        cur.execute("""
+            SELECT name, type FROM sqlite_master
+            WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+        """)
+        return [{"name": r[0], "type": r[1].upper()} for r in cur.fetchall()]
+    cur.execute("""
+        SELECT TABLE_NAME, TABLE_TYPE
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
+        ORDER BY TABLE_NAME
+    """)
+    return [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+
+
+def _sql_table_count(cur, table: str, dialect: str) -> int:
+    qtable = _sql_quote_ident(table, dialect)
+    cur.execute(f"SELECT COUNT(*) FROM {qtable}")
+    row = cur.fetchone()
+    if isinstance(row, dict):
+        return int(next(iter(row.values())))
+    return int(row[0])
+
+
+def _sql_fetch_table_rows(cur, table: str, columns: list[str], dialect: str, batch: int):
+    col_list = ", ".join(_sql_quote_ident(c, dialect) for c in columns)
+    qtable = _sql_quote_ident(table, dialect)
+    cur.execute(f"SELECT {col_list} FROM {qtable}")
+    while True:
+        batch_rows = cur.fetchmany(batch)
+        if not batch_rows:
+            break
+        for row in batch_rows:
+            if isinstance(row, dict):
+                yield row
+            elif hasattr(row, "keys"):
+                yield {k: row[k] for k in row.keys()}
+            else:
+                yield {columns[i]: row[i] for i in range(len(columns))}
 
 
 def _sql_row_to_text(table: str, row: dict, label_col: str = "") -> str:
@@ -4600,24 +4756,22 @@ def _sql_row_to_text(table: str, row: dict, label_col: str = "") -> str:
 
 @app.route('/sql/test', methods=['POST'])
 def sql_test():
-    """Test połączenia z bazą SQL."""
-    if not PYMSSQL_AVAILABLE:
-        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
+    """Test połączenia z bazą SQL (MS SQL Server lub SQLite)."""
     cfg = request.get_json() or {}
     try:
-        conn = _get_sql_conn(cfg)
+        _require_sql_backend(cfg)
+        dialect = _sql_dialect(cfg)
+        conn = _get_sql_conn(cfg, readonly=True)
         cur = conn.cursor()
-        cur.execute("SELECT @@VERSION")
-        version = cur.fetchone()[0]
-        cur.execute("""
-            SELECT TABLE_NAME, TABLE_TYPE
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
-            ORDER BY TABLE_NAME
-        """)
-        tables = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
+        if dialect == "sqlite":
+            cur.execute("SELECT sqlite_version()")
+            version = f"SQLite {cur.fetchone()[0]}"
+        else:
+            cur.execute("SELECT @@VERSION")
+            version = cur.fetchone()[0]
+        tables = _sql_list_tables(cur, dialect)
         conn.close()
-        return jsonify({"success": True, "version": version[:120], "tables": tables})
+        return jsonify({"success": True, "version": version[:120], "tables": tables, "dialect": dialect})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -4625,28 +4779,34 @@ def sql_test():
 @app.route('/sql/schema', methods=['POST'])
 def sql_schema():
     """Pobiera schemat wybranej tabeli."""
-    if not PYMSSQL_AVAILABLE:
-        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
     data = request.get_json() or {}
     cfg = data.get("conn", {})
     table = data.get("table", "")
     if not _validate_sql_table_name(table):
         return jsonify({"success": False, "error": "Nieprawidłowa nazwa tabeli"})
     try:
-        conn = _get_sql_conn(cfg)
+        _require_sql_backend(cfg)
+        dialect = _sql_dialect(cfg)
+        conn = _get_sql_conn(cfg, readonly=True)
         cur = conn.cursor()
-        cur.execute("""
-            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = %s
-            ORDER BY ORDINAL_POSITION
-        """, (table,))
-        cols = [
-            {"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
-            for r in cur.fetchall()
-        ]
-        cur.execute(f"SELECT COUNT(*) FROM [{table}]")
-        row_count = cur.fetchone()[0]
+        if dialect == "sqlite":
+            cur.execute(f'PRAGMA table_info("{table}")')
+            cols = [
+                {"name": r[1], "type": r[2], "max_len": None, "nullable": "YES" if r[3] == 0 else "NO"}
+                for r in cur.fetchall()
+            ]
+        else:
+            cur.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = %s
+                ORDER BY ORDINAL_POSITION
+            """, (table,))
+            cols = [
+                {"name": r[0], "type": r[1], "max_len": r[2], "nullable": r[3]}
+                for r in cur.fetchall()
+            ]
+        row_count = _sql_table_count(cur, table, dialect)
         conn.close()
         return jsonify({"success": True, "table": table, "columns": cols, "row_count": row_count})
     except Exception as e:
@@ -4656,8 +4816,6 @@ def sql_schema():
 @app.route('/sql/ask', methods=['POST'])
 def sql_ask():
     """Text-to-SQL: pytanie po polsku → LLM → SELECT → wyniki + interpretacja."""
-    if not PYMSSQL_AVAILABLE:
-        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
     data = request.get_json() or {}
     cfg = data.get("conn", {})
     question = (data.get("question") or "").strip()
@@ -4668,16 +4826,19 @@ def sql_ask():
 
     sql_query = ""
     try:
+        _require_sql_backend(cfg)
+        dialect = _sql_dialect(cfg)
+        dialect_label = _sql_llm_dialect_label(dialect)
         effective_schema, known_tables = _resolve_sql_schema(cfg, schema)
         system_sql = (
-            "Jesteś ekspertem T-SQL (MS SQL Server). "
+            f"Jesteś ekspertem SQL ({dialect_label}). "
             "Generujesz wyłącznie zapytania SELECT (nigdy DELETE/UPDATE/DROP). "
             "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
         )
         prompt_sql = (
             f"SCHEMAT BAZY:\n{effective_schema}\n\n"
             f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
-            "Wygeneruj zapytanie T-SQL:"
+            f"Wygeneruj zapytanie SQL ({dialect_label}):"
         )
         sql_response = call_llm(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
         sql_query = _clean_llm_sql(_llm_response_text(sql_response))
@@ -4698,12 +4859,11 @@ def sql_ask():
         if not ok_tables:
             return jsonify({"success": False, "error": table_err or "Nieznane tabele w SQL", "sql": sql_query})
 
-        conn = _get_sql_conn(cfg)
-        cur = conn.cursor(as_dict=True)
+        conn = _get_sql_conn(cfg, readonly=True)
+        cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
         cur.execute(sql_query)
-        rows = cur.fetchmany(500)
-        cols = list(rows[0].keys()) if rows else []
-        result_rows = [{k: (str(v) if v is not None else "") for k, v in row.items()} for row in rows]
+        result_rows = _sql_rows_to_dicts(cur, 500)
+        cols = list(result_rows[0].keys()) if result_rows else []
         conn.close()
 
         preview = "\n".join([
@@ -4740,11 +4900,16 @@ def sql_ask():
 
 @app.route('/sql/write', methods=['POST'])
 def sql_write():
-    """Generuje i wykonuje INSERT/UPDATE/DELETE po potwierdzeniu użytkownika."""
-    if not PYMSSQL_AVAILABLE:
-        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
+    """Generuje i wykonuje INSERT/UPDATE/DELETE po potwierdzeniu użytkownika (tylko MS SQL)."""
     data = request.get_json() or {}
     cfg = data.get("conn", {})
+    if _sql_dialect(cfg) == "sqlite":
+        return jsonify({
+            "success": False,
+            "error": "Tryb zapisu niedostępny dla SQLite — baza jest otwierana tylko do odczytu (mode=ro).",
+        })
+    if not PYMSSQL_AVAILABLE:
+        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"})
     question = (data.get("question") or "").strip()
     schema = data.get("schema") or ""
     confirmed = bool(data.get("confirmed", False))
@@ -4829,8 +4994,6 @@ def sql_write():
 @app.route('/sql/vectorize', methods=['POST'])
 def sql_vectorize():
     """Wektoryzuje dane z tabeli SQL do Qdrant (SSE)."""
-    if not PYMSSQL_AVAILABLE:
-        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"}), 503
     data = request.get_json() or {}
     cfg = data.get("conn", {})
     table = data.get("table", "")
@@ -4845,35 +5008,32 @@ def sql_vectorize():
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         try:
+            _require_sql_backend(cfg)
+            dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
-            conn = _get_sql_conn(cfg)
-            cur = conn.cursor(as_dict=True)
+            conn = _get_sql_conn(cfg, readonly=True)
+            cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
             if cols:
                 active_cols = list(cols)
             else:
-                active_cols = _sql_text_columns(cur, table)
+                active_cols = _sql_text_columns(cur, table, dialect)
             if not active_cols:
                 yield sse("error", {"error": f"Brak kolumn do wektoryzacji w tabeli {table}"})
                 return
 
-            col_list = ", ".join(f"[{c}]" for c in active_cols)
-            cur.execute(f"SELECT COUNT(*) AS cnt FROM [{table}]")
-            total = cur.fetchone()["cnt"]
+            total = _sql_table_count(cur, table, dialect)
             yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols})
 
-            cur.execute(f"SELECT {col_list} FROM [{table}]")
             qdrant = get_qdrant_client()
             done = 0
             rows_buf: list[str] = []
             BATCH = 50
 
-            while True:
-                batch_rows = cur.fetchmany(BATCH)
-                if not batch_rows:
-                    break
-                for row in batch_rows:
-                    rows_buf.append(_sql_row_to_text(table, row, label_col))
+            for row in _sql_fetch_table_rows(cur, table, active_cols, dialect, BATCH):
+                rows_buf.append(_sql_row_to_text(table, row, label_col))
+                if len(rows_buf) < BATCH:
+                    continue
 
                 vectors = get_embeddings_batch(rows_buf, batch_size=6)
                 points = []
@@ -4890,6 +5050,24 @@ def sql_vectorize():
                     qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
                 done += len(rows_buf)
                 rows_buf = []
+                pct = round(done / total * 100) if total else 0
+                yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
+
+            if rows_buf:
+                vectors = get_embeddings_batch(rows_buf, batch_size=6)
+                points = []
+                for txt, vec in zip(rows_buf, vectors):
+                    if not vec or not any(v != 0.0 for v in vec):
+                        continue
+                    cid = hashlib.md5(txt.encode("utf-8", errors="replace")).hexdigest()
+                    points.append(PointStruct(
+                        id=cid,
+                        vector=vec,
+                        payload={"file": f"[SQL] {table}", "text": txt, "full_path": "", "source": "sql", "sql_table": table},
+                    ))
+                if points:
+                    qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                done += len(rows_buf)
                 pct = round(done / total * 100) if total else 0
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
@@ -4910,8 +5088,6 @@ def sql_vectorize():
 @app.route('/sql/vectorize-all', methods=['POST'])
 def sql_vectorize_all():
     """Wektoryzuje wszystkie tabele SQL do Qdrant (SSE)."""
-    if not PYMSSQL_AVAILABLE:
-        return jsonify({"success": False, "error": "Moduł pymssql nie jest zainstalowany"}), 503
     data = request.get_json() or {}
     cfg = data.get("conn", {})
 
@@ -4920,16 +5096,13 @@ def sql_vectorize_all():
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         try:
+            _require_sql_backend(cfg)
+            dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
-            conn = _get_sql_conn(cfg)
-            cur = conn.cursor(as_dict=True)
+            conn = _get_sql_conn(cfg, readonly=True)
+            cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
-            cur.execute("""
-                SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')
-                ORDER BY TABLE_NAME
-            """)
-            tables = [r["TABLE_NAME"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+            tables = [t["name"] for t in _sql_list_tables(cur, dialect)]
             yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables})
 
             qdrant = get_qdrant_client()
@@ -4944,29 +5117,24 @@ def sql_vectorize_all():
                         "total_tables": len(tables),
                     })
 
-                    active_cols = _sql_text_columns(cur, table)
+                    active_cols = _sql_text_columns(cur, table, dialect)
                     if not active_cols:
                         yield sse("table_done", {"table_done": True, "table": table, "rows": 0, "table_idx": table_idx})
                         continue
 
-                    col_list = ", ".join(f"[{c}]" for c in active_cols)
-                    cur.execute(f"SELECT COUNT(*) AS cnt FROM [{table}]")
-                    table_total = cur.fetchone()["cnt"]
+                    table_total = _sql_table_count(cur, table, dialect)
                     if table_total == 0:
                         yield sse("table_done", {"table_done": True, "table": table, "rows": 0, "table_idx": table_idx})
                         continue
 
-                    cur.execute(f"SELECT {col_list} FROM [{table}]")
                     table_done = 0
                     rows_buf: list[str] = []
                     BATCH = 50
 
-                    while True:
-                        batch_rows = cur.fetchmany(BATCH)
-                        if not batch_rows:
-                            break
-                        for row in batch_rows:
-                            rows_buf.append(_sql_row_to_text(table, row))
+                    for row in _sql_fetch_table_rows(cur, table, active_cols, dialect, BATCH):
+                        rows_buf.append(_sql_row_to_text(table, row))
+                        if len(rows_buf) < BATCH:
+                            continue
 
                         vectors = get_embeddings_batch(rows_buf, batch_size=6)
                         points = []
@@ -4993,6 +5161,23 @@ def sql_vectorize_all():
                             "total": table_total,
                             "pct": pct,
                         })
+
+                    if rows_buf:
+                        vectors = get_embeddings_batch(rows_buf, batch_size=6)
+                        points = []
+                        for txt, vec in zip(rows_buf, vectors):
+                            if not vec or not any(v != 0.0 for v in vec):
+                                continue
+                            cid = hashlib.md5(txt.encode("utf-8", errors="replace")).hexdigest()
+                            points.append(PointStruct(
+                                id=cid,
+                                vector=vec,
+                                payload={"file": f"[SQL] {table}", "text": txt, "full_path": "", "source": "sql", "sql_table": table},
+                            ))
+                        if points:
+                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                        table_done += len(rows_buf)
+                        total_rows += len(rows_buf)
 
                     yield sse("table_done", {
                         "table_done": True,
@@ -5050,8 +5235,10 @@ def health():
 
         # SQL
         sql_cfg = _load_sql_config()
-        sql_configured = bool(sql_cfg and sql_cfg.get("server"))
-        sql_status = "ok" if (PYMSSQL_AVAILABLE and sql_configured) else ("warn" if sql_configured else "absent")
+        sql_configured = _sql_conn_configured(sql_cfg)
+        sql_status = "ok" if (
+            sql_configured and (_sql_dialect(sql_cfg) == "sqlite" or PYMSSQL_AVAILABLE)
+        ) else ("warn" if sql_configured else "absent")
 
         # Wektory / kolekcja
         vectors = 0

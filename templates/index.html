@@ -771,7 +771,15 @@
   <!-- Lewa kolumna: konfiguracja -->
   <div class="col-lg-4">
     <div class="search-card">
-      <h2>Połączenie MS SQL Server</h2>
+      <h2>Połączenie z bazą danych</h2>
+      <div class="mb-2">
+        <label class="form-label small fw-bold mb-1">Typ bazy</label>
+        <select id="sqlDbType" class="form-select form-select-sm" onchange="toggleSqlDbType()">
+          <option value="mssql">MS SQL Server</option>
+          <option value="sqlite">SQLite (.db)</option>
+        </select>
+      </div>
+      <div id="sqlMssqlFields">
       <div class="row g-2 mb-2">
         <div class="col-8">
           <label class="form-label small fw-bold mb-1">Serwer</label>
@@ -784,16 +792,24 @@
       </div>
       <div class="mb-2">
         <label class="form-label small fw-bold mb-1">Baza danych</label>
-        <input type="text" id="sqlDatabase" class="form-control form-control-sm" value="Prolider_MZK_SPOLKA" placeholder="nazwa_bazy">
+        <input type="text" id="sqlDatabase" class="form-control form-control-sm" value="" placeholder="nazwa_bazy">
       </div>
       <div class="row g-2 mb-2">
         <div class="col-6">
           <label class="form-label small fw-bold mb-1">Użytkownik</label>
-          <input type="text" id="sqlUser" class="form-control form-control-sm" value="prolideradmin" placeholder="sa">
+          <input type="text" id="sqlUser" class="form-control form-control-sm" value="" placeholder="sa">
         </div>
         <div class="col-6">
           <label class="form-label small fw-bold mb-1">Hasło</label>
-          <input type="password" id="sqlPass" class="form-control form-control-sm" value="pro#LiderSqlAdmin%1">
+          <input type="password" id="sqlPass" class="form-control form-control-sm" value="">
+        </div>
+      </div>
+      </div>
+      <div id="sqlSqliteFields" style="display:none;">
+        <div class="mb-2">
+          <label class="form-label small fw-bold mb-1">Ścieżka do pliku .db</label>
+          <input type="text" id="sqlDbPath" class="form-control form-control-sm" placeholder="/mnt/g/dane/eksport.db">
+          <small class="text-muted">Plik musi być w katalogu dozwolonym przez SEARCH_ROOTS (np. /mnt/g). Połączenie tylko do odczytu.</small>
         </div>
       </div>
       <div class="d-flex gap-2 mb-2">
@@ -816,7 +832,7 @@
     <div class="search-card">
       <h2>Zapytaj bazę po polsku (Text-to-SQL)</h2>
       <div class="d-flex gap-2 mb-2 align-items-center">
-        <div class="form-check form-switch mb-0">
+        <div class="form-check form-switch mb-0" id="sqlWriteModeWrap">
           <input class="form-check-input" type="checkbox" id="sqlWriteMode" onchange="toggleSqlWriteMode(this)">
           <label class="form-check-label small fw-semibold text-danger" for="sqlWriteMode" style="cursor:pointer;">
             Tryb zapisu (INSERT/UPDATE/DELETE)
@@ -1776,7 +1792,7 @@ function executeSearch() {
     }
 
     // Wybierz endpoint na podstawie połączenia SQL
-    const hasSQL = sqlConn && sqlConn.server && sqlConn.database;
+    const hasSQL = sqlConnIsConfigured(sqlConn);
     const endpoint = hasSQL ? '/hybrid/stream' : '/search/stream';
     const chatCtx = getChatContext();
     const body = {
@@ -4222,6 +4238,29 @@ let isHeavyVectorizing = false;  // tymczasowa flaga podczas ciężkiej wektoryz
 
 const SQL_CONN_KEY = 'ai_sql_connection';
 
+function isSqliteMode() {
+    return (document.getElementById('sqlDbType')?.value || 'mssql') === 'sqlite';
+}
+
+function toggleSqlDbType() {
+    const sqlite = isSqliteMode();
+    document.getElementById('sqlMssqlFields').style.display = sqlite ? 'none' : '';
+    document.getElementById('sqlSqliteFields').style.display = sqlite ? '' : 'none';
+    const writeWrap = document.getElementById('sqlWriteModeWrap');
+    const writeCb = document.getElementById('sqlWriteMode');
+    if (writeWrap) writeWrap.style.display = sqlite ? 'none' : '';
+    if (sqlite && writeCb) {
+        writeCb.checked = false;
+        toggleSqlWriteMode(writeCb);
+    }
+}
+
+function sqlConnIsConfigured(conn) {
+    if (!conn) return false;
+    if (conn.type === 'sqlite') return !!(conn.db_path || '').trim();
+    return !!(conn.server && conn.database);
+}
+
 function sqlLoadSavedConn() {
     fetch('/sql/config')
         .then(r => {
@@ -4235,17 +4274,22 @@ function sqlLoadSavedConn() {
             if (!d || !d.has_config || !d.config) return;
 
             const cfg = d.config;
-            const serverEl   = document.getElementById('sqlServer');
-            const portEl     = document.getElementById('sqlPort');
-            const dbEl       = document.getElementById('sqlDatabase');
-            const userEl     = document.getElementById('sqlUser');
-            const passEl     = document.getElementById('sqlPass');
+            const typeEl   = document.getElementById('sqlDbType');
+            const serverEl = document.getElementById('sqlServer');
+            const portEl   = document.getElementById('sqlPort');
+            const dbEl     = document.getElementById('sqlDatabase');
+            const userEl   = document.getElementById('sqlUser');
+            const passEl   = document.getElementById('sqlPass');
+            const pathEl   = document.getElementById('sqlDbPath');
 
-            if (serverEl)   serverEl.value   = cfg.server   || '127.0.0.1';
-            if (portEl)     portEl.value     = cfg.port     || '1433';
-            if (dbEl)       dbEl.value       = cfg.database || '';
-            if (userEl)     userEl.value     = cfg.user     || '';
-            if (passEl)     passEl.value     = cfg.password || '';
+            if (typeEl) typeEl.value = cfg.type || 'mssql';
+            toggleSqlDbType();
+            if (serverEl) serverEl.value = cfg.server || '127.0.0.1';
+            if (portEl)   portEl.value   = cfg.port || '1433';
+            if (dbEl)     dbEl.value     = cfg.database || '';
+            if (userEl)   userEl.value   = cfg.user || '';
+            if (passEl)   passEl.value   = cfg.password || '';
+            if (pathEl)   pathEl.value   = cfg.db_path || '';
         })
         .catch(() => {
             // Cisza — SQL jest opcjonalny
@@ -4299,14 +4343,16 @@ function sqlSaveConn() {
 }
 
 function sqlClearConn() {
-    if (confirm('Usunąć zapisane dane połączenia SQL Server?')) {
+    if (confirm('Usunąć zapisane dane połączenia SQL?')) {
         fetch('/sql/config', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({server: '', port: '', database: '', user: '', password: ''})
+            body: JSON.stringify({type: 'mssql', server: '', port: '', database: '', user: '', password: '', db_path: ''})
         })
         .then(() => {
-            ['sqlServer','sqlPort','sqlDatabase','sqlUser'].forEach(id =>
+            document.getElementById('sqlDbType').value = 'mssql';
+            toggleSqlDbType();
+            ['sqlServer','sqlPort','sqlDatabase','sqlUser','sqlDbPath'].forEach(id =>
                 document.getElementById(id).value = id==='sqlServer'?'127.0.0.1':id==='sqlPort'?'1433':'');
             document.getElementById('sqlPass').value = '';
         });
@@ -4314,7 +4360,15 @@ function sqlClearConn() {
 }
 
 function getSqlConn() {
+    const type = document.getElementById('sqlDbType').value || 'mssql';
+    if (type === 'sqlite') {
+        return {
+            type: 'sqlite',
+            db_path: document.getElementById('sqlDbPath').value.trim(),
+        };
+    }
     return {
+        type: 'mssql',
         server:   document.getElementById('sqlServer').value.trim(),
         port:     document.getElementById('sqlPort').value.trim(),
         database: document.getElementById('sqlDatabase').value.trim(),
@@ -4345,7 +4399,7 @@ function sqlConnect() {
             return;
         }
         st.className = 'small alert alert-success mt-2';
-        st.innerHTML = `✅ Połączono. SQL Server: ${d.version.slice(0,60)}...`;
+        st.innerHTML = `✅ Połączono (${d.dialect === 'sqlite' ? 'SQLite' : 'MS SQL'}). ${escapeHtml((d.version || '').slice(0,60))}...`;
 
         sqlTables = d.tables;
         sqlSchema = d.tables.map(t =>
@@ -4420,7 +4474,11 @@ function sqlAsk() {
     const question  = document.getElementById('sqlQuestion').value.trim();
     const writeMode = document.getElementById('sqlWriteMode').checked;
     if (!question) return;
-    if (!sqlConn.server) { alert('Najpierw połącz się z bazą SQL.'); return; }
+    if (!sqlConnIsConfigured(sqlConn)) { alert('Najpierw połącz się z bazą SQL.'); return; }
+    if (isSqliteMode() && document.getElementById('sqlWriteMode').checked) {
+        alert('Tryb zapisu nie jest dostępny dla SQLite (baza tylko do odczytu).');
+        return;
+    }
 
     const loader = document.getElementById('sqlLoader');
     const result = document.getElementById('sqlResult');
@@ -4582,7 +4640,7 @@ function sqlVectorize() {
 }
 
 function sqlVectorizeAll() {
-    if (!sqlConn || !sqlConn.server) {
+    if (!sqlConnIsConfigured(sqlConn)) {
         alert('Najpierw połącz się z bazą SQL');
         return;
     }
