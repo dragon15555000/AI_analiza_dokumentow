@@ -1485,7 +1485,7 @@ function clearFileFilter() {
 
 // ---- SEARCH ----
 const MODE_DESCS = {
-    detective: '🔍 Szuka anomalii i niespójności między dokumentami. Oznacza: [ANOMALIA], [PODEJRZANE], [WYMAGA SPRAWDZENIA].',
+    detective: '🔍 Briefing śledczy: porównuje wiele dokumentów, sekcje Co wiemy / Analiza / Wnioski / Pytania. Tagi: [ANOMALIA], [ROZBIEŻNOŚĆ], [BRAK DOWODU]. Zalecane: 12+ wyników i Tryb rozmowy przy dopytywaniu.',
     legal:     '⚖️ Ocenia prawidłowość powołanych przepisów. Flaguje: [PRZEPIS NIEAKTUALNY], [NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE].',
     inconsistency: '⚡ Porównuje dokumenty i wskazuje sprzeczne twierdzenia: Dokument A twierdzi X, Dokument B twierdzi Y.',
     extract:   '📊 Wyciąga ustrukturyzowane dane (kwoty, daty, osoby, firmy, umowy) jako tabelę Markdown.'
@@ -1496,8 +1496,17 @@ document.getElementById('searchMode').addEventListener('change', function() {
     if (MODE_DESCS[this.value]) {
         desc.textContent = MODE_DESCS[this.value];
         desc.classList.remove('d-none');
+        desc.style.borderLeftColor = this.value === 'detective' ? '#b45309' : '#4f46e5';
+        desc.style.color = this.value === 'detective' ? '#92400e' : '#4f46e5';
+        desc.style.background = this.value === 'detective' ? '#fffbeb' : '#f0f4ff';
     } else {
         desc.classList.add('d-none');
+    }
+    if (this.value === 'detective') {
+        const lim = document.getElementById('resultLimit');
+        if (lim && parseInt(lim.value, 10) < 12) lim.value = '12';
+        const chat = document.getElementById('chatToggle');
+        if (chat && !chat.checked) chat.checked = true;
     }
 });
 
@@ -1550,8 +1559,10 @@ function executeSearch() {
     // Wybierz endpoint na podstawie połączenia SQL
     const hasSQL = sqlConn && sqlConn.server && sqlConn.database;
     const endpoint = hasSQL ? '/hybrid/stream' : '/search/stream';
+    const chatCtx = getChatContext();
     const body = {
-        query: query + getChatContext(),
+        query,
+        chat_context: chatCtx,
         limit, mode,
         file_filter: activeFileFilter,
         llm_provider: getCurrentLlmProvider(),
@@ -1820,8 +1831,9 @@ function deleteHistory(i) {
 let chatHistory = [];  // [{q, a}] ostatnie 3 pary
 function getChatContext() {
     if (!document.getElementById('chatToggle').checked || !chatHistory.length) return '';
-    return '\n\nKONTEKST POPRZEDNICH PYTAŃ:\n' +
-        chatHistory.slice(-3).map(p => `Pytanie: ${p.q}\nOdpowiedź: ${p.a.slice(0,400)}`).join('\n---\n');
+    return chatHistory.slice(-3).map(p =>
+        `Pytanie: ${p.q}\nOdpowiedź (skrót): ${p.a.slice(0,500)}`
+    ).join('\n---\n');
 }
 
 // ---- CSV EXPORT ----
@@ -1958,10 +1970,14 @@ function runVerification(query, answer, contexts) {
 function formatAiText(text, mode) {
     const isExtract = mode === 'extract';
     if (isExtract) return renderMarkdownTable(text);
-    return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/\n/g,'<br>')
-        .replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|SPRZECZNOŚĆ)\]/g,
+    let html = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    if (mode === 'detective') {
+        html = html.replace(/^## (.+)$/gm, '<strong style="display:block;margin:1rem 0 0.35rem;color:#92400e;font-size:1.02rem;">$1</strong>');
+    }
+    html = html.replace(/\n/g,'<br>')
+        .replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|ROZBIEŻNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|BRAK DOWODU|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|SPRZECZNOŚĆ)\]/g,
             '<span class="badge" style="background:#fee2e2;color:#b91c1c;font-size:0.78rem;margin:0 2px;">$1</span>');
+    return html;
 }
 
 function renderDocResults(results, query, container) {
