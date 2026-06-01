@@ -9,11 +9,8 @@ import hashlib
 import time
 import sqlite3
 import threading
-<<<<<<< HEAD
-=======
 import subprocess
 import platform
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 from pathlib import Path
 from collections import defaultdict
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
@@ -67,43 +64,6 @@ QDRANT_KEY        = os.environ["QDRANT_KEY"]
 ACTIVE_COLLECTION = os.environ.get("ACTIVE_COLLECTION", "dokumenty")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "llama3")
-<<<<<<< HEAD
-SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
-
-# ---- Qdrant Client (reuse connection) ----
-_qdrant_client = None
-_qdrant_lock = threading.Lock()
-
-def get_qdrant_client() -> QdrantClient:
-    global _qdrant_client
-    with _qdrant_lock:
-        if _qdrant_client is None:
-            _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY, timeout=30.0)
-        return _qdrant_client
-
-# ---- Cache (dokumenty i sugestie) ----
-_docs_cache = {"data": None, "ts": 0}
-DOCS_CACHE_TTL = 300  # 5 minut
-_suggestions_cache = {"data": None, "ts": 0}
-SUGGESTIONS_TTL = 1800  # 30 minut
-
-# ---- Cache embeddingów (SQLite) ----
-_CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
-
-def _init_embed_cache():
-    """Inicjalizuje tabelę w bazie SQLite, jeśli nie istnieje."""
-    try:
-        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vector TEXT)")
-        # Policz istniejące wpisy
-        with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM embeddings")
-            count = cursor.fetchone()[0]
-        print(f"Załadowano cache embeddingów (SQLite): {count} wpisów")
-    except Exception as e:
-        print(f"⚠️ Błąd inicjalizacji cache: {e}")
-
-=======
 
 # OpenRouter
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -574,7 +534,6 @@ def _init_embed_cache():
     except Exception as e:
         logger.warning(f"Błąd inicjalizacji cache embeddingów: {e}")
 
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 _init_embed_cache()
 
 def get_embedding(text: str) -> list:
@@ -589,37 +548,11 @@ def get_embedding(text: str) -> list:
             if row:
                 return json.loads(row[0])
     except Exception as e:
-<<<<<<< HEAD
-        print(f"⚠️ Błąd odczytu cache: {e}")
-
-    # 2. Jeśli nie ma w cache, odpytaj Ollamę
-    url = OLLAMA_URL + "/api/embeddings"
-    payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
-    try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            vec = json.loads(r.read().decode("utf-8"))["embedding"]
-
-        # 3. Zapisz nowy wektor natychmiast do bazy SQLite
-        try:
-            with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
-                conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
-                             (key, json.dumps(vec)))
-        except Exception as e:
-            print(f"⚠️ Błąd zapisu cache: {e}")
-
-        return vec
-    except Exception as e:
-        print(f"⚠️ Ollama Embedding Error: {e}")
-        return [0.0] * 768
-=======
         logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
     # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
     url = OLLAMA_URL + "/api/embeddings"
     payload = {"model": "nomic-embed-text", "prompt": text[:1500]}
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
     for attempt in range(4):  # max 4 próby
         try:
@@ -742,17 +675,6 @@ def generate_answer(query: str, contexts: list, mode: str = "normal",
     context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text']}" for c in sanitized_contexts])
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
-<<<<<<< HEAD
-    payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": False, "options": {"num_ctx": 8192}}
-    try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=240) as r:
-            return json.loads(r.read().decode("utf-8"))["response"]
-    except Exception as e:
-        return f"Błąd syntezy LLM: {e}"
-=======
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
     try:
         result = call_llm(
@@ -809,11 +731,7 @@ def verify_answer(answer: str, contexts: list, query: str, provider: str | None 
         "UZASADNIENIE: <jedno zdanie>\n\n"
         "Weryfikacja:"
     )
-<<<<<<< HEAD
-    payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
-=======
 
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     try:
         # Używamy dedykowanego modelu do weryfikacji (jeśli ustawiony), żeby nie dobić limitu tego samego modelu co główna odpowiedź
         effective_verify_model = model
@@ -1898,168 +1816,6 @@ def hybrid_stream():
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-@app.route('/hybrid/stream', methods=['POST'])
-def hybrid_stream():
-    """Wyszukiwanie hybrydowe: RAG + SQL równolegle — SSE."""
-    data       = request.get_json()
-    query_text = data.get('query', '').strip()
-    conn_cfg   = data.get('conn', {})
-    schema_str = data.get('schema', '')
-    limit      = min(int(data.get('limit', 5)), 20)
-    mode       = data.get('mode', 'normal')
-    file_filter= data.get('file_filter', None)
-
-    if not query_text:
-        return jsonify({"success": False, "error": "Zapytanie puste"}), 400
-
-    def generate():
-        def sse(event, d):
-            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
-
-        try:
-            # 1. RAG — Qdrant query
-            client = get_qdrant_client()
-            vector = get_embedding(query_text)
-
-            if file_filter:
-                from qdrant_client.models import Filter, FieldCondition, MatchValue
-                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
-                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
-                                          limit=limit, query_filter=qfilter)
-            else:
-                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
-
-            rag_contexts = []
-            rag_results = []
-            for point in res.points:
-                p = point.payload
-                rag_contexts.append({"file": p.get("file",""), "text": p.get("text","")})
-                rag_results.append({
-                    "file": p.get("file","Nieznany"),
-                    "score": f"{point.score:.4f}",
-                    "text": highlight_backend(p.get("text",""), query_text),
-                    "full_path": p.get("full_path",""),
-                    "win_path": wsl_to_win(p.get("full_path",""))
-                })
-
-            yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
-
-            # 2. SQL — jeśli konfiguracja dostępna
-            sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
-            sql_query = ""
-
-            if conn_cfg and conn_cfg.get("server") and conn_cfg.get("database"):
-                try:
-                    system_sql = (
-                        "Jesteś ekspertem T-SQL (MS SQL Server). "
-                        "Na podstawie schematu bazy generujesz zapytania SELECT. "
-                        "Odpowiadasz WYŁĄCZNIE samym SQL — bez wyjaśnień, bez markdown."
-                    )
-                    prompt_sql = (
-                        f"SCHEMAT BAZY:\n{schema_str}\n\n"
-                        f"PYTANIE: {query_text}\n\n"
-                        "Wygeneruj SELECT:"
-                    )
-                    payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
-                               "stream": False, "options": {"num_ctx": 4096}}
-                    req = urllib.request.Request(
-                        OLLAMA_URL + "/api/generate",
-                        data=json.dumps(payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"}, method="POST"
-                    )
-                    with urllib.request.urlopen(req, timeout=90) as r:
-                        sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
-
-                    sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
-                    sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
-
-                    first_word = sql_query.split()[0].upper() if sql_query.split() else ""
-                    if first_word not in ("SELECT", "WITH"):
-                        sql_data["error"] = f"LLM nie zwrócił SELECT: {first_word}"
-                    else:
-                        conn = _get_sql_conn(conn_cfg)
-                        cur  = conn.cursor(as_dict=True)
-                        cur.execute(sql_query)
-                        rows = cur.fetchmany(200)
-                        cols = list(rows[0].keys()) if rows else []
-
-                        result_rows = []
-                        for row in rows:
-                            result_rows.append({k: (str(v) if v is not None else "") for k, v in row.items()})
-
-                        sql_data = {
-                            "success": True,
-                            "table": "wynik SQL",
-                            "columns": cols,
-                            "rows": result_rows,
-                            "sql": sql_query[:120],
-                            "total": len(result_rows)
-                        }
-                        conn.close()
-
-                except Exception as e:
-                    sql_data["error"] = str(e)[:100]
-
-            yield sse("sql_results", {"sql_results": sql_data})
-
-            # 3. LLM synteza — łączy RAG + SQL
-            if not rag_contexts:
-                yield sse("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
-                return
-
-            cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
-
-            # Buduj prompt syntezy
-            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text'][:800]}" for c in rag_contexts[:5]])
-            sql_preview = ""
-            if sql_data.get("success") and sql_data.get("rows"):
-                rows_str = "\n".join([
-                    " | ".join([f"{k}={v}" for k, v in zip(sql_data["columns"],
-                             [r.get(col, "") for col in sql_data["columns"]])])
-                    for r in sql_data["rows"][:10]
-                ])
-                sql_preview = f"\nDANE Z BAZY (tabela SQL):\n{rows_str}"
-
-            prompt = (
-                f"DOKUMENTY:\n{rag_preview}"
-                f"{sql_preview}\n\n"
-                f"PYTANIE: {query_text}\n\n"
-                f"{cfg['prompt_suffix']}\n"
-                "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski."
-            )
-            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
-                       "stream": True, "options": {"num_ctx": 8192}}
-
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
-            full_answer = ""
-            with urllib.request.urlopen(req, timeout=240) as r:
-                for line in r:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk_data = json.loads(line)
-                        token = chunk_data.get("response", "")
-                        if token:
-                            full_answer += token
-                            yield sse("token", {"token": token})
-                        if chunk_data.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
-
-            yield sse("done", {"ai_answer": full_answer})
-
-        except Exception as e:
-            yield sse("error", {"error": str(e)})
-
-    return Response(stream_with_context(generate()), mimetype='text/event-stream',
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
 @app.route('/search/stream', methods=['POST'])
 def search_stream():
     """Wyszukiwanie z streamingiem LLM — wyniki natychmiast, odpowiedź słowo po słowie."""
@@ -2117,10 +1873,6 @@ def search_stream():
             sanitized = [{"file": c["file"], "text": _sanitize_for_prompt(c["text"], 1400)} for c in raw_contexts]
             context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized])
             prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
-<<<<<<< HEAD
-            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"], "stream": True, "options": {"num_ctx": 8192}}
-=======
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
             # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
@@ -2555,10 +2307,7 @@ def build_network():
     data    = request.get_json()
     query   = data.get('query', '').strip()
     limit   = min(int(data.get('limit', 10)), 20)
-<<<<<<< HEAD
-=======
     llm_provider = data.get('llm_provider')
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
     raw = ""
 
     if not query:
@@ -2611,13 +2360,6 @@ def build_network():
             "NIE używaj placeholderów. Każdy label = prawdziwa wartość z tekstu.\n"
             "JSON:"
         )
-<<<<<<< HEAD
-        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
-        req = urllib.request.Request(
-            OLLAMA_URL + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST"
-=======
         openrouter_model = data.get("openrouter_model")
         result = call_llm(
             prompt=prompt,
@@ -2626,7 +2368,6 @@ def build_network():
             provider=llm_provider,
             model=openrouter_model,
             max_tokens=3000
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
         )
         raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
@@ -3099,8 +2840,6 @@ def cache_stats():
 
 SQL_CONFIG_PATH = Path(__file__).parent / ".sql_config.json"
 
-<<<<<<< HEAD
-=======
 
 # ============================================================
 # BEZPIECZEŃSTWO SQL — Walidacja zapytań generowanych przez LLM
@@ -3143,7 +2882,6 @@ def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str 
 
     return True, None
 
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 def _load_sql_config() -> dict:
     """Załaduj zapisaną konfigurację SQL Server."""
     if SQL_CONFIG_PATH.exists():
@@ -3158,11 +2896,7 @@ def _save_sql_config(cfg: dict):
     try:
         SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
     except Exception as e:
-<<<<<<< HEAD
-        print(f"⚠️ Błąd zapisu config: {e}")
-=======
         logger.warning(f"Błąd zapisu config: {e}")
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
 def _get_sql_conn(cfg: dict):
     """Tworzy połączenie z MS SQL Server przez pymssql.
@@ -3183,8 +2917,6 @@ def _get_sql_conn(cfg: dict):
         charset  = "UTF-8"
     )
 
-<<<<<<< HEAD
-=======
 
 def _format_table_key(schema_name: str, table_name: str) -> str:
     if schema_name and schema_name.lower() != "dbo":
@@ -3324,7 +3056,6 @@ def _generate_sql_via_ollama(prompt_sql: str, system_sql: str) -> str:
     return _clean_llm_sql_response(str(result))
 
 
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 @app.route('/sql/config', methods=['GET', 'POST'])
 def sql_config():
     """Zapisz/załaduj konfigurację SQL Server."""
@@ -3444,19 +3175,7 @@ def sql_ask():
             f"PYTANIE UŻYTKOWNIKA: {question}\n\n"
             "Wygeneruj zapytanie T-SQL:"
         )
-<<<<<<< HEAD
-        payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
-                   "stream": False, "options": {"num_ctx": 8192}}
-        req = urllib.request.Request(
-            OLLAMA_URL + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
-=======
         sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
         # === Wzmocniona walidacja bezpieczeństwa ===
         is_safe, error_msg = _is_sql_safe(sql_query, ("SELECT", "WITH"))
@@ -3541,21 +3260,7 @@ def sql_write():
                 f"ZADANIE: {question}\n\n"
                 "Wygeneruj zapytanie T-SQL (INSERT/UPDATE/DELETE):"
             )
-<<<<<<< HEAD
-            payload = {"model": LLM_MODEL, "prompt": prompt_sql, "system": system_sql,
-                       "stream": False, "options": {"num_ctx": 4096}}
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=60) as r:
-                sql_query = json.loads(r.read().decode("utf-8"))["response"].strip()
-            sql_query = re.sub(r'^```\w*\n?', '', sql_query, flags=re.MULTILINE)
-            sql_query = re.sub(r'```$', '', sql_query.strip()).strip()
-=======
             sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
 
@@ -3765,11 +3470,7 @@ def sql_vectorize_all():
                             rows_buf.append(text)
 
                         # Batch embeddings
-<<<<<<< HEAD
-                        vecs = get_embeddings_batch(rows_buf, batch_size=8)
-=======
                         vecs = get_embeddings_batch(rows_buf, batch_size=6)
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
                         points = []
                         for txt, vec in zip(rows_buf, vecs):
                             cid = hashlib.md5(txt.encode('utf-8', errors='replace')).hexdigest()
@@ -3791,17 +3492,12 @@ def sql_vectorize_all():
 
                     yield sse("table_done", {"table": table, "rows": table_done, "table_idx": table_idx})
 
-<<<<<<< HEAD
-                except Exception as e:
-                    yield sse("table_error", {"table": table, "error": str(e)})
-=======
                     # Mała przerwa między tabelami (tymczasowe odciążenie serwera podczas Vectorize All)
                     time.sleep(0.8)
 
                 except Exception as e:
                     yield sse("table_error", {"table": table, "error": str(e)})
                     time.sleep(0.5)  # krótka przerwa nawet przy błędzie
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
 
             conn.close()
             _docs_cache["data"] = None

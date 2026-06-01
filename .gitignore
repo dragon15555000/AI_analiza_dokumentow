@@ -37,12 +37,6 @@ venv.bak/
 .vscode/
 .idea/
 *.swp
-<<<<<<< HEAD
-.sql_config.json
-
-# Embedding cache — SQLite (nie commituj)
-embedding_cache.db
-=======
 *.swo
 *~
 .project
@@ -83,4 +77,3 @@ docker-compose.override.yml
 # === Misc ===
 .sql_config.json
 *.pid
->>>>>>> 8c2ffd42f8c37e62278bd4afea233a3e90f5b17b
