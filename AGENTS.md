@@ -16,38 +16,23 @@ Single Flask RAG app (`app.py`) for document Q&A. UI at `http://localhost:5000`.
 
 ### First-time VM setup (not in update script)
 
-These system packages were needed on a minimal Ubuntu image:
+**Automated (recommended on Linux x86_64):**
 
 ```bash
-sudo apt-get install -y python3.12-venv zstd
+chmod +x scripts/setup-local-dev.sh
+./scripts/setup-local-dev.sh --system-deps --pull-models
 ```
+
+Then start `ollama serve`, `.local/qdrant`, and `./venv/bin/python app.py` (see README „Dev lokalny”).  
+`./scripts/setup-local-dev.sh --help` for options.
 
 Optional OCR (not required for core RAG): `tesseract-ocr`, `tesseract-ocr-pol`, `poppler-utils`.
 
-**Ollama:** install via https://ollama.ai/ then `ollama serve` (tmux session) and `ollama pull nomic-embed-text` + `ollama pull llama3`.
+**Ollama:** install via https://ollama.ai/ if not present; models `nomic-embed-text`, `llama3` (or use `--pull-models`).
 
-**Local Qdrant (dev without cloud):** standalone binary can live under `.local/` (gitignored). Example one-time download (x86_64 Linux):
+For local Qdrant, `QDRANT_KEY` in `.env` can be any non-empty string (e.g. `dev-local-key`). The setup script creates `.env` with local defaults if missing.
 
-```bash
-mkdir -p .local && cd .local
-curl -fsSL -o qdrant.tar.gz "https://github.com/qdrant/qdrant/releases/download/v1.13.6/qdrant-x86_64-unknown-linux-gnu.tar.gz"
-tar -xzf qdrant.tar.gz && rm qdrant.tar.gz && chmod +x qdrant
-# then in tmux from .local:
-./qdrant
-```
-
-For local Qdrant, `QDRANT_KEY` in `.env` can be any non-empty string (e.g. `dev-local-key`).
-
-`.env` for local stack (copy from `.env.example`):
-
-```env
-QDRANT_URL=http://127.0.0.1:6333
-QDRANT_KEY=dev-local-key
-OLLAMA_URL=http://127.0.0.1:11434
-LLM_MODEL=llama3:latest
-```
-
-Production / real data should use **Qdrant Cloud** credentials instead.
+Production / real data should use **Qdrant Cloud** credentials in `.env` (see `.env.example`).
 
 ### Running the app (tmux)
 
@@ -63,6 +48,7 @@ Health check: `curl -s http://127.0.0.1:5000/health`
 
 | Task | Command |
 |------|---------|
+| Local dev bootstrap | `./scripts/setup-local-dev.sh` (see `--help`) |
 | Install Python deps | `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt` |
 | Syntax check | `./venv/bin/python -m py_compile app.py wsgi.py` |
 | Import folder (SSE) | `curl -sN 'http://127.0.0.1:5000/import/stream?folder=/path&ext=txt'` |
