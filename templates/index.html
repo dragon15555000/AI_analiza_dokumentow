@@ -4876,7 +4876,16 @@ function runReadyReport(id) {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, llm_provider: getCurrentLlmProvider()})
     }).then(r=>r.json()).then(d => {
-        document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(d.answer || 'Brak danych.')}</div>`;
+        if (!d.success) {
+            document.getElementById('reportContent').innerHTML =
+                `<div class="alert alert-danger">${escapeHtml(d.error || 'Błąd analizy.')}</div>`;
+            return;
+        }
+        document.getElementById('reportContent').innerHTML =
+            `<div style="white-space:pre-wrap">${escapeHtml(d.answer || d.ai_answer || 'Brak danych.')}</div>`;
+    }).catch(e => {
+        document.getElementById('reportContent').innerHTML =
+            `<div class="alert alert-danger">${escapeHtml(String(e))}</div>`;
     });
 }
 
