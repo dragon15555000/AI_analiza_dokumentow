@@ -1794,11 +1794,12 @@ function executeSearch() {
                 }
                 await readChunk();
             } catch (err) {
-                // Lepsza obsługa zerwania połączenia podczas streamingu wyszukiwania
                 loader.classList.add('d-none');
-                container.innerHTML = `<div class="alert alert-warning">Połączenie przerwane podczas wyszukiwania. Spróbuj ponownie.</div>`;
                 btn.disabled = false;
-                console.warn("Search stream interrupted:", err);
+                if (stopBtn) stopBtn.style.display = 'none';
+                if (err.name === 'AbortError') return; // użytkownik kliknął Stop
+                container.innerHTML = `<div class="alert alert-warning">Połączenie przerwane podczas wyszukiwania. Spróbuj ponownie.</div>`;
+                console.warn('Search stream interrupted:', err);
             }
         };
         await readChunk();
@@ -2693,12 +2694,11 @@ function analyzeExcel(fname) {
             <p class="mt-2 text-muted">Analizuję formuły, porównuję wartości, szukam anomalii...</p>
         </div>`;
 
-    fetch('/analyze/excel', {
+    fetchJson('/analyze/excel', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({file: fname, wsl_path: wslPath})
     })
-    .then(r => r.json())
     .then(d => {
         if (!d.success) {
             document.getElementById('excelModalBody').innerHTML =
