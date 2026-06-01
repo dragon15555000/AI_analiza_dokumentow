@@ -2421,78 +2421,106 @@ function analyzeExcel(fname) {
                 `<div class="alert alert-danger">❌ ${d.error}</div>`;
             return;
         }
-        const s = d.summary;
+        const s = d.summary || {};
+        const meta = d.workbook_meta || {};
         const sevColors = {critical:'#dc2626', high:'#d97706', warning:'#6c757d'};
         const sevBg     = {critical:'#fee2e2', high:'#fef3c7', warning:'#f8f9fa'};
         const sevIcon   = {critical:'🚨', high:'⚠️', warning:'ℹ️'};
+        const catLabels = {
+            override:'Nadpisanie', goal_seek:'Goal Seek', sum_mismatch:'SUM',
+            average_mismatch:'AVERAGE', hidden_rows:'Ukryte wiersze', hidden_cols:'Ukryte kolumny',
+            hidden_sheet:'Ukryty arkusz', no_cache:'Brak cache', excel_error:'Błąd Excel',
+            external_ref:'Link zewnętrzny'
+        };
 
-        const hiddenTotal = (s.hidden_rows||0) + (s.hidden_cols||0);
+        const hiddenTotal = (s.hidden_rows||0) + (s.hidden_cols||0) + (s.hidden_sheets||0);
+        const totalShown = d.findings_total != null ? d.findings_total : (d.findings||[]).length;
+
         let html = `
-            <div class="row g-2 mb-4">
-                <div class="col"><div class="text-center p-3 rounded" style="background:#f0f9ff;">
-                    <div style="font-size:1.4rem;font-weight:800;color:#0d6efd;">${s.total_formulas}</div>
-                    <div style="font-size:0.72rem;color:#6c757d;">Formuły</div>
-                </div></div>
-                <div class="col"><div class="text-center p-3 rounded" style="background:${s.errors>0?'#fee2e2':'#f0fdf4'};">
-                    <div style="font-size:1.4rem;font-weight:800;color:${s.errors>0?'#dc2626':'#16a34a'};">${s.errors}</div>
-                    <div style="font-size:0.72rem;color:#6c757d;">Błędy rachunkowe</div>
-                </div></div>
-                <div class="col"><div class="text-center p-3 rounded" style="background:${s.goal_seek>0?'#fef3c7':'#f0fdf4'};">
-                    <div style="font-size:1.4rem;font-weight:800;color:${s.goal_seek>0?'#d97706':'#16a34a'};">${s.goal_seek}</div>
-                    <div style="font-size:0.72rem;color:#6c757d;">Goal Seek</div>
-                </div></div>
-                <div class="col"><div class="text-center p-3 rounded" style="background:${s.overrides>0?'#fee2e2':'#f0fdf4'};">
-                    <div style="font-size:1.4rem;font-weight:800;color:${s.overrides>0?'#dc2626':'#16a34a'};">${s.overrides}</div>
-                    <div style="font-size:0.72rem;color:#6c757d;">Nadpisania</div>
-                </div></div>
-                <div class="col"><div class="text-center p-3 rounded" style="background:${hiddenTotal>0?'#fef3c7':'#f0fdf4'};">
-                    <div style="font-size:1.4rem;font-weight:800;color:${hiddenTotal>0?'#d97706':'#16a34a'};">${hiddenTotal}</div>
-                    <div style="font-size:0.72rem;color:#6c757d;">Ukryte</div>
-                </div></div>
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:0.82rem;">
+                <div class="row g-2">
+                    <div class="col-md-6"><strong>Autor:</strong> ${escapeHtml(meta.creator||'—')}</div>
+                    <div class="col-md-6"><strong>Ostatnia modyfikacja:</strong> ${escapeHtml(meta.modified||'—')}</div>
+                    <div class="col-md-6"><strong>Modyfikował:</strong> ${escapeHtml(meta.last_modified_by||'—')}</div>
+                    <div class="col-md-6"><strong>Arkusze (${meta.sheet_count||'?'}):</strong> ${escapeHtml((meta.sheet_names||[]).join(', '))}</div>
+                    <div class="col-12"><strong>Weryfikacja formuł:</strong> ${escapeHtml(d.calc_engine||'—')}</div>
+                </div>
+            </div>
+            <div class="row g-2 mb-3">
+                <div class="col-6 col-md-4 col-lg-2"><div class="text-center p-2 rounded" style="background:#f0f9ff;">
+                    <div style="font-size:1.25rem;font-weight:800;color:#0d6efd;">${s.total_formulas||0}</div>
+                    <div style="font-size:0.68rem;color:#6c757d;">Formuły</div></div></div>
+                <div class="col-6 col-md-4 col-lg-2"><div class="text-center p-2 rounded" style="background:${(s.critical||0)>0?'#fee2e2':'#f0fdf4'};">
+                    <div style="font-size:1.25rem;font-weight:800;color:${(s.critical||0)>0?'#dc2626':'#16a34a'};">${s.critical||0}</div>
+                    <div style="font-size:0.68rem;color:#6c757d;">Krytyczne</div></div></div>
+                <div class="col-6 col-md-4 col-lg-2"><div class="text-center p-2 rounded" style="background:${(s.high||0)>0?'#fef3c7':'#f0fdf4'};">
+                    <div style="font-size:1.25rem;font-weight:800;color:${(s.high||0)>0?'#d97706':'#16a34a'};">${s.high||0}</div>
+                    <div style="font-size:0.68rem;color:#6c757d;">Wysokie</div></div></div>
+                <div class="col-6 col-md-4 col-lg-2"><div class="text-center p-2 rounded" style="background:${(s.goal_seek||0)>0?'#fef3c7':'#f0fdf4'};">
+                    <div style="font-size:1.25rem;font-weight:800;color:${(s.goal_seek||0)>0?'#d97706':'#16a34a'};">${s.goal_seek||0}</div>
+                    <div style="font-size:0.68rem;color:#6c757d;">Goal Seek</div></div></div>
+                <div class="col-6 col-md-4 col-lg-2"><div class="text-center p-2 rounded" style="background:${(s.overrides||0)>0?'#fee2e2':'#f0fdf4'};">
+                    <div style="font-size:1.25rem;font-weight:800;color:${(s.overrides||0)>0?'#dc2626':'#16a34a'};">${s.overrides||0}</div>
+                    <div style="font-size:0.68rem;color:#6c757d;">Nadpisania</div></div></div>
+                <div class="col-6 col-md-4 col-lg-2"><div class="text-center p-2 rounded" style="background:${hiddenTotal>0?'#fef3c7':'#f0fdf4'};">
+                    <div style="font-size:1.25rem;font-weight:800;color:${hiddenTotal>0?'#d97706':'#16a34a'};">${hiddenTotal}</div>
+                    <div style="font-size:0.68rem;color:#6c757d;">Ukryte (w/k/a)</div></div></div>
             </div>`;
 
-        if (d.llm_comment) {
-            html += `<div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:14px 16px;margin-bottom:20px;">
-                <strong style="color:#4f46e5;">Ocena biegłego (LLM):</strong>
-                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${d.llm_comment.replace(/\n/g,'<br>')}</div>
-            </div>`;
-        }
-        // pasek pewności
-        if (d.confidence_pct !== null && d.confidence_pct !== undefined) {
+        if (d.confidence_pct != null) {
             const cpct = d.confidence_pct;
             const cc = cpct >= 70 ? '#16a34a' : cpct >= 40 ? '#d97706' : '#dc2626';
             html += `<div class="mb-3">
                 <div class="d-flex justify-content-between small mb-1">
-                    <span class="fw-bold">Pewność odpowiedzi</span>
+                    <span class="fw-bold">Ocena spójności pliku (heurystyka)</span>
                     <span style="color:${cc};font-weight:700;">${cpct}%</span>
                 </div>
                 <div class="progress" style="height:8px;border-radius:4px;">
                     <div class="progress-bar" style="width:${cpct}%;background:${cc};border-radius:4px;"></div>
                 </div>
+                <div class="small text-muted mt-1">Im więcej krytycznych rozbieżności, tym niższy wskaźnik.</div>
             </div>`;
         }
 
-        if (!d.findings.length) {
-            html += `<div class="alert alert-success">✅ Nie wykryto anomalii w formułach.</div>`;
+        if (d.llm_comment) {
+            const llmSafe = escapeHtml(d.llm_comment).replace(/\n/g,'<br>');
+            html += `<div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:14px 16px;margin-bottom:16px;">
+                <strong style="color:#4f46e5;">Ocena biegłego (LLM):</strong>
+                <div style="margin-top:6px;font-size:0.9rem;line-height:1.6;">${llmSafe}</div>
+            </div>`;
+        }
+
+        if (!d.findings || !d.findings.length) {
+            html += `<div class="alert alert-success">✅ Nie wykryto istotnych anomalii w analizowanych formułach i strukturze.</div>`;
         } else {
-            html += `<h6 style="font-weight:700;margin-bottom:10px;">Znaleziska (${d.findings.length}):</h6>`;
-            html += d.findings.map(f => `
-                <div style="background:${sevBg[f.severity]};border-left:4px solid ${sevColors[f.severity]};
-                    border-radius:6px;padding:12px 16px;margin-bottom:8px;">
-                    <div class="d-flex justify-content-between align-items-start">
+            const truncNote = d.findings_truncated
+                ? `<p class="small text-muted">Pokazano pierwsze ${d.findings.length} z ${totalShown} znalezisk (sortowane wg ważności).</p>` : '';
+            html += `<h6 style="font-weight:700;margin-bottom:8px;">Znaleziska (${totalShown})</h6>${truncNote}`;
+            html += d.findings.map(f => {
+                const cat = catLabels[f.category] || f.category || '';
+                const loc = f.cell ? `${escapeHtml(f.sheet)}!${escapeHtml(String(f.cell))}` : escapeHtml(f.sheet||'');
+                let nums = '';
+                if (f.stored != null && f.stored !== undefined) nums += `Zapisano: <strong>${escapeHtml(String(f.stored))}</strong>`;
+                if (f.calculated != null && f.calculated !== undefined) nums += ` · Oczekiwane: <strong>${escapeHtml(String(f.calculated))}</strong>`;
+                if (f.diff != null) nums += ` · Δ: <strong>${escapeHtml(String(f.diff))}</strong>`;
+                if (f.delta_pct != null) nums += ` (${escapeHtml(String(f.delta_pct))}%)`;
+                const rec = f.recommendation ? `<div style="font-size:0.78rem;margin-top:6px;color:#1e40af;"><strong>Dalej:</strong> ${escapeHtml(f.recommendation)}</div>` : '';
+                return `<div style="background:${sevBg[f.severity]};border-left:4px solid ${sevColors[f.severity]};
+                    border-radius:6px;padding:12px 14px;margin-bottom:8px;">
+                    <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
                         <div>
-                            <span style="font-weight:700;color:${sevColors[f.severity]};">${sevIcon[f.severity]} ${f.issue}</span>
-                            <span class="badge ms-2" style="background:${sevColors[f.severity]};font-size:0.65rem;">${f.severity.toUpperCase()}</span>
+                            <span style="font-weight:700;color:${sevColors[f.severity]};">${sevIcon[f.severity]} ${escapeHtml(f.issue||'')}</span>
+                            ${cat ? `<span class="badge ms-1" style="background:#e2e8f0;color:#334155;font-size:0.62rem;">${escapeHtml(cat)}</span>` : ''}
+                            <span class="badge ms-1" style="background:${sevColors[f.severity]};font-size:0.62rem;">${escapeHtml((f.severity||'').toUpperCase())}</span>
                         </div>
-                        <span style="font-size:0.78rem;color:#6c757d;flex-shrink:0;">${f.sheet}!${f.cell}</span>
+                        <span style="font-size:0.76rem;color:#6c757d;white-space:nowrap;">${loc}</span>
                     </div>
-                    <div style="font-size:0.8rem;margin-top:4px;color:#374151;">${f.detail}</div>
-                    <div style="font-family:monospace;font-size:0.78rem;margin-top:4px;color:#6c757d;">
-                        Formuła: ${f.formula}
-                        ${f.calculated !== undefined && f.calculated !== null ? ` | Powinno być: <strong>${f.calculated}</strong>` : ''}
-                        ${f.diff !== undefined ? ` | Różnica: <strong style="color:${sevColors[f.severity]};">${f.diff}</strong>` : ''}
-                    </div>
-                </div>`).join('');
+                    <div style="font-size:0.82rem;margin-top:6px;color:#374151;">${escapeHtml(f.detail||'')}</div>
+                    ${f.formula ? `<div style="font-family:monospace;font-size:0.76rem;margin-top:4px;color:#64748b;word-break:break-all;">${escapeHtml(f.formula)}</div>` : ''}
+                    ${nums ? `<div style="font-size:0.78rem;margin-top:4px;">${nums}</div>` : ''}
+                    ${rec}
+                </div>`;
+            }).join('');
         }
 
         document.getElementById('excelModalBody').innerHTML = html;

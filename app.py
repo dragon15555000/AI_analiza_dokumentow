@@ -2795,11 +2795,134 @@ def build_network():
         return jsonify({"success": False, "error": str(e)})
 
 
+_EXCEL_ERR_MARKERS = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#NULL!", "#NUM!", "#N/A", "#NA")
+
+
+def _fmt_excel_value(v) -> str:
+    if v is None:
+        return "—"
+    if isinstance(v, float):
+        if abs(v) >= 1e9 or (0 < abs(v) < 0.0001):
+            return f"{v:.6g}"
+        return f"{v:,.4f}".replace(",", " ")
+    if isinstance(v, int):
+        return f"{v:,}".replace(",", " ")
+    return str(v)[:120]
+
+
+def _compress_int_ranges(nums: list[int]) -> str:
+    if not nums:
+        return ""
+    nums = sorted(set(nums))
+    parts = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        parts.append(f"{start}" if start == prev else f"{start}–{prev}")
+        start = prev = n
+    parts.append(f"{start}" if start == prev else f"{start}–{prev}")
+    return ", ".join(parts)
+
+
+def _excel_goal_seek_hint(stored: float) -> tuple[bool, str, int]:
+    """Heurystyka śladu Goal Seek / Solver (nadmiarowa precyzja)."""
+    if not isinstance(stored, float) or stored != stored:
+        return False, "", 0
+    text = f"{stored:.14f}".rstrip("0")
+    if "." not in text:
+        return False, "", 0
+    decimals = len(text.split(".")[1])
+    if decimals < 7:
+        return False, "", decimals
+    if abs(stored) < 1e-12:
+        return False, "", decimals
+    return (
+        True,
+        f"Wartość {_fmt_excel_value(stored)} ma {decimals} miejsc po przecinku — typowe dla Goal Seek / Solver.",
+        decimals,
+    )
+
+
+def _excel_sum_range(ws_v, range_spec: str) -> float | None:
+    from openpyxl.utils import range_boundaries
+    spec = range_spec.strip().replace("$", "")
+    if ":" not in spec:
+        return None
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(spec)
+        total = 0.0
+        count = 0
+        for r in ws_v.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+            for c in r:
+                if isinstance(c.value, (int, float)):
+                    total += float(c.value)
+                    count += 1
+        return total if count else None
+    except Exception:
+        return None
+
+
+def _excel_eval_simple_formula(formula: str, sheet_values: dict) -> float | None:
+    """Proste formuły binarne: =A1+B1, =C3-D3, =E1*E2."""
+    m = re.match(r"^=([A-Z]+\d+)\s*([+\-*/])\s*([A-Z]+\d+)$", formula.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    vals = []
+    for coord in (m.group(1).upper(), m.group(3).upper()):
+        v = sheet_values.get(coord)
+        if not isinstance(v, (int, float)):
+            return None
+        vals.append(float(v))
+    op = m.group(2)
+    if op == "+":
+        return vals[0] + vals[1]
+    if op == "-":
+        return vals[0] - vals[1]
+    if op == "*":
+        return vals[0] * vals[1]
+    if op == "/" and vals[1] != 0:
+        return vals[0] / vals[1]
+    return None
+
+
+def _excel_add_finding(findings: list, summary: dict, **kw) -> None:
+    findings.append(kw)
+    sev = kw.get("severity", "warning")
+    cat = kw.get("category", "")
+    if sev == "critical":
+        summary["errors"] = summary.get("errors", 0) + 1
+    if cat == "override":
+        summary["overrides"] = summary.get("overrides", 0) + 1
+    if cat == "goal_seek":
+        summary["goal_seek"] = summary.get("goal_seek", 0) + 1
+    if sev == "warning":
+        summary["warnings"] = summary.get("warnings", 0) + 1
+    if cat == "excel_error":
+        summary["excel_errors"] = summary.get("excel_errors", 0) + 1
+    if cat == "external_ref":
+        summary["external_refs"] = summary.get("external_refs", 0) + 1
+
+
 def _excel_forensics(file_path: Path) -> dict:
-    """Pełna analiza forensyczna pliku Excel — szuka błędów rachunkowych i manipulacji."""
-    findings = []
-    summary  = {"total_formulas": 0, "errors": 0, "goal_seek": 0, "overrides": 0,
-                "warnings": 0, "hidden_rows": 0, "hidden_cols": 0}
+    """Analiza forensyczna Excel — formuły, cache, ukrycia, odwołania zewnętrzne."""
+    findings: list[dict] = []
+    summary: dict = {
+        "total_formulas": 0,
+        "errors": 0,
+        "goal_seek": 0,
+        "overrides": 0,
+        "warnings": 0,
+        "hidden_rows": 0,
+        "hidden_cols": 0,
+        "hidden_sheets": 0,
+        "excel_errors": 0,
+        "external_refs": 0,
+        "critical": 0,
+        "high": 0,
+    }
+    by_sheet: dict[str, dict] = {}
 
     try:
         wb_f = openpyxl.load_workbook(file_path, data_only=False)
@@ -2807,49 +2930,17 @@ def _excel_forensics(file_path: Path) -> dict:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-    # --- Wykryj ukryte wiersze i kolumny we wszystkich arkuszach ---
-    for sn in wb_v.sheetnames:
-        ws = wb_v[sn]
-        sheet_hidden_rows = [ri for ri, rd in ws.row_dimensions.items() if rd.hidden]
-        sheet_hidden_cols = [cl for cl, cd in ws.column_dimensions.items() if cd.hidden]
+    props = wb_f.properties
+    workbook_meta = {
+        "creator": getattr(props, "creator", None) or "—",
+        "last_modified_by": getattr(props, "lastModifiedBy", None) or "—",
+        "created": str(props.created) if getattr(props, "created", None) else "—",
+        "modified": str(props.modified) if getattr(props, "modified", None) else "—",
+        "sheet_count": len(wb_f.sheetnames),
+        "sheet_names": list(wb_f.sheetnames),
+    }
 
-        if sheet_hidden_rows:
-            summary["hidden_rows"] += len(sheet_hidden_rows)
-            # Zbierz wartości z ukrytych wierszy
-            hidden_data = []
-            for ri in sheet_hidden_rows[:20]:  # max 20 ukrytych wierszy w raporcie
-                row_cells = []
-                for cell in ws[ri]:
-                    if cell.value is not None and str(cell.value).strip():
-                        row_cells.append(f"{cell.column_letter}: {cell.value}")
-                if row_cells:
-                    hidden_data.append(f"wiersz {ri}: " + " | ".join(row_cells[:8]))
-            findings.append({
-                "severity": "high",
-                "sheet": sn, "cell": f"wiersze {sheet_hidden_rows[:5]}{'...' if len(sheet_hidden_rows)>5 else ''}",
-                "formula": "",
-                "stored": None,
-                "calculated": None,
-                "issue": f"UKRYTE WIERSZE: {len(sheet_hidden_rows)} wierszy w arkuszu '{sn}'",
-                "detail": (f"Znaleziono {len(sheet_hidden_rows)} ukrytych wierszy. "
-                           + ("Dane w nich: " + "; ".join(hidden_data[:3]) if hidden_data
-                              else "Wiersze są puste."))
-            })
-
-        if sheet_hidden_cols:
-            summary["hidden_cols"] += len(sheet_hidden_cols)
-            findings.append({
-                "severity": "high",
-                "sheet": sn, "cell": f"kolumny {sheet_hidden_cols[:5]}",
-                "formula": "",
-                "stored": None,
-                "calculated": None,
-                "issue": f"UKRYTE KOLUMNY: {len(sheet_hidden_cols)} kolumn w arkuszu '{sn}'",
-                "detail": f"Kolumny {', '.join(sheet_hidden_cols[:10])} są ukryte — mogą zawierać dane pominięte w analizie."
-            })
-
-    # Zbierz wszystkie wartości arkusza do słownika dla cross-check
-    sheet_values = {}
+    sheet_values: dict[str, dict] = {}
     for sn in wb_v.sheetnames:
         ws = wb_v[sn]
         sheet_values[sn] = {}
@@ -2858,136 +2949,321 @@ def _excel_forensics(file_path: Path) -> dict:
                 if cell.value is not None:
                     sheet_values[sn][cell.coordinate] = cell.value
 
-    # --- Próba ewaluacji przez xlcalculator ---
-    calc_values = {}
+    calc_values: dict[str, float] = {}
+    calc_engine = "none"
     try:
         from xlcalculator import ModelCompiler, Evaluator
-        compiler  = ModelCompiler()
-        model     = compiler.read_and_parse_archive(str(file_path))
+        compiler = ModelCompiler()
+        model = compiler.read_and_parse_archive(str(file_path))
         evaluator = Evaluator(model)
         for sn in wb_f.sheetnames:
             ws_f = wb_f[sn]
             for row in ws_f.iter_rows():
                 for cell in row:
-                    if isinstance(cell.value, str) and cell.value.startswith('='):
+                    if isinstance(cell.value, str) and cell.value.startswith("="):
                         key = f"{sn}!{cell.coordinate}"
                         try:
                             val = evaluator.evaluate(key)
-                            calc_values[key] = val
+                            if isinstance(val, (int, float)):
+                                calc_values[key] = float(val)
                         except Exception:
                             pass
+        if calc_values:
+            calc_engine = "xlcalculator"
     except Exception:
-        pass  # xlcalculator niedostępny lub błąd parsowania
+        calc_engine = "none"
 
-    # --- Analiza komórek ---
     for sn in wb_f.sheetnames:
+        by_sheet[sn] = {"formulas": 0, "findings": 0, "hidden_rows": 0, "hidden_cols": 0}
+        ws_f = wb_f[sn]
+        state = getattr(ws_f, "sheet_state", "visible") or "visible"
+        if state in ("hidden", "veryHidden"):
+            summary["hidden_sheets"] += 1
+            _excel_add_finding(
+                findings, summary,
+                severity="high",
+                category="hidden_sheet",
+                sheet=sn,
+                cell="(arkusz)",
+                formula="",
+                stored=None,
+                calculated=None,
+                issue=f"Ukryty arkusz: {sn}",
+                detail=f"Stan arkusza: {state}. Dane mogą być niewidoczne w standardowym widoku.",
+                recommendation="Odsłoń arkusz w Excelu lub uwzględnij go w analizie.",
+            )
+
+    for sn in wb_v.sheetnames:
+        ws = wb_v[sn]
+        hidden_rows = sorted(ri for ri, rd in ws.row_dimensions.items() if rd.hidden)
+        hidden_cols = sorted(
+            cl for cl, cd in ws.column_dimensions.items() if cd.hidden
+        )
+
+        if hidden_rows:
+            summary["hidden_rows"] += len(hidden_rows)
+            by_sheet.setdefault(sn, {})["hidden_rows"] = len(hidden_rows)
+            samples = []
+            for ri in hidden_rows[:12]:
+                cells = []
+                for cell in ws[ri]:
+                    if cell.value is not None and str(cell.value).strip():
+                        cells.append(f"{cell.column_letter}={_fmt_excel_value(cell.value)}")
+                if cells:
+                    samples.append(f"w.{ri}: " + ", ".join(cells[:6]))
+            _excel_add_finding(
+                findings, summary,
+                severity="high",
+                category="hidden_rows",
+                sheet=sn,
+                cell=f"wiersze {_compress_int_ranges(hidden_rows)}",
+                formula="",
+                stored=None,
+                calculated=None,
+                issue=f"{len(hidden_rows)} ukrytych wierszy",
+                detail=(
+                    f"Zakres wierszy: {_compress_int_ranges(hidden_rows)}. "
+                    + ("Próbka danych: " + "; ".join(samples[:4]) if samples else "Wiersze bez danych liczbowych/tekstowych.")
+                ),
+                recommendation="Sprawdź, czy ukryte wiersze nie zawierają kwot pominiętych w sumach widocznych.",
+            )
+
+        if hidden_cols:
+            summary["hidden_cols"] += len(hidden_cols)
+            by_sheet.setdefault(sn, {})["hidden_cols"] = len(hidden_cols)
+            _excel_add_finding(
+                findings, summary,
+                severity="high",
+                category="hidden_cols",
+                sheet=sn,
+                cell=f"kolumny {', '.join(hidden_cols[:15])}{'…' if len(hidden_cols) > 15 else ''}",
+                formula="",
+                stored=None,
+                calculated=None,
+                issue=f"{len(hidden_cols)} ukrytych kolumn",
+                detail=f"Kolumny: {', '.join(hidden_cols[:20])}. Mogą zawierać dane wyłączone z widoku.",
+                recommendation="Zweryfikuj sumy i tabele przestawne pod kątem ukrytych kolumn.",
+            )
+
+    for sn in wb_f.sheetnames:
+        if sn not in wb_v.sheetnames:
+            continue
         ws_f = wb_f[sn]
         ws_v = wb_v[sn]
+        flat_values = sheet_values.get(sn, {})
+
+        for row in ws_v.iter_rows():
+            for cell in row:
+                val = cell.value
+                if isinstance(val, str) and any(m in val.upper() for m in _EXCEL_ERR_MARKERS):
+                    _excel_add_finding(
+                        findings, summary,
+                        severity="critical",
+                        category="excel_error",
+                        sheet=sn,
+                        cell=cell.coordinate,
+                        formula="",
+                        stored=val,
+                        calculated=None,
+                        issue=f"Błąd Excel w komórce: {val}",
+                        detail="Komórka zawiera kod błędu — formuła lub odwołanie jest nieprawidłowe.",
+                        recommendation="Przejdź do komórki i napraw odwołanie lub dzielenie przez zero.",
+                    )
 
         for row in ws_f.iter_rows():
             for cell_f in row:
                 formula = cell_f.value
-                if not isinstance(formula, str) or not formula.startswith('='):
+                if not isinstance(formula, str) or not formula.startswith("="):
                     continue
 
                 summary["total_formulas"] += 1
-                coord   = cell_f.coordinate
-                stored  = sheet_values.get(sn, {}).get(coord)
+                by_sheet.setdefault(sn, {})["formulas"] = by_sheet[sn].get("formulas", 0) + 1
+                coord = cell_f.coordinate
+                stored = flat_values.get(coord)
                 calc_key = f"{sn}!{coord}"
+                formula_short = formula if len(formula) <= 120 else formula[:117] + "…"
 
-                # 1. Brak wartości — plik niezapisany przez Excel (np. LibreOffice)
+                if re.search(r"\[[^\]]+\]", formula):
+                    _excel_add_finding(
+                        findings, summary,
+                        severity="warning",
+                        category="external_ref",
+                        sheet=sn,
+                        cell=coord,
+                        formula=formula_short,
+                        stored=stored,
+                        calculated=None,
+                        issue="Odwołanie do zewnętrznego pliku",
+                        detail="Formuła odwołuje się do innego skoroszytu — wynik zależy od pliku, którego tu nie weryfikujemy.",
+                        recommendation="Otwórz powiązany plik i sprawdź, czy wartości są aktualne.",
+                    )
+
                 if stored is None:
-                    findings.append({
-                        "severity": "warning",
-                        "sheet": sn, "cell": coord,
-                        "formula": formula[:80],
-                        "stored": None,
-                        "calculated": None,
-                        "issue": "Brak zapisanej wartości",
-                        "detail": "Plik nie był przeliczony przez Excel lub zapisany przez LibreOffice. Wartości formuł mogą być błędne."
-                    })
-                    summary["warnings"] += 1
+                    _excel_add_finding(
+                        findings, summary,
+                        severity="warning",
+                        category="no_cache",
+                        sheet=sn,
+                        cell=coord,
+                        formula=formula_short,
+                        stored=None,
+                        calculated=None,
+                        issue="Brak zapisanej wartości (cache)",
+                        detail="Excel nie zapisał wyniku formuły (np. LibreOffice, import bez przeliczenia).",
+                        recommendation="Otwórz plik w Excelu, Ctrl+Alt+F9 (przelicz) i zapisz ponownie.",
+                    )
                     continue
 
-                # 2. Ślad Goal Seek — ekstremalna precyzja dziesiętna
                 if isinstance(stored, float):
-                    s_str     = repr(stored)
-                    after_dot = s_str.split('.')[-1] if '.' in s_str else ''
-                    if len(after_dot) > 9:
-                        findings.append({
-                            "severity": "high",
-                            "sheet": sn, "cell": coord,
-                            "formula": formula[:80],
-                            "stored": stored,
-                            "calculated": None,
-                            "issue": f"Ślad Goal Seek ({len(after_dot)} miejsc po przecinku)",
-                            "detail": f"Wartość {stored} ma {len(after_dot)} miejsc po przecinku — charakterystyczne dla narzędzia Goal Seek (wsteczne dobieranie wartości)."
-                        })
-                        summary["goal_seek"] += 1
+                    is_gs, gs_detail, dec = _excel_goal_seek_hint(stored)
+                    if is_gs:
+                        _excel_add_finding(
+                            findings, summary,
+                            severity="high",
+                            category="goal_seek",
+                            sheet=sn,
+                            cell=coord,
+                            formula=formula_short,
+                            stored=stored,
+                            calculated=None,
+                            issue=f"Podejrzenie Goal Seek ({dec} miejsc dziesiętnych)",
+                            detail=gs_detail,
+                            recommendation="Sprawdź historię zmian komórki i zgodność z założeniami budżetu.",
+                        )
 
-                # 3. Niezgodność formuły z wartością wyliczoną przez xlcalculator
+                expected: float | None = None
                 if calc_key in calc_values:
-                    calc_val = calc_values[calc_key]
-                    if calc_val is not None and stored is not None:
-                        try:
-                            diff = abs(float(stored) - float(calc_val))
-                            rel  = diff / max(abs(float(calc_val)), 1e-9)
-                            if rel > 0.001 and diff > 0.01:  # >0.1% rozbieżność i >1 grosz
-                                findings.append({
-                                    "severity": "critical",
-                                    "sheet": sn, "cell": coord,
-                                    "formula": formula[:80],
-                                    "stored": stored,
-                                    "calculated": round(float(calc_val), 6),
-                                    "diff": round(diff, 2),
-                                    "issue": f"NIEZGODNOŚĆ: zapisano {stored}, formuła daje {round(float(calc_val),2)}",
-                                    "detail": f"Różnica: {round(diff,2)} ({round(rel*100,2)}%). Możliwa ręczna modyfikacja."
-                                })
-                                summary["overrides"] += 1
-                                summary["errors"] += 1
-                        except (ValueError, TypeError):
-                            pass
+                    expected = calc_values[calc_key]
+                else:
+                    simple = _excel_eval_simple_formula(formula, flat_values)
+                    if simple is not None:
+                        expected = simple
+                        calc_engine = calc_engine or "simple"
 
-                # 4. Prosta weryfikacja SUM — parsuj zakres i sumuj ręcznie
-                m_sum = re.match(r'^=SUM\(([A-Z]+\d+):([A-Z]+\d+)\)$', formula, re.IGNORECASE)
-                if m_sum and isinstance(stored, (int, float)):
+                if expected is not None and isinstance(stored, (int, float)):
                     try:
-                        from openpyxl.utils import range_boundaries
-                        min_col, min_row, max_col, max_row = range_boundaries(f"{m_sum.group(1)}:{m_sum.group(2)}")
-                        total = 0.0
-                        for r in ws_v.iter_rows(min_row=min_row, max_row=max_row,
-                                                min_col=min_col, max_col=max_col):
-                            for c in r:
-                                if isinstance(c.value, (int, float)):
-                                    total += c.value
-                        diff = abs(stored - total)
-                        if diff > 0.02:
-                            findings.append({
-                                "severity": "critical",
-                                "sheet": sn, "cell": coord,
-                                "formula": formula[:80],
-                                "stored": stored,
-                                "calculated": round(total, 2),
-                                "diff": round(diff, 2),
-                                "issue": f"BŁĄD SUM: zapisano {stored}, rzeczywista suma = {round(total,2)}",
-                                "detail": f"Różnica {round(diff,2)} zł. Formuła {formula} nie zgadza się z sumą zakresu."
-                            })
-                            summary["errors"] += 1
-                    except Exception:
+                        diff = abs(float(stored) - float(expected))
+                        base = max(abs(float(expected)), 1e-9)
+                        rel = diff / base
+                        if diff > 0.01 and rel > 0.001:
+                            _excel_add_finding(
+                                findings, summary,
+                                severity="critical",
+                                category="override",
+                                sheet=sn,
+                                cell=coord,
+                                formula=formula_short,
+                                stored=stored,
+                                calculated=round(float(expected), 6),
+                                diff=round(diff, 4),
+                                delta_pct=round(rel * 100, 2),
+                                issue="Nadpisanie / rozbieżność cache vs formuła",
+                                detail=(
+                                    f"W komórce zapisano {_fmt_excel_value(stored)}, "
+                                    f"a z formuły wynika {_fmt_excel_value(expected)} "
+                                    f"(Δ={_fmt_excel_value(diff)}, {rel*100:.2f}%)."
+                                ),
+                                recommendation="Porównaj z wersją archiwalną; możliwe ręczne wklejenie wartości.",
+                            )
+                    except (TypeError, ValueError):
                         pass
+
+                inner = formula.split("(", 1)
+                if len(inner) == 2 and inner[0].upper().startswith("=SUM"):
+                    args = inner[1].rstrip(")").replace(";", ",")
+                    if ":" in args and "!" not in args.split(":")[0]:
+                        range_spec = args.split(",")[0].strip()
+                        total = _excel_sum_range(ws_v, range_spec)
+                        if total is not None and isinstance(stored, (int, float)):
+                            diff = abs(float(stored) - total)
+                            if diff > 0.02:
+                                _excel_add_finding(
+                                    findings, summary,
+                                    severity="critical",
+                                    category="sum_mismatch",
+                                    sheet=sn,
+                                    cell=coord,
+                                    formula=formula_short,
+                                    stored=stored,
+                                    calculated=round(total, 4),
+                                    diff=round(diff, 4),
+                                    issue="Błąd sumowania SUM",
+                                    detail=(
+                                        f"Suma zakresu {range_spec} = {_fmt_excel_value(total)}, "
+                                        f"w komórce {_fmt_excel_value(stored)} (Δ={_fmt_excel_value(diff)})."
+                                    ),
+                                    recommendation="Przelicz zakres ręcznie lub sprawdź ukryte wiersze w SUM.",
+                                )
+
+                m_avg = re.match(r"^=AVERAGE\(([^)]+)\)$", formula, re.IGNORECASE)
+                if m_avg and isinstance(stored, (int, float)):
+                    spec = m_avg.group(1).replace(";", ",").strip()
+                    if ":" in spec and "!" not in spec:
+                        total = _excel_sum_range(ws_v, spec)
+                        if total is not None:
+                            from openpyxl.utils import range_boundaries
+                            min_col, min_row, max_col, max_row = range_boundaries(
+                                spec.replace("$", "")
+                            )
+                            cnt = max(1, (max_row - min_row + 1) * (max_col - min_col + 1))
+                            avg = total / cnt
+                            diff = abs(float(stored) - avg)
+                            if diff > 0.05:
+                                _excel_add_finding(
+                                    findings, summary,
+                                    severity="high",
+                                    category="average_mismatch",
+                                    sheet=sn,
+                                    cell=coord,
+                                    formula=formula_short,
+                                    stored=stored,
+                                    calculated=round(avg, 4),
+                                    diff=round(diff, 4),
+                                    issue="Błąd średniej AVERAGE",
+                                    detail=(
+                                        f"Średnia z zakresu ≈ {_fmt_excel_value(avg)}, "
+                                        f"zapisano {_fmt_excel_value(stored)}."
+                                    ),
+                                    recommendation="Sprawdź puste komórki w zakresie — AVERAGE je pomija, SUM nie.",
+                                )
 
     wb_f.close()
     wb_v.close()
 
-    # Posortuj: najpierw critical, potem high, potem warning
     sev_order = {"critical": 0, "high": 1, "warning": 2}
-    findings.sort(key=lambda x: sev_order.get(x["severity"], 3))
+    findings.sort(key=lambda x: (sev_order.get(x.get("severity"), 3), x.get("sheet", ""), x.get("cell", "")))
+
+    for f in findings:
+        if f.get("severity") == "critical":
+            summary["critical"] += 1
+        elif f.get("severity") == "high":
+            summary["high"] += 1
+        by_sheet.setdefault(f.get("sheet", "?"), {})["findings"] = (
+            by_sheet.get(f.get("sheet", "?"), {}).get("findings", 0) + 1
+        )
+
+    total_findings = len(findings)
+    max_show = 100
+    truncated = total_findings > max_show
+    if truncated:
+        findings = findings[:max_show]
+
+    penalty = summary["critical"] * 12 + summary["high"] * 5 + summary["warnings"] * 2
+    confidence_pct = max(8, min(98, 95 - penalty)) if summary["total_formulas"] else 90
+    if not findings:
+        confidence_pct = 92
 
     return {
         "success": True,
         "file": file_path.name,
         "summary": summary,
-        "findings": findings
+        "findings": findings,
+        "findings_total": total_findings,
+        "findings_truncated": truncated,
+        "workbook_meta": workbook_meta,
+        "by_sheet": by_sheet,
+        "calc_engine": calc_engine,
+        "confidence_pct": confidence_pct,
     }
 
 
@@ -3022,26 +3298,48 @@ def analyze_excel():
 
     result = _excel_forensics(path)
 
-    # Jeśli są krytyczne błędy — poproś LLM o komentarz
-    critical = [f for f in result.get("findings", []) if f["severity"] == "critical"]
-    if critical and result.get("success"):
-        ctx = "\n".join([f"[{f['sheet']}!{f['cell']}] {f['issue']} | {f['detail']}" for f in critical[:8]])
-        prompt = (
-            f"Plik Excel: {path.name}\n"
-            f"Znaleziono {len(critical)} krytycznych niezgodności w formułach:\n{ctx}\n\n"
-            "Oceń: czy to błąd rachunkowy, celowa manipulacja, czy błąd techniczny? "
-            "Co to oznacza w kontekście śledztwa finansowego? Odpowiedz po polsku, krótko."
-        )
-        system = "Jesteś biegłym rewidentem śledczym. Analizujesz anomalie w plikach Excel pod kątem fałszowania dokumentów finansowych."
-        payload = {"model": LLM_MODEL, "prompt": prompt, "system": system, "stream": False, "options": {"num_ctx": 8192}}
-        try:
-            req = urllib.request.Request(
-                OLLAMA_URL + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST"
+    # Komentarz LLM przy istotnych znaleziskach
+    notable = [
+        f for f in result.get("findings", [])
+        if f.get("severity") in ("critical", "high")
+    ]
+    if notable and result.get("success"):
+        s = result.get("summary", {})
+        meta = result.get("workbook_meta", {})
+        ctx_lines = []
+        for f in notable[:12]:
+            extra = ""
+            if f.get("calculated") is not None:
+                extra = f" | oczekiwane: {f.get('calculated')}"
+            if f.get("delta_pct") is not None:
+                extra += f" | Δ%={f.get('delta_pct')}"
+            ctx_lines.append(
+                f"[{f.get('category','?')}] {f['sheet']}!{f['cell']}: {f['issue']}{extra} — {f.get('detail','')}"
             )
-            with urllib.request.urlopen(req, timeout=120) as r:
-                result["llm_comment"] = json.loads(r.read().decode("utf-8"))["response"]
+        prompt = (
+            f"Plik: {path.name}\n"
+            f"Autor: {meta.get('creator')} | Modyfikował: {meta.get('last_modified_by')} | "
+            f"Data modyfikacji: {meta.get('modified')}\n"
+            f"Formuły: {s.get('total_formulas', 0)} | Krytyczne: {s.get('critical', 0)} | "
+            f"Wysokie: {s.get('high', 0)} | Goal Seek: {s.get('goal_seek', 0)} | "
+            f"Silnik weryfikacji: {result.get('calc_engine', 'none')}\n\n"
+            f"Znaleziska ({len(notable)} istotnych, pierwsze {min(12, len(notable))}):\n"
+            + "\n".join(ctx_lines)
+            + "\n\nOdpowiedz po polsku (max 12 zdań):\n"
+            "1) Najpoważniejsze ryzyko śledcze/finansowe\n"
+            "2) Manipulacja vs błąd techniczny\n"
+            "3) Co sprawdzić dalej (konkretnie)"
+        )
+        system = (
+            "Jesteś biegłym rewidentem śledczym. Analizujesz anomalie w Excelu. "
+            "Pisz konkretnie, bez ogólników."
+        )
+        try:
+            out = call_llm(prompt, system=system, stream=False, max_tokens=900, temperature=0.2)
+            if isinstance(out, dict):
+                result["llm_comment"] = out.get("response", str(out))
+            else:
+                result["llm_comment"] = str(out)[:4000]
         except Exception as e:
             result["llm_comment"] = f"(Błąd LLM: {e})"
 
