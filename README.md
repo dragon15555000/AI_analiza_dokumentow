@@ -164,10 +164,27 @@ Otwórz / Open: `http://localhost:5000`
 
 ### OCR (opcjonalnie / optional)
 
+Dla **zeskanowanych PDF** i **obrazów** (gdy brak warstwy tekstu). Aplikacja uruchamia OCR automatycznie — nie trzeba nic włączać w UI.
+
 ```bash
+# System (Ubuntu/Debian)
 sudo apt update && sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils -y
+
+# Python (w venv)
+cd AI_analiza_dokumentow
+source venv/bin/activate
 pip install pytesseract pdf2image Pillow
 ```
+
+**Sprawdzenie:** po restarcie Flask otwórz http://localhost:5000 — checklista startowa pokaże wiersz **OCR (Tesseract)**.  
+Albo w terminalu:
+
+```bash
+curl -s http://127.0.0.1:5000/health | python3 -m json.tool | grep -A8 '"ocr"'
+```
+
+Gdy `available: false`, pole `install_hint` podaje brakujące kroki.  
+Szczegóły planu rozwoju OCR/Excel: [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) (macierz funkcji).
 
 ### Produkcyjny serwer / Production server (Waitress)
 

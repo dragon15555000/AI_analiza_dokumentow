@@ -3787,16 +3787,24 @@ function showStartupChecklist(d) {
     const tbody = document.getElementById('startupCheckBody');
     tbody.innerHTML = '';
 
-    const llmLabel = d.llm_provider === 'openrouter' ? `OpenRouter (${d.llm_model || ''})` : `Ollama (${d.llm_model || ''})`;
-    const llmDetail = {ok:'Połączono', error:'Nie odpowiada — sprawdź czy Ollama działa', no_key:'Brak klucza OPENROUTER_API_KEY w .env'}[d.llm] || d.llm;
+    const qdrantOk = (d.qdrant && typeof d.qdrant === 'object')
+        ? !!d.qdrant.ok
+        : (d.qdrant_status === 'ok' || d.qdrant === 'ok');
+    const llmState = d.llm_status
+        || ((d.llm && typeof d.llm === 'object') ? (d.llm.ok ? 'ok' : (d.provider === 'openrouter' && !d.llm.ok ? 'error' : 'error')) : d.llm);
 
-    const qdrantDetail = d.qdrant === 'ok'
-        ? `Połączono · kolekcja "${d.collection}" · ${(d.vectors_count||0).toLocaleString('pl')} wektorów`
-        : (d.qdrant_error || 'Błąd połączenia — sprawdź QDRANT_URL w .env');
+    const llmLabel = d.llm_provider === 'openrouter' ? `OpenRouter (${d.llm_model || ''})` : `Ollama (${d.llm_model || ''})`;
+    const llmDetail = {ok:'Połączono', error:'Nie odpowiada — sprawdź Ollama / OpenRouter', no_key:'Brak klucza OPENROUTER_API_KEY w .env'}[llmState] || llmState;
+
+    const collName = d.collection || d.active_collection?.name || '?';
+    const vecCount = d.vectors_count ?? d.active_collection?.points ?? 0;
+    const qdrantDetail = qdrantOk
+        ? `Połączono · kolekcja "${collName}" · ${Number(vecCount).toLocaleString('pl')} wektorów`
+        : (d.qdrant_error || d.qdrant?.error || 'Błąd połączenia — sprawdź QDRANT_URL i QDRANT_KEY w .env');
     const qdrantPortInfo = d.ports && d.ports.qdrant ? ` (port: ${d.ports.qdrant})` : '';
 
     const llmDetailFull = llmDetail + (d.llm_provider==='openrouter' ? ` · ${llmLabel}` : '')
-        + (d.llm_error ? ` — ${d.llm_error}` : '');
+        + (d.llm_error || d.llm?.error ? ` — ${d.llm_error || d.llm?.error}` : '');
 
     const sqlPortInfo = d.ports && d.ports.sql ? ` · port ${d.ports.sql}` : '';
     const sqlDetail = d.sql_configured
@@ -3811,15 +3819,30 @@ function showStartupChecklist(d) {
         : 'brak danych';
     const allPortsOk = portNames.length && portNames.every(k => ports[k] === 'ok');
 
+    const ocr = d.ocr || {};
+    const ocrOk = ocr.available ?? d.ocr_available;
+    const ocrDetail = ocrOk
+        ? (ocr.note || 'Skany PDF i obrazy (język pol)')
+        : (ocr.install_hint || 'Opcjonalne: sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils · pip install pytesseract pdf2image');
+
+    const fp = d.file_parsers || {};
+    const parsersOk = fp.pdf_text && fp.excel;
+    const parsersDetail = parsersOk
+        ? (fp.note || 'PDF (tekst) · Excel (forensyka) · DOCX')
+        : 'Brak pdfplumber/openpyxl — pip install -r requirements.txt';
+
     tbody.append(
-        buildCheckRow('Qdrant', d.qdrant, qdrantDetail + qdrantPortInfo),
-        buildCheckRow('LLM', d.llm, llmDetailFull),
+        buildCheckRow('Qdrant', qdrantOk ? 'ok' : 'error', qdrantDetail + qdrantPortInfo),
+        buildCheckRow('LLM', llmState, llmDetailFull),
         buildCheckRow('SQL Server',
             d.sql_configured ? 'ok' : 'warn',
             sqlDetail),
+        buildCheckRow('Pliki Excel/PDF',
+            parsersOk ? 'ok' : 'warn',
+            parsersDetail),
         buildCheckRow('OCR (Tesseract)',
-            d.ocr_available ? 'ok' : 'warn',
-            d.ocr_available ? 'Dostępny — obsługuje skany i obrazy' : 'Nie zainstalowany (opcjonalne — sudo apt install tesseract-ocr)'),
+            ocrOk ? 'ok' : 'warn',
+            ocrDetail),
         buildCheckRow('Porty', allPortsOk ? 'ok' : 'warn', portSummary)
     );
 

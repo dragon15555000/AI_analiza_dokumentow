@@ -137,3 +137,31 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 - Wyrównano wszystkie wywołania batch embeddings do `batch_size=6`.
 
 Te zmiany znacząco zwiększają niezawodność przy korzystaniu z darmowych modeli OpenRouter.
+
+---
+
+## Macierz funkcji — OCR i zarządzanie plikami (Excel/PDF)
+
+| Obszar | Stan | Priorytet | Co jest dziś | Co brakuje do 🟢 |
+|--------|------|-----------|--------------|------------------|
+| **OCR (lepsze)** | 🟡 Częściowo | Średni | Fallback Tesseract `pol` dla skanów PDF (&lt;20 znaków) i obrazów; status w `/health` → `ocr` | Wymuszony OCR w UI, postęp per strona, `eng+pol`, preprocessing, podgląd skanu w wynikach |
+| **Zarządzanie zasobami plików (Excel/PDF)** | 🟡 Częściowo | Wysoki | Import XLSX (arkusze, formuły, forensyka), PDF tekstowy, metadane, przeglądarka dokumentów, bulk delete | Podgląd fragmentu w wynikach, filtry po typie/dacie, raport „import bez tekstu (tylko OCR)” |
+
+**Sprawdzenie w runtime:** `curl -s http://127.0.0.1:5000/health | python3 -m json.tool` — pola `ocr`, `file_parsers`.
+
+**Instalacja OCR (dev):** README → sekcja „OCR”; checklista przy starcie aplikacji w UI.
+
+### Proponowane zadania (backlog)
+
+**OCR**
+- [ ] Checkbox „Wymuś OCR” przy imporcie folderu
+- [ ] SSE: postęp `ocr_page` / `ocr_done` dla wielostronicowych PDF
+- [ ] Rozszerzyć `lang` na `pol+eng` (konfiguracja w `.env`)
+- [ ] Komunikat w UI gdy `ocr.available === false` (z `install_hint`)
+
+**Excel/PDF**
+- [ ] Podgląd tekstu źródłowego przy kliknięciu wyniku (modal)
+- [ ] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
+- [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
+
+*Ostatnia aktualizacja macierzy: czerwiec 2026*
