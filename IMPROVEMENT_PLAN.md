@@ -9,7 +9,7 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 **1.1 Produkcyjny serwer WSGI** ✅ W TRAKCIE
 - [x] Dodano waitress do requirements.txt
 - [x] Stworzono wsgi.py
-- [x] Przygotowano mzk_web.service
+- [x] Przygotowano ai_analiza.service
 - [x] Dodano instrukcję w README.md
 - [x] Stworzono skrypt migrate_to_waitress.sh
 - [ ] Przetestować na maszynie docelowej + ewentualne poprawki
@@ -133,7 +133,7 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 - Frontend: ładne alerty z przyciskiem "Przełącz na Ollama" przy trafieniu w limit.
 
 ### Inne
-- Naprawiono pliki `mzk_web.service` i `migrate_to_waitress.sh` (pozostałości markdown ` ``` ` na końcu).
+- Naprawiono pliki `ai_analiza.service` i `migrate_to_waitress.sh` (pozostałości markdown ` ``` ` na końcu).
 - Wyrównano wszystkie wywołania batch embeddings do `batch_size=6`.
 
 Te zmiany znacząco zwiększają niezawodność przy korzystaniu z darmowych modeli OpenRouter.

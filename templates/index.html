@@ -129,6 +129,19 @@
         .vs-ok   { background:#dcfce7; color:#166534; }
         .vs-warn { background:#fef9c3; color:#854d0e; }
         .vs-bad  { background:#fee2e2; color:#991b1b; }
+
+        /* Status dots */
+        .status-dot { font-size:0.65rem; vertical-align:middle; transition:color 0.4s; }
+        .dot-ok   { color:#48bb78; }
+        .dot-err  { color:#fc8181; }
+        .dot-warn { color:#f6ad55; }
+        .dot-pending { color:#a0aec0; }
+
+        /* Context suggestion banner */
+        #contextBanner { background:#eff6ff; border-left:4px solid #3b82f6; padding:10px 16px; display:none; align-items:center; gap:10px; flex-wrap:wrap; font-size:0.85rem; color:#1e3a5f; }
+        #contextBanner .ctx-icon { font-size:1.1rem; flex-shrink:0; }
+        #contextBanner .ctx-text { flex:1; min-width:200px; }
+        #contextBanner .ctx-actions { display:flex; gap:6px; flex-shrink:0; }
     </style>
 </head>
 <body>
@@ -137,6 +150,12 @@
     <h1>AI Analiza Dokumentów</h1>
     <div class="badge-stat">Wektory: <span id="statVectors">...</span></div>
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
+    <div class="badge-stat" title="Status połączeń">
+        <span id="dotQdrant" class="status-dot dot-pending" title="Qdrant">⬤</span> Qdrant &nbsp;
+        <span id="dotLlm"    class="status-dot dot-pending" title="LLM">⬤</span> LLM
+    </div>
+    <button onclick="openDiagnostics()" title="Diagnostyka / Zarządzanie usługą"
+            style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
     <div class="badge-stat">Model: <span>768 · Nomic</span></div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
 
@@ -193,6 +212,16 @@
     </li>
 </ul>
 
+<!-- Baner adaptacyjnej sugestii trybu analizy -->
+<div id="contextBanner">
+    <span class="ctx-icon" id="contextBannerIcon">📊</span>
+    <span class="ctx-text" id="contextBannerText"></span>
+    <div class="ctx-actions">
+        <button class="btn btn-sm btn-primary" onclick="applyContextSuggestion()">Zastosuj tryb</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="dismissContextBanner()">✕</button>
+    </div>
+</div>
+
 <!-- TAB: WYSZUKIWANIE -->
 <div id="tabSearch" class="main-wrap">
     <div class="row g-3">
@@ -245,6 +274,14 @@
             <div id="loader" class="text-center py-4 d-none">
                 <div class="spinner-border text-primary"></div>
                 <p class="mt-2 text-muted small">Generowanie embeddingu, wyszukiwanie semantyczne i synteza LLM...</p>
+            </div>
+
+            <!-- Licznik tokenów / prędkość LLM -->
+            <div id="tokenCountBar" style="display:none;padding:6px 14px;background:#f0f4ff;border-radius:8px;margin-bottom:10px;font-size:0.78rem;color:#4338ca;display:none;align-items:center;gap:14px;flex-wrap:wrap;">
+                <span>🔤 Tokeny: <strong id="tokenCount">0</strong></span>
+                <span>⚡ Prędkość: <strong id="tokenSpeed">—</strong> tok/s</span>
+                <span id="tokenProviderBadge" style="background:#e0e7ff;padding:1px 8px;border-radius:10px;font-size:0.7rem;"></span>
+                <span id="tokenFinalMsg" style="color:#166534;display:none;"></span>
             </div>
 
             <div id="aiResponseContainer"></div>
@@ -772,6 +809,68 @@
       </div>
     </div>
   </div>
+
+  <!-- Konfiguracja API -->
+  <div class="col-12 mt-1">
+    <div class="search-card">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 style="margin:0;">Konfiguracja LLM / API</h2>
+        <button class="btn btn-outline-secondary btn-sm" onclick="llmConfigLoad()">↺ Odśwież</button>
+      </div>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label small fw-bold mb-1">Dostawca LLM</label>
+          <select id="cfgProvider" class="form-select form-select-sm" onchange="llmConfigToggle()">
+            <option value="ollama">Ollama (lokalny)</option>
+            <option value="openrouter">OpenRouter (chmura)</option>
+          </select>
+        </div>
+        <!-- Ollama -->
+        <div class="col-md-4" id="cfgOllamaUrlWrap">
+          <label class="form-label small fw-bold mb-1">Ollama URL</label>
+          <input type="text" id="cfgOllamaUrl" class="form-control form-control-sm font-monospace" placeholder="http://127.0.0.1:11434">
+        </div>
+        <div class="col-md-4" id="cfgLlmModelWrap">
+          <label class="form-label small fw-bold mb-1">Model Ollama</label>
+          <input type="text" id="cfgLlmModel" class="form-control form-control-sm" placeholder="llama3:latest">
+        </div>
+        <!-- OpenRouter -->
+        <div class="col-md-6" id="cfgOrKeyWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">OpenRouter API Key <span id="cfgOrKeyStatus" class="text-muted small"></span></label>
+          <input type="password" id="cfgOrKey" class="form-control form-control-sm font-monospace" placeholder="sk-or-v1-… (zostaw puste by nie zmieniać)">
+        </div>
+        <div class="col-md-6" id="cfgOrModelWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Model główny</label>
+          <select id="cfgOrModelSelect" class="form-select form-select-sm" onchange="cfgOrModelSyncInput()">
+            <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★</option>
+            <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free)</option>
+            <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (free)</option>
+            <option value="qwen/qwen-2.5-7b-instruct:free">Qwen 2.5 7B (free)</option>
+            <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (free)</option>
+            <option value="custom">Własny…</option>
+          </select>
+          <input type="text" id="cfgOrModel" class="form-control form-control-sm mt-1 font-monospace" placeholder="np. meta-llama/llama-3.3-70b-instruct:free" style="font-size:0.75rem;">
+        </div>
+        <div class="col-md-6" id="cfgOrModelVerifyWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Model Krytyk (weryfikacja)</label>
+          <input type="text" id="cfgOrModelVerify" class="form-control form-control-sm font-monospace" placeholder="google/gemini-2.0-flash-exp:free" style="font-size:0.75rem;">
+        </div>
+        <div class="col-md-3" id="cfgOrFallbackWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Fallback na Ollama przy 429</label>
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" id="cfgOrFallback">
+            <label class="form-check-label small" for="cfgOrFallback">Włącz fallback</label>
+          </div>
+        </div>
+      </div>
+      <div class="mt-3 d-flex gap-2 align-items-center">
+        <button class="btn btn-primary btn-sm" onclick="llmConfigSave()">💾 Zapisz i zastosuj</button>
+        <span id="cfgSaveStatus" class="small text-muted"></span>
+      </div>
+      <div class="mt-2 small text-muted">Zmiany działają natychmiast (bez restartu). Zapisywane do <code>.llm_config.json</code>.</div>
+    </div>
+  </div>
+
 </div>
 </div>
 
@@ -863,6 +962,40 @@
 </div>
 
 <script>
+window.API_KEY_REQUIRED = {{ 'true' if api_key_required else 'false' }};
+
+function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function apiKeyParam() {
+    if (!window.API_KEY_REQUIRED) return '';
+    const k = sessionStorage.getItem('app_api_key') || '';
+    return k ? '&api_key=' + encodeURIComponent(k) : '';
+}
+
+(function installFetchApiKey() {
+    if (!window.API_KEY_REQUIRED) return;
+    const orig = window.fetch.bind(window);
+    window.fetch = function(url, opts) {
+        opts = opts || {};
+        const headers = new Headers(opts.headers || {});
+        const k = sessionStorage.getItem('app_api_key');
+        if (k) headers.set('X-API-Key', k);
+        return orig(url, Object.assign({}, opts, { headers }));
+    };
+})();
+
+if (window.API_KEY_REQUIRED && !sessionStorage.getItem('app_api_key')) {
+    const k = prompt('Podaj klucz API (APP_API_KEY z pliku .env):');
+    if (k) sessionStorage.setItem('app_api_key', k.trim());
+}
+
 let activeFileFilter = null;
 let allDocs = [];
 let maxChunks = 1;
@@ -882,7 +1015,8 @@ function showTab(name) {
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
-    if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); }
+    if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
+    else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
     if (name === 'sql') sqlLoadSavedConn();
 }
@@ -1215,7 +1349,7 @@ function deleteSelected() {
         renderDocTable(allDocs);
         updateStats();
         // Przywróć pasek
-        bar.innerHTML = `<span class="small text-success fw-bold">✅ Usunięto ${d.deleted_chunks} chunków z ${files.length} pliku(ów)</span>
+        bar.innerHTML = `<span class="small text-success fw-bold">✅ Usunięto wpisy dla ${d.files_count ?? files.length} pliku(ów)</span>
             <button class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('deleteBar').classList.add('d-none')">✕</button>`;
         bar.classList.remove('d-none');
     })
@@ -1276,6 +1410,9 @@ function executeSearch() {
     container.innerHTML = '';
     aiContainer.innerHTML = '';
     if (sqlResultsContainer) sqlResultsContainer.classList.add('d-none');
+    // Reset token counter
+    const _tcBar = document.getElementById('tokenCountBar');
+    if (_tcBar) _tcBar.style.display = 'none';
     btn.disabled = true;
     if (stopBtn) stopBtn.style.display = '';
 
@@ -1319,6 +1456,38 @@ function executeSearch() {
         const reader  = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '', resultsData = null, aiText = '';
+        let _tokCount = 0, _tokStart = 0, _tokTimer = null;
+
+        function _startTokenCounter() {
+            _tokCount = 0; _tokStart = Date.now();
+            const bar = document.getElementById('tokenCountBar');
+            bar.style.display = 'flex';
+            document.getElementById('tokenCount').textContent = '0';
+            document.getElementById('tokenSpeed').textContent = '—';
+            document.getElementById('tokenFinalMsg').style.display = 'none';
+            const prov = document.getElementById('llmProviderSelect').value;
+            const model = prov === 'openrouter'
+                ? (document.getElementById('openrouterModelInput').value || document.getElementById('openrouterModelSelect').value || '')
+                : (document.getElementById('cfgLlmModel')?.value || '');
+            document.getElementById('tokenProviderBadge').textContent = prov === 'openrouter' ? `OpenRouter · ${model.split('/').pop()}` : `Ollama · ${model}`;
+        }
+
+        function _tickTokenCounter(token) {
+            _tokCount++;
+            const secs = (Date.now() - _tokStart) / 1000;
+            document.getElementById('tokenCount').textContent = _tokCount.toLocaleString('pl');
+            if (secs > 0.5)
+                document.getElementById('tokenSpeed').textContent = Math.round(_tokCount / secs);
+        }
+
+        function _stopTokenCounter() {
+            const secs = ((Date.now() - _tokStart) / 1000).toFixed(1);
+            const tps  = secs > 0 ? Math.round(_tokCount / secs) : 0;
+            document.getElementById('tokenSpeed').textContent = tps;
+            const fin = document.getElementById('tokenFinalMsg');
+            fin.textContent = `Gotowe — ${_tokCount.toLocaleString('pl')} tokenów w ${secs}s`;
+            fin.style.display = 'inline';
+        }
 
         const readChunk = async () => {
             try {
@@ -1357,14 +1526,16 @@ function executeSearch() {
                             // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
                             const t = ev.token;
                             if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter'))) {
-                                // Zamień na prawdziwy błąd z ładnym UI
                                 handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
                                 return;
                             }
+                            if (_tokCount === 0) _startTokenCounter();
+                            _tickTokenCounter(t);
                             aiText += t;
                             const body = document.getElementById('aiAnswerBody');
                             if (body) body.innerHTML = formatAiText(aiText, mode);
                         } else if (ev.done !== undefined) {
+                            _stopTokenCounter();
                             const box = document.getElementById('aiStreamBox');
                             if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
                             if (resultsData) {
@@ -1383,7 +1554,7 @@ function executeSearch() {
                             if (typeof ev.error === 'string' && (ev.error.includes('RATE_LIMIT') || ev.error.includes('429') || ev.error.includes('Too Many'))) {
                                 handleRateLimitError(ev.error, container, loader, btn, stopBtn, query, mode);
                             } else {
-                                container.innerHTML = `<div class="alert alert-danger">${ev.error}</div>`;
+                                container.innerHTML = `<div class="alert alert-danger">${escapeHtml(ev.error)}</div>`;
                             }
                             btn.disabled = false; return;
                         }
@@ -1404,7 +1575,7 @@ function executeSearch() {
         loader.classList.add('d-none');
         if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
-        container.innerHTML = `<div class="alert alert-danger">Błąd: ${err}</div>`;
+        container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(err)}</div>`;
     });
     return;
 
@@ -1415,7 +1586,7 @@ function executeSearch() {
         loader.classList.add('d-none');
         btn.disabled = false;
         if (!data.success) {
-            container.innerHTML = `<div class="alert alert-danger">Błąd: ${data.error}</div>`;
+            container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(data.error)}</div>`;
             return;
         }
 
@@ -1487,7 +1658,7 @@ function executeSearch() {
     .catch(err => {
         loader.classList.add('d-none');
         btn.disabled = false;
-        container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${err}</div>`;
+        container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${escapeHtml(err)}</div>`;
     });
 }
 
@@ -1599,7 +1770,7 @@ function compareDocuments() {
     .then(r=>r.json())
     .then(d => {
         btn.disabled = false; st.classList.add('d-none');
-        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${d.error}</div>`; return; }
+        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`; return; }
         res.innerHTML = `
             <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
                 <div class="d-flex gap-3 small">
@@ -1613,7 +1784,7 @@ function compareDocuments() {
                 <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
             </div>`;
     })
-    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e)}</div>`; });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
@@ -1641,7 +1812,7 @@ function runVerification(query, answer, contexts) {
     .then(r => r.json())
     .then(d => {
         if (!d.success) {
-            vc.innerHTML = `<div class="verify-box warn"><strong>Błąd weryfikacji:</strong> ${d.error}</div>`;
+            vc.innerHTML = `<div class="verify-box warn"><strong>Błąd weryfikacji:</strong> ${escapeHtml(d.error)}</div>`;
             return;
         }
         const v = d.verdict || '';
@@ -1667,7 +1838,7 @@ function runVerification(query, answer, contexts) {
             </div>`;
     })
     .catch(e => {
-        vc.innerHTML = `<div class="verify-box warn">Błąd połączenia z LLM: ${e}</div>`;
+        vc.innerHTML = `<div class="verify-box warn">Błąd połączenia z LLM: ${escapeHtml(e)}</div>`;
     });
 }
 
@@ -1962,7 +2133,7 @@ function executeImport() {
 
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
-    const es = new EventSource('/import/stream?' + params.toString());
+    const es = new EventSource('/import/stream?' + params.toString() + apiKeyParam());
 
     // Stop button handler
     const stopHandler = () => {
@@ -2308,7 +2479,7 @@ function buildNetwork() {
         document.getElementById('networkLoader').classList.add('d-none');
         document.getElementById('networkBtn').disabled = false;
         document.getElementById('networkPlaceholder').classList.remove('d-none');
-        document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${e}</div>`;
+        document.getElementById('networkPlaceholder').innerHTML = `<div style="color:#dc2626;">❌ ${escapeHtml(e)}</div>`;
     });
 }
 
@@ -2390,15 +2561,24 @@ function generateRelationFilterCheckboxes(edges) {
         const labelEl = document.createElement('label');
         labelEl.className = 'form-check-label';
         labelEl.style.fontSize = '0.72rem';
-        labelEl.innerHTML = `
-            <input type="checkbox" id="${id}" class="relation-filter" checked>
-            <span title="${label} (${count})">${label.length > 18 ? label.slice(0,17)+'…' : label}</span>
-        `;
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.id = id;
+        input.className = 'relation-filter';
+        input.checked = true;
+        input.onchange = renderNetworkWithFilters;
+
+        const span = document.createElement('span');
+        span.title = `${label} (${count})`;
+        span.textContent = label.length > 18 ? label.slice(0, 17) + '…' : label;
+
+        labelEl.appendChild(input);
+        labelEl.appendChild(document.createTextNode(' '));
+        labelEl.appendChild(span);
         container.appendChild(labelEl);
 
-        const cb = labelEl.querySelector('input');
-        cb.onchange = renderNetworkWithFilters;
-        networkRelationCheckboxes[label] = cb;
+        networkRelationCheckboxes[label] = input;
     });
 
     // Jeśli jest więcej relacji niż pokazujemy
@@ -2527,12 +2707,9 @@ function initNetworkFilterListeners() {
 
 // Uruchom inicjalizację filtrów po załadowaniu strony
 document.addEventListener('DOMContentLoaded', () => {
-    // Małe opóźnienie, żeby DOM był gotowy
-    setTimeout(initNetworkFilterListeners, 300);
-    setTimeout(restoreLlmProvider, 400);
-
-    // Uruchom Dashboard statusu + auto-refresh co 30s
-    setTimeout(startHealthAutoRefresh, 600);
+    initNetworkFilterListeners();
+    restoreLlmProvider();
+    startHealthAutoRefresh();
 });
 
 function renderNetwork(nodes, edges) {
@@ -3016,7 +3193,7 @@ function scanNoise() {
     .then(d => {
         btn.disabled = false;
         btn.textContent = '🔍 Skanuj szum';
-        if (!d.success) { list.innerHTML = `<span class="text-danger">${d.error}</span>`; return; }
+        if (!d.success) { list.innerHTML = `<span class="text-danger">${escapeHtml(d.error)}</span>`; return; }
         detectedNoise = d.noise;
         if (!d.noise.length) {
             list.innerHTML = '<span class="text-success fw-bold">✅ Brak wykrytych śmieci w bazie.</span>';
@@ -3035,7 +3212,7 @@ function scanNoise() {
     .catch(e => {
         btn.disabled = false;
         btn.textContent = '🔍 Skanuj szum';
-        list.innerHTML = `<span class="text-danger">Błąd: ${e}</span>`;
+        list.innerHTML = `<span class="text-danger">Błąd: ${escapeHtml(e)}</span>`;
     });
 }
 
@@ -3055,7 +3232,7 @@ function deleteNoise() {
     .then(r => r.json())
     .then(d => {
         if (!d.success) { alert('Błąd: ' + d.error); return; }
-        list.innerHTML = `<span class="text-success fw-bold">✅ Usunięto ${d.deleted_chunks} chunków z ${checked.length} pliku(ów).</span>`;
+        list.innerHTML = `<span class="text-success fw-bold">✅ Usunięto wpisy dla ${d.files_count ?? checked.length} pliku(ów).</span>`;
         allDocs = allDocs.filter(doc => !checked.includes(doc.file));
         maxChunks = allDocs.length ? allDocs[0].chunks : 1;
         document.getElementById('tabDocsCount').textContent = allDocs.length;
@@ -3194,7 +3371,7 @@ function sqlConnect() {
         btn.disabled = false;
         if (!d.success) {
             st.className = 'small alert alert-danger mt-2';
-            st.innerHTML = `❌ ${d.error}`;
+            st.innerHTML = `❌ ${escapeHtml(d.error)}`;
             return;
         }
         st.className = 'small alert alert-success mt-2';
@@ -3292,7 +3469,7 @@ function sqlAsk() {
         loader.classList.add('d-none');
         btn.disabled = false;
         if (!d.success) {
-            result.innerHTML = `<div class="alert alert-danger small">${d.error}</div>`
+            result.innerHTML = `<div class="alert alert-danger small">${escapeHtml(d.error)}</div>`
                 + (d.sql ? `<pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>` : '');
             return;
         }
@@ -3343,7 +3520,7 @@ function sqlConfirmWrite(sql) {
     .then(r=>r.json())
     .then(d => {
         if (!d.success) {
-            result.innerHTML = `<div class="alert alert-danger">${d.error}</div>`;
+            result.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`;
             return;
         }
         result.innerHTML = `
@@ -3425,7 +3602,7 @@ function sqlVectorize() {
                         bar.style.width = ev.pct + '%';
                         log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
                     } else if (ev.error) {
-                        log.innerHTML += `<br><span style="color:red;">❌ ${ev.error}</span>`;
+                        log.innerHTML += `<br><span style="color:red;">❌ ${escapeHtml(ev.error)}</span>`;
                         if (stopBtn) stopBtn.style.display = 'none';
                     }
                 } catch(e) {}
@@ -3507,7 +3684,7 @@ function sqlVectorizeAll() {
                         log.innerHTML += `✅ ${t} (${ev.rows || 0} wierszy)<br>`;
                     } else if (ev.table_error !== undefined) {
                         const t = ev.table || 'unknown';
-                        log.innerHTML += `❌ ${t}: ${ev.error}<br>`;
+                        log.innerHTML += `❌ ${escapeHtml(t)}: ${escapeHtml(ev.error)}<br>`;
                     } else if (ev.done !== undefined) {
                         bar.style.width = '100%';
                         bar.classList.remove('progress-bar-animated');
@@ -3535,12 +3712,315 @@ function sqlVectorizeAll() {
     });
 }
 
+// --- Health check & status dots ---
+function setStatusDot(id, state) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'status-dot ' + ({ok:'dot-ok', error:'dot-err', no_key:'dot-warn'}[state] || 'dot-pending');
+    el.title = {ok:'Połączono', error:'Brak połączenia', no_key:'Brak klucza API'}[state] || state;
+}
+
+function checkHealth() {
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => {
+            setStatusDot('dotQdrant', d.qdrant);
+            setStatusDot('dotLlm',    d.llm);
+        })
+        .catch(() => {
+            setStatusDot('dotQdrant', 'error');
+            setStatusDot('dotLlm',    'error');
+        });
+}
+
+// --- Adaptive context detection ---
+let _contextSuggestedMode = null;
+const _contextIcons = { numerical:'📊', textual:'📄', mixed:'🗂️' };
+
+function loadCollectionProfile() {
+    fetch('/api/collection/profile')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success || d.profile === 'empty' || !d.suggestion_text) return;
+            // Don't show if user already picked a non-default mode
+            if (document.getElementById('searchMode').value !== 'normal' &&
+                document.getElementById('searchMode').value !== d.suggestion_mode) return;
+            _contextSuggestedMode = d.suggestion_mode;
+            document.getElementById('contextBannerIcon').textContent = _contextIcons[d.profile] || '📋';
+            document.getElementById('contextBannerText').textContent = d.suggestion_text;
+            document.getElementById('contextBanner').style.display = 'flex';
+        })
+        .catch(() => {});
+}
+
+function applyContextSuggestion() {
+    if (_contextSuggestedMode) {
+        document.getElementById('searchMode').value = _contextSuggestedMode;
+    }
+    dismissContextBanner();
+}
+
+function dismissContextBanner() {
+    document.getElementById('contextBanner').style.display = 'none';
+}
+
+// --- Startup checklist modal ---
+function buildCheckRow(label, state, detail) {
+    const tr = document.createElement('tr');
+    const icon = {ok:'✅', error:'❌', no_key:'⚠️', warn:'⚠️'}[state] || '⬜';
+    const color = {ok:'#166534', error:'#991b1b', no_key:'#92400e', warn:'#92400e'}[state] || '#6c757d';
+    const tdIcon = document.createElement('td');
+    tdIcon.style.cssText = 'width:32px;font-size:1.1rem;';
+    tdIcon.textContent = icon;
+    const tdLabel = document.createElement('td');
+    tdLabel.style.cssText = 'font-weight:600;padding:4px 8px;';
+    tdLabel.textContent = label;
+    const tdDetail = document.createElement('td');
+    tdDetail.style.cssText = `font-size:0.82rem;color:${color};`;
+    tdDetail.textContent = detail;
+    tr.append(tdIcon, tdLabel, tdDetail);
+    return tr;
+}
+
+function showStartupChecklist(d) {
+    const modal = document.getElementById('startupModal');
+    const tbody = document.getElementById('startupCheckBody');
+    tbody.innerHTML = '';
+
+    const llmLabel = d.llm_provider === 'openrouter' ? `OpenRouter (${d.llm_model || ''})` : `Ollama (${d.llm_model || ''})`;
+    const llmDetail = {ok:'Połączono', error:'Nie odpowiada — sprawdź czy Ollama działa', no_key:'Brak klucza OPENROUTER_API_KEY w .env'}[d.llm] || d.llm;
+
+    const qdrantDetail = d.qdrant === 'ok'
+        ? `Połączono · kolekcja "${d.collection}" · ${(d.vectors_count||0).toLocaleString('pl')} wektorów`
+        : (d.qdrant_error || 'Błąd połączenia — sprawdź QDRANT_URL w .env');
+    const qdrantPortInfo = d.ports && d.ports.qdrant ? ` (port: ${d.ports.qdrant})` : '';
+
+    const llmDetailFull = llmDetail + (d.llm_provider==='openrouter' ? ` · ${llmLabel}` : '')
+        + (d.llm_error ? ` — ${d.llm_error}` : '');
+
+    const sqlPortInfo = d.ports && d.ports.sql ? ` · port ${d.ports.sql}` : '';
+    const sqlDetail = d.sql_configured
+        ? `Skonfigurowany: ${d.sql_server||''} / ${d.sql_database||}${sqlPortInfo}`
+        : 'Nie skonfigurowany (opcjonalne — zakładka SQL)';
+
+    // Port summary row
+    const ports = d.ports || {};
+    const portNames = Object.keys(ports);
+    const portSummary = portNames.length
+        ? portNames.map(k => `${k}: ${ports[k]==='ok'?'✅':'❌'}`).join('  ')
+        : 'brak danych';
+    const allPortsOk = portNames.length && portNames.every(k => ports[k] === 'ok');
+
+    tbody.append(
+        buildCheckRow('Qdrant', d.qdrant, qdrantDetail + qdrantPortInfo),
+        buildCheckRow('LLM', d.llm, llmDetailFull),
+        buildCheckRow('SQL Server',
+            d.sql_configured ? 'ok' : 'warn',
+            sqlDetail),
+        buildCheckRow('OCR (Tesseract)',
+            d.ocr_available ? 'ok' : 'warn',
+            d.ocr_available ? 'Dostępny — obsługuje skany i obrazy' : 'Nie zainstalowany (opcjonalne — sudo apt install tesseract-ocr)'),
+        buildCheckRow('Porty', allPortsOk ? 'ok' : 'warn', portSummary)
+    );
+
+    modal.style.display = 'flex';
+    loadServiceStatus();
+}
+
+function closeStartupModal() {
+    document.getElementById('startupModal').style.display = 'none';
+}
+
+// --- LLM Config panel ---
+function llmConfigLoad() {
+    fetch('/api/config/llm')
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+            document.getElementById('cfgProvider').value = d.provider || 'ollama';
+            document.getElementById('cfgOllamaUrl').value = d.ollama_url || '';
+            document.getElementById('cfgLlmModel').value  = d.llm_model  || '';
+            document.getElementById('cfgOrKey').value     = '';  // nigdy nie pokazuj klucza
+            const kStatus = document.getElementById('cfgOrKeyStatus');
+            kStatus.textContent = d.openrouter_key_set ? `(ustawiony: ${d.openrouter_key_preview})` : '(nie ustawiony)';
+            kStatus.style.color = d.openrouter_key_set ? '#166534' : '#991b1b';
+
+            // Model główny
+            const sel = document.getElementById('cfgOrModelSelect');
+            const knownModels = Array.from(sel.options).map(o => o.value);
+            if (d.openrouter_model && knownModels.includes(d.openrouter_model)) {
+                sel.value = d.openrouter_model;
+            } else {
+                sel.value = 'custom';
+            }
+            document.getElementById('cfgOrModel').value        = d.openrouter_model || '';
+            document.getElementById('cfgOrModelVerify').value  = d.openrouter_model_verify || '';
+            document.getElementById('cfgOrFallback').checked   = !!d.openrouter_fallback;
+            llmConfigToggle();
+        });
+}
+
+function llmConfigToggle() {
+    const isOr = document.getElementById('cfgProvider').value === 'openrouter';
+    document.getElementById('cfgOllamaUrlWrap').style.display  = isOr ? 'none' : '';
+    document.getElementById('cfgLlmModelWrap').style.display   = isOr ? 'none' : '';
+    document.getElementById('cfgOrKeyWrap').style.display          = isOr ? '' : 'none';
+    document.getElementById('cfgOrModelWrap').style.display        = isOr ? '' : 'none';
+    document.getElementById('cfgOrModelVerifyWrap').style.display  = isOr ? '' : 'none';
+    document.getElementById('cfgOrFallbackWrap').style.display     = isOr ? '' : 'none';
+}
+
+function cfgOrModelSyncInput() {
+    const sel = document.getElementById('cfgOrModelSelect');
+    if (sel.value !== 'custom') {
+        document.getElementById('cfgOrModel').value = sel.value;
+    }
+}
+
+function llmConfigSave() {
+    const provider = document.getElementById('cfgProvider').value;
+    const payload  = { provider };
+    if (provider === 'openrouter') {
+        const key = document.getElementById('cfgOrKey').value.trim();
+        if (key) payload.openrouter_key = key;
+        payload.openrouter_model        = document.getElementById('cfgOrModel').value.trim();
+        payload.openrouter_model_verify = document.getElementById('cfgOrModelVerify').value.trim();
+        payload.openrouter_fallback     = document.getElementById('cfgOrFallback').checked;
+    } else {
+        payload.ollama_url = document.getElementById('cfgOllamaUrl').value.trim();
+        payload.llm_model  = document.getElementById('cfgLlmModel').value.trim();
+    }
+    const status = document.getElementById('cfgSaveStatus');
+    status.textContent = 'Zapisuję…';
+    fetch('/api/config/llm', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(d => {
+        status.textContent = d.success ? '✅ Zapisano i zastosowano' : '❌ ' + d.message;
+        status.style.color = d.success ? '#166534' : '#991b1b';
+        if (d.success) {
+            llmConfigLoad();   // odśwież podgląd klucza
+            // Zaktualizuj selektor w topbarze
+            document.getElementById('llmProviderSelect').value = payload.provider;
+            onLlmProviderChange();
+        }
+        setTimeout(() => { status.textContent = ''; }, 4000);
+    })
+    .catch(() => { status.textContent = '❌ Błąd sieci'; });
+}
+
+function openDiagnostics() {
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => showStartupChecklist(d))
+        .catch(() => {});
+}
+
+// --- Service management ---
+let _svcLogsVisible = false;
+
+function loadServiceStatus() {
+    fetch('/api/service/status')
+        .then(r => r.json())
+        .then(d => {
+            const label = document.getElementById('svcStatusLabel');
+            if (!label) return;
+            const map = {active:'🟢 aktywna', inactive:'🔴 zatrzymana', failed:'🔴 błąd', dev_mode:'⚪ tryb dev', unknown:'❓ nieznany'};
+            label.textContent = map[d.active] || d.active;
+            label.style.color = d.active === 'active' ? '#166534' : d.active === 'dev_mode' ? '#6c757d' : '#991b1b';
+            if (d.logs) document.getElementById('svcLogsBox').textContent = d.logs;
+        })
+        .catch(() => {
+            const label = document.getElementById('svcStatusLabel');
+            if (label) label.textContent = '— brak danych';
+        });
+}
+
+function toggleServiceLogs() {
+    _svcLogsVisible = !_svcLogsVisible;
+    document.getElementById('svcLogsBox').style.display = _svcLogsVisible ? 'block' : 'none';
+    document.getElementById('svcLogsBtn').textContent = _svcLogsVisible ? '📋 Ukryj logi' : '📋 Logi';
+    if (_svcLogsVisible) loadServiceStatus();
+}
+
+function restartService() {
+    if (!confirm('Restartować usługę ai_analiza?\nAplikacja będzie niedostępna przez kilka sekund.')) return;
+    const overlay = document.getElementById('restartOverlay');
+    overlay.style.display = 'flex';
+    document.getElementById('restartOverlayMsg').textContent = 'Restartuję usługę…';
+    fetch('/api/service/restart', {method:'POST'})
+        .then(() => {
+            document.getElementById('restartOverlayMsg').textContent = 'Czekam na ponowne uruchomienie…';
+            // Poll until server responds
+            const poll = setInterval(() => {
+                fetch('/health', {signal: AbortSignal.timeout(2000)})
+                    .then(r => r.json())
+                    .then(() => {
+                        clearInterval(poll);
+                        location.reload();
+                    })
+                    .catch(() => {});
+            }, 2000);
+            // Safety timeout after 60s
+            setTimeout(() => { clearInterval(poll); location.reload(); }, 60000);
+        })
+        .catch(() => {
+            overlay.style.display = 'none';
+            alert('Błąd wywołania restartu');
+        });
+}
+
 window.onload = function() {
     updateStats();
     sqlLoadSavedConn();
-    // Sugestie ładuj z opóźnieniem — nie blokuj strony przy starcie
+    checkHealth();
+    setInterval(checkHealth, 30000);
     setTimeout(() => loadSuggestions(false), 2000);
+    setTimeout(() => loadCollectionProfile(), 3000);
+    // Pokaż checklistę startową
+    fetch('/health')
+        .then(r => r.json())
+        .then(d => showStartupChecklist(d))
+        .catch(() => {});
 };
 </script>
+
+<!-- Modal checklisty startowej -->
+<div id="startupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:580px;width:94%;box-shadow:0 8px 32px rgba(0,0,0,0.18);max-height:90vh;overflow-y:auto;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+            <h5 style="margin:0;font-size:1.05rem;font-weight:700;color:#1a1f36;">Diagnostyka startowa</h5>
+            <button onclick="closeStartupModal()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:#6c757d;line-height:1;">✕</button>
+        </div>
+        <table style="width:100%;border-collapse:collapse;">
+            <tbody id="startupCheckBody"></tbody>
+        </table>
+
+        <!-- Zarządzanie usługą -->
+        <hr style="margin:18px 0 14px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+            <div style="font-size:0.82rem;color:#6c757d;">
+                Usługa: <strong id="svcStatusLabel" style="color:#6c757d;">sprawdzam…</strong>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-sm btn-outline-secondary" onclick="toggleServiceLogs()" id="svcLogsBtn">📋 Logi</button>
+                <button class="btn btn-sm btn-warning" onclick="restartService()" id="svcRestartBtn">🔄 Restartuj</button>
+                <button class="btn btn-sm btn-primary" onclick="closeStartupModal()">OK, zaczynam pracę</button>
+            </div>
+        </div>
+        <pre id="svcLogsBox" style="display:none;margin-top:12px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:12px;border-radius:8px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+    </div>
+</div>
+
+<!-- Nakładka restartu -->
+<div id="restartOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:#fff;font-size:1rem;">
+    <div style="font-size:2rem;">🔄</div>
+    <div id="restartOverlayMsg">Restartuję usługę…</div>
+    <div style="font-size:0.82rem;color:#a0aec0;">Strona odświeży się automatycznie gdy serwer wróci</div>
+</div>
+
 </body>
 </html>
