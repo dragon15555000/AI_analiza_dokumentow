@@ -1256,7 +1256,7 @@ function _suggestModelForTab(name) {
 
 function showTab(name) {
     // Ukrywamy WSZYSTKIE zakładki (w tym raporty) — wcześniej brakowało tabReports
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabReports','tabSql','tabCollections','tabImport'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });

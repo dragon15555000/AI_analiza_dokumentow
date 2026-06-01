@@ -3739,6 +3739,139 @@ def build_network():
     )
 
 
+@app.route('/timeline', methods=['POST'])
+def timeline_endpoint():
+    """Oś czasu — ekstrahuje daty z dokumentów i buduje chronologię (SSE)."""
+    data = request.get_json() or {}
+    query_text = (data.get('query') or '').strip()
+    limit = min(int(data.get('limit', 20)), 50)
+    llm_provider = data.get('llm_provider')
+    openrouter_model = data.get('openrouter_model')
+
+    def generate():
+        def sse(event, payload):
+            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        try:
+            client = get_qdrant_client()
+            payloads = []
+
+            # Pobieramy dokumenty — wg query lub ostatnie
+            if query_text:
+                yield sse("progress", {"message": "Wyszukiwanie dokumentów…"})
+                try:
+                    vector = get_embedding(query_text)
+                    res = client.query_points(
+                        collection_name=ACTIVE_COLLECTION,
+                        query=vector,
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    payloads = [p.payload for p in res.points]
+                except Exception as e:
+                    logger.warning(f"Błąd przy pobieraniu embeddingu: {e}")
+                    payloads = []
+
+            if not payloads:
+                # Fallback — pobierz ostatnie dokumenty
+                yield sse("progress", {"message": "Pobieranie ostatnich dokumentów…"})
+                records, _ = client.scroll(
+                    collection_name=ACTIVE_COLLECTION,
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                payloads = [r.payload for r in records]
+
+            if not payloads:
+                yield sse("done", {
+                    "success": True,
+                    "timeline": [],
+                    "message": "Brak dokumentów do analizy."
+                })
+                return
+
+            # Pre-filtracja: szukamy dat za pomocą RegEx
+            yield sse("progress", {"message": "Ekstrakcja dat (RegEx)…"})
+            date_pattern = re.compile(
+                r'\b(?:\d{1,4}[.\/-]\d{1,2}[.\/-]\d{1,4}|'
+                r'\d{1,2}\s+(?:stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia)\s+(?:19|20)\d{2})\b',
+                re.IGNORECASE
+            )
+
+            date_chunks = []
+            for p in payloads:
+                text = p.get("text", "")
+                if date_pattern.search(text):
+                    date_chunks.append({
+                        "file": p.get("file", "Nieznany"),
+                        "text": text[:600]
+                    })
+
+            if not date_chunks:
+                yield sse("done", {
+                    "success": True,
+                    "timeline": [],
+                    "message": "Nie wykryto żadnych dat w badanych dokumentach."
+                })
+                return
+
+            # Przygotowujemy kontekst — max 15 fragmentów
+            context_str = "\n\n".join([
+                f"[{c['file']}]: {c['text']}" for c in date_chunks[:15]
+            ])
+
+            system_msg = (
+                "Jesteś śledczym analitykiem danych. Twoim zadaniem jest znalezienie wszystkich zdarzeń powiązanych z datami "
+                "w podanym tekście i przypisanie do nich krótkich, obiektywnych opisów. "
+                "Zwróć odpowiedź WYŁĄCZNIE jako poprawny JSON w formacie: "
+                "[{\"date\": \"YYYY-MM-DD\", \"event\": \"opis zdarzenia\", \"entity\": \"powiązany podmiot (opcjonalnie)\", \"doc\": \"nazwa pliku\"}]. "
+                "Jeśli brakuje dokładnego dnia, użyj YYYY-MM-01. Ważne: Zwróć sam JSON, bez żadnego tekstu pobocznego i bez bloku markdown ```json."
+            )
+
+            prompt = f"DOKUMENTY:\n{context_str}\n\nWyciągnij chronologię z dokumentów w formacie JSON:"
+
+            yield sse("progress", {"message": "Analiza LLM…"})
+            result = call_llm(
+                prompt=prompt,
+                system=system_msg,
+                stream=False,
+                provider=llm_provider,
+                model=openrouter_model,
+                max_tokens=1500
+            )
+
+            raw_resp = result.get("response", str(result)) if isinstance(result, dict) else str(result)
+
+            # Parsowanie JSON'a
+            json_match = re.search(r'\[\s*\{.*\}\s*\]', raw_resp, re.DOTALL)
+            if json_match:
+                parsed_timeline = json.loads(json_match.group(0))
+                # Sortujemy rosnąco po dacie
+                parsed_timeline.sort(key=lambda x: x.get('date', '9999-99-99'))
+                yield sse("done", {
+                    "success": True,
+                    "timeline": parsed_timeline
+                })
+            else:
+                logger.warning(f"Timeline: brak JSON w odpowiedzi LLM: {raw_resp[:200]}")
+                yield sse("error", {
+                    "error": "LLM nie zwrócił poprawnego formatu JSON.",
+                    "raw": raw_resp[:300]
+                })
+
+        except Exception as e:
+            logger.exception("timeline_endpoint error")
+            yield sse("error", {"error": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
 # ============================================================
 # ANALIZA (raporty śledcze + forensyka Excel)
 # ============================================================
