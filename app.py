@@ -2711,7 +2711,8 @@ def hybrid_stream():
                             f"PYTANIE: {query_text}\n\n"
                             "Wygeneruj SELECT:"
                         )
-                        sql_query = _generate_sql_via_ollama(prompt_sql, system_sql)
+                        sql_response = _call_ollama(prompt_sql, system_sql, stream=False, model=LLM_MODEL)
+                        sql_query = sql_response.get("response", "") if isinstance(sql_response, dict) else ""
 
                         first_word = sql_query.split()[0].upper() if sql_query.split() else ""
                         if first_word not in ("SELECT", "WITH"):
@@ -3008,16 +3009,9 @@ def get_suggestions():
             "Zwróć TYLKO listę 8 pytań, każde w osobnej linii, bez numeracji, bez komentarzy.\n\n"
             f"DOKUMENTY:\n{context}"
         )
-        url = OLLAMA_URL + "/api/generate"
-        payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False,
-                   "system": "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań.",
-                   "options": {"num_ctx": 8192}}
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=300) as r:
-            raw = json.loads(r.read().decode("utf-8"))["response"]
+        system_msg = "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań."
+        result = _call_ollama(prompt, system_msg, stream=False, model=LLM_MODEL)
+        raw = result.get("response", "") if isinstance(result, dict) else ""
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]
         suggestions = [l for l in lines if len(l) > 10][:8]
@@ -4575,5 +4569,65 @@ def health():
         return jsonify({
             "success": False,
             "overall": "error",
+            "error": str(e)[:200]
+        }), 500
+
+
+@app.route('/api/update/status', methods=['GET'])
+def api_update_status():
+    """Zwraca status aktualizacji — aktualna wersja, najnowsza, changelog."""
+    try:
+        current = _get_app_version()
+        release_info = _get_latest_github_release()
+        latest = release_info.get("tag_name") if release_info else None
+        changelog = release_info.get("body", "") if release_info else ""
+
+        return jsonify({
+            "current_version": current,
+            "latest_version": latest or current,
+            "update_available": bool(latest and latest != current),
+            "changelog": changelog,
+            "release_url": release_info.get("html_url") if release_info else None
+        })
+    except Exception as e:
+        logger.exception("api_update_status error")
+        return jsonify({
+            "success": False,
+            "error": str(e)[:200]
+        }), 500
+
+
+@app.route('/api/update/pull', methods=['POST'])
+def api_update_pull():
+    """Pobiera najnowszy kod z GitHub (git pull origin master)."""
+    try:
+        result = _git_pull()
+        return jsonify({
+            "success": result.get("success", False),
+            "message": result.get("stdout") or result.get("stderr") or "Git pull completed",
+            "details": result
+        })
+    except Exception as e:
+        logger.exception("api_update_pull error")
+        return jsonify({
+            "success": False,
+            "error": str(e)[:200]
+        }), 500
+
+
+@app.route('/api/update/restart', methods=['POST'])
+def api_update_restart():
+    """Restartuje aplikację (poprzez systemd --user service)."""
+    try:
+        result = _try_restart_service()
+        return jsonify({
+            "success": result.get("success", False),
+            "message": result.get("message", "Restart initiated"),
+            "method": result.get("method", "unknown")
+        })
+    except Exception as e:
+        logger.exception("api_update_restart error")
+        return jsonify({
+            "success": False,
             "error": str(e)[:200]
         }), 500
