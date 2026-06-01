@@ -70,7 +70,11 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL   = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 OPENROUTER_MODEL_VERIFY = os.environ.get("OPENROUTER_MODEL_VERIFY", "google/gemini-2.0-flash-exp:free")
 OPENROUTER_FALLBACK_TO_OLLAMA = os.environ.get("OPENROUTER_FALLBACK_TO_OLLAMA", "true").lower() in ("1", "true", "yes")
-OPENROUTER_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
+try:
+    OPENROUTER_MAX_RETRIES = max(1, int(os.environ.get("OPENROUTER_MAX_RETRIES", "3")))
+except ValueError:
+    logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
+    OPENROUTER_MAX_RETRIES = 3
 
 DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()   # ollama | openrouter
 
@@ -230,6 +234,50 @@ def _require_api_key():
             {"success": False, "error": "Brak lub nieprawidłowy klucz API (nagłówek X-API-Key)"}
         ), 401
     return None
+
+
+# Konfiguracja LLM zapisywana przez UI (nadpisuje zmienne powyżej)
+LLM_CONFIG_PATH = Path(__file__).parent / ".llm_config.json"
+
+
+def _load_llm_config() -> dict:
+    if LLM_CONFIG_PATH.exists():
+        try:
+            return json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_llm_config(cfg: dict):
+    try:
+        LLM_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("Błąd zapisu llm config: %s", e)
+
+
+def _apply_llm_config(cfg: dict):
+    """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
+    global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
+    global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
+    global OLLAMA_URL, LLM_MODEL
+    if cfg.get("provider"):
+        DEFAULT_LLM_PROVIDER = cfg["provider"]
+    if cfg.get("openrouter_key"):
+        OPENROUTER_API_KEY = cfg["openrouter_key"]
+    if cfg.get("openrouter_model"):
+        OPENROUTER_MODEL = cfg["openrouter_model"]
+    if cfg.get("openrouter_model_verify"):
+        OPENROUTER_MODEL_VERIFY = cfg["openrouter_model_verify"]
+    if "openrouter_fallback" in cfg:
+        OPENROUTER_FALLBACK_TO_OLLAMA = bool(cfg["openrouter_fallback"])
+    if cfg.get("ollama_url"):
+        OLLAMA_URL = cfg["ollama_url"]
+    if cfg.get("llm_model"):
+        LLM_MODEL = cfg["llm_model"]
+
+
+_apply_llm_config(_load_llm_config())
 
 
 # ============================================================
@@ -473,7 +521,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
                     for line in r.iter_lines():
                         if not line:
                             continue
-                        line = line.decode("utf-8")
+                        line = line.decode("utf-8", errors="replace")
                         if line.startswith("data: "):
                             data_str = line[6:].strip()
                             if data_str == "[DONE]":
@@ -493,10 +541,11 @@ def stream_llm_tokens(prompt: str, system: str = "",
             except Exception as e:
                 last_error = e
                 if _is_rate_limit_error(e):
-                    wait = _get_retry_after(e) or (1.5 ** attempt)
-                    wait = min(wait, 12.0)
-                    logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
-                    time.sleep(wait)
+                    if attempt < OPENROUTER_MAX_RETRIES - 1:
+                        wait = _get_retry_after(e) or (1.5 ** attempt)
+                        wait = min(wait, 12.0)
+                        logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                        time.sleep(wait)
                     continue
                 else:
                     # Inny błąd — nie retry'ujemy
@@ -516,7 +565,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
                 "prompt": prompt,
                 "system": system,
                 "stream": True,
-                "options": {"temperature": temperature or 0.2}
+                "options": {"temperature": temperature if temperature is not None else 0.2}
             }
             try:
                 with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
@@ -627,10 +676,11 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
         except Exception as e:
             last_error = e
             if _is_rate_limit_error(e):
-                wait = _get_retry_after(e) or (1.5 ** attempt)
-                wait = min(wait, 12.0)
-                logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
-                time.sleep(wait)
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = min(wait, 12.0)
+                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    time.sleep(wait)
                 continue
             else:
                 break
@@ -690,6 +740,22 @@ def _init_embed_cache():
         logger.warning(f"Błąd inicjalizacji cache embeddingów: {e}")
 
 _init_embed_cache()
+
+def _ensure_collection_exists():
+    """Tworzy ACTIVE_COLLECTION jeśli nie istnieje (np. świeży lokalny Qdrant)."""
+    try:
+        from qdrant_client.models import VectorParams, Distance
+        client = get_qdrant_client()
+        if not client.collection_exists(ACTIVE_COLLECTION):
+            client.create_collection(
+                ACTIVE_COLLECTION,
+                vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            )
+            logger.info(f"Kolekcja '{ACTIVE_COLLECTION}' utworzona automatycznie")
+    except Exception as e:
+        logger.warning(f"Nie udało się sprawdzić/utworzyć kolekcji '{ACTIVE_COLLECTION}': {e}")
+
+_ensure_collection_exists()
 
 def get_embedding(text: str) -> list:
     import hashlib as _hl
@@ -3701,6 +3767,280 @@ def sql_vectorize_all():
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _check_port(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Sprawdza czy port jest otwarty."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _parse_host_port(url: str, default_port: int) -> tuple:
+    """Wyciąga (host, port) z URL lub adresu."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url if "://" in url else "http://" + url)
+        host = p.hostname or "127.0.0.1"
+        port = p.port or default_port
+        return host, port
+    except Exception:
+        return "127.0.0.1", default_port
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Sprawdza łączność z Qdrant, LLM, SQL i OCR — dla checklisty startowej i paska statusu."""
+    result = {
+        "qdrant": "error",
+        "llm": "error",
+        "llm_provider": DEFAULT_LLM_PROVIDER,
+        "llm_model": OPENROUTER_MODEL if DEFAULT_LLM_PROVIDER == "openrouter" else os.environ.get("LLM_MODEL", "llama3:latest"),
+        "collection": ACTIVE_COLLECTION,
+        "vectors_count": 0,
+        "sql_configured": False,
+        "ocr_available": pytesseract is not None,
+        "ports": {},
+    }
+
+    # Qdrant — test portu + klient
+    qdrant_host, qdrant_port = _parse_host_port(os.environ.get("QDRANT_URL", "http://localhost:6333"), 6333)
+    result["ports"]["qdrant"] = "ok" if _check_port(qdrant_host, qdrant_port) else "error"
+    try:
+        client = get_qdrant_client()
+        client.get_collections()
+        result["qdrant"] = "ok"
+        try:
+            info = client.get_collection(ACTIVE_COLLECTION)
+            result["vectors_count"] = info.points_count or 0
+        except Exception:
+            pass
+    except Exception as e:
+        result["qdrant_error"] = str(e)
+
+    # LLM
+    if DEFAULT_LLM_PROVIDER == "openrouter":
+        if not OPENROUTER_API_KEY:
+            result["llm"] = "no_key"
+        else:
+            # Realny test — GET /api/v1/models (bezpłatny, weryfikuje klucz)
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                )
+                resp = _ur.urlopen(req, timeout=5)
+                result["llm"] = "ok" if resp.status == 200 else "error"
+                result["ports"]["openrouter"] = "ok"
+            except Exception as e:
+                result["llm"] = "error"
+                result["llm_error"] = str(e)
+                result["ports"]["openrouter"] = "error"
+    else:
+        ollama_host, ollama_port = _parse_host_port(OLLAMA_URL, 11434)
+        result["ports"]["ollama"] = "ok" if _check_port(ollama_host, ollama_port) else "error"
+        if result["ports"]["ollama"] == "ok":
+            try:
+                import urllib.request as _ur
+                _ur.urlopen(_ur.Request(OLLAMA_URL + "/api/tags"), timeout=3)
+                result["llm"] = "ok"
+            except Exception:
+                result["llm"] = "error"
+        else:
+            result["llm"] = "error"
+
+    # SQL
+    sql_cfg = _load_sql_config()
+    result["sql_configured"] = bool(sql_cfg.get("server"))
+    if result["sql_configured"]:
+        result["sql_server"] = sql_cfg.get("server", "")
+        result["sql_database"] = sql_cfg.get("database", "")
+        sql_host, sql_port = _parse_host_port(sql_cfg.get("server", "127.0.0.1"),
+                                               int(sql_cfg.get("port", 1433)))
+        result["ports"]["sql"] = "ok" if _check_port(sql_host, sql_port) else "error"
+
+    return jsonify(result)
+
+
+@app.route('/api/collection/profile', methods=['GET'])
+def collection_profile():
+    """Liczy typy plików w kolekcji i sugeruje optymalny tryb analizy."""
+    try:
+        docs = _docs_cache.get("data") or []
+        if not docs:
+            client = get_qdrant_client()
+            seen: set = set()
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=ACTIVE_COLLECTION,
+                    limit=500, offset=offset,
+                    with_payload=["file"],
+                    with_vectors=False,
+                )
+                for r in records:
+                    f = r.payload.get("file", "")
+                    if f:
+                        seen.add(f)
+                if offset is None:
+                    break
+            docs = [{"file": f} for f in seen]
+
+        ext_counts: dict = {}
+        for d in docs:
+            fname = d.get("file", "")
+            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else "other"
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+        total = sum(ext_counts.values())
+        if total == 0:
+            return jsonify({"success": True, "profile": "empty", "ext_counts": {}, "total_files": 0})
+
+        num_count = sum(ext_counts.get(e, 0) for e in ("xlsx", "xls", "csv"))
+        txt_count = sum(ext_counts.get(e, 0) for e in ("pdf", "docx", "doc", "txt", "md"))
+
+        if num_count / total > 0.5:
+            profile, mode = "numerical", "extract"
+            hint = "Baza zawiera głównie arkusze i dane liczbowe — tryb Ekstrakcja danych da najlepsze wyniki. Tryb Detektyw przyda się do szukania anomalii."
+        elif txt_count / total > 0.5:
+            profile, mode = "textual", "detective"
+            hint = "Baza zawiera głównie dokumenty tekstowe — tryby Detektyw lub Prawny będą skuteczne."
+        else:
+            profile, mode = "mixed", "normal"
+            hint = "Mieszana baza danych — tryb Standardowy sprawdzi się jako punkt wyjścia."
+
+        return jsonify({
+            "success": True,
+            "profile": profile,
+            "suggestion_mode": mode,
+            "suggestion_text": hint,
+            "ext_counts": ext_counts,
+            "total_files": total,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/config/llm', methods=['GET', 'POST'])
+def llm_config():
+    """Odczyt / zapis konfiguracji LLM z UI."""
+    global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
+    global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OLLAMA_URL, LLM_MODEL
+
+    if request.method == 'GET':
+        cfg = _load_llm_config()
+        return jsonify({
+            "success": True,
+            "provider": DEFAULT_LLM_PROVIDER,
+            "openrouter_key_set": bool(OPENROUTER_API_KEY),
+            "openrouter_key_preview": (OPENROUTER_API_KEY[:8] + "…") if OPENROUTER_API_KEY else "",
+            "openrouter_model": OPENROUTER_MODEL,
+            "openrouter_model_verify": OPENROUTER_MODEL_VERIFY,
+            "openrouter_fallback": OPENROUTER_FALLBACK_TO_OLLAMA,
+            "ollama_url": OLLAMA_URL,
+            "llm_model": LLM_MODEL,
+            "source": "file" if cfg else "env",
+        })
+
+    data = request.get_json() or {}
+    cfg = _load_llm_config()
+
+    # Aktualizuj tylko podane pola
+    if "provider" in data:
+        cfg["provider"] = data["provider"].lower().strip()
+    if "openrouter_key" in data and data["openrouter_key"].strip():
+        cfg["openrouter_key"] = data["openrouter_key"].strip()
+    elif "openrouter_key" in data and not data["openrouter_key"].strip():
+        cfg.pop("openrouter_key", None)   # usuń jeśli pusty
+    if "openrouter_model" in data:
+        cfg["openrouter_model"] = data["openrouter_model"].strip()
+    if "openrouter_model_verify" in data:
+        cfg["openrouter_model_verify"] = data["openrouter_model_verify"].strip()
+    if "openrouter_fallback" in data:
+        cfg["openrouter_fallback"] = bool(data["openrouter_fallback"])
+    if "ollama_url" in data:
+        cfg["ollama_url"] = data["ollama_url"].strip()
+    if "llm_model" in data:
+        cfg["llm_model"] = data["llm_model"].strip()
+
+    _save_llm_config(cfg)
+    _apply_llm_config(cfg)
+    return jsonify({"success": True, "message": "Konfiguracja zapisana i zastosowana"})
+
+
+def _localhost_only():
+    """Zwraca True gdy żądanie pochodzi z localhost."""
+    return request.remote_addr in ("127.0.0.1", "::1", "localhost")
+
+
+@app.route('/api/service/status', methods=['GET'])
+def service_status():
+    """Zwraca status usługi systemd i ostatnie logi — tylko z localhost."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    import shutil
+    result: dict = {
+        "success": True,
+        "is_systemd": os.environ.get("INVOCATION_ID") is not None,
+        "active": "unknown",
+        "logs": "",
+    }
+    if not shutil.which("systemctl"):
+        result["active"] = "dev_mode"
+        return jsonify(result)
+
+    try:
+        st = subprocess.run(
+            ["systemctl", "is-active", "ai_analiza"],
+            capture_output=True, text=True, timeout=3,
+        )
+        result["active"] = st.stdout.strip()
+    except Exception:
+        result["active"] = "unknown"
+
+    try:
+        logs = subprocess.run(
+            ["journalctl", "-u", "ai_analiza", "-n", "30", "--no-pager", "--output=short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        result["logs"] = logs.stdout
+    except Exception:
+        pass
+
+    return jsonify(result)
+
+
+@app.route('/api/service/restart', methods=['POST'])
+def service_restart():
+    """Restartuje usługę ai_analiza (lub kończy proces w trybie dev) — tylko z localhost."""
+    if not _localhost_only():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+
+    import shutil
+
+    def _do_restart():
+        time.sleep(0.6)
+        try:
+            if shutil.which("systemctl"):
+                st = subprocess.run(
+                    ["systemctl", "is-active", "ai_analiza"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if st.stdout.strip() in ("active", "activating"):
+                    subprocess.run(["systemctl", "restart", "ai_analiza"], timeout=15)
+                    return
+            # Tryb dev lub brak systemd — zakończ proces (systemd z Restart=always wznowi)
+            os._exit(0)
+        except Exception:
+            os._exit(0)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"success": True, "msg": "Restart zlecony"})
 
 
 if __name__ == '__main__':

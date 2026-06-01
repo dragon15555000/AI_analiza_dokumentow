@@ -10,13 +10,11 @@ Single Flask RAG app (`app.py`) for document Q&A. UI at `http://localhost:5000`.
 
 | Service | Port | Notes |
 |---------|------|--------|
-| **Qdrant** | `6333` (local) or cloud URL | App **exits on import** without `QDRANT_URL` and `QDRANT_KEY` in `.env` or environment. |
+| **Qdrant** | `6333` (local) or cloud URL | App **exits on import** without `QDRANT_URL` and `QDRANT_KEY`. Collection auto-created on startup if missing (768 dim). |
 | **Ollama** | `11434` | Required for embeddings (`nomic-embed-text`) and default chat (`llama3`). |
-| **Flask app** | `5000` | Dev: `./venv/bin/python app.py` from repo root. |
+| **Flask app** | `5000` | Dev: `./venv/bin/python app.py` from repo root. Prod: Waitress via `wsgi.py` / `ai_analiza.service`. |
 
 ### First-time VM setup (not in update script)
-
-**Automated (recommended on Linux x86_64):**
 
 ```bash
 chmod +x scripts/setup-local-dev.sh
@@ -26,45 +24,62 @@ chmod +x scripts/setup-local-dev.sh
 Then start `ollama serve`, `.local/qdrant`, and `./venv/bin/python app.py` (see README „Dev lokalny”).  
 `./scripts/setup-local-dev.sh --help` for options.
 
-Optional OCR (not required for core RAG): `tesseract-ocr`, `tesseract-ocr-pol`, `poppler-utils`.
-
-**Ollama:** install via https://ollama.ai/ if not present; models `nomic-embed-text`, `llama3` (or use `--pull-models`).
-
-For local Qdrant, `QDRANT_KEY` in `.env` can be any non-empty string (e.g. `dev-local-key`). The setup script creates `.env` with local defaults if missing.
-
-Production / real data should use **Qdrant Cloud** credentials in `.env` (see `.env.example`).
-
-### Running the app (tmux)
-
-Use tmux for long-lived processes (`ollama serve`, Qdrant, Flask). Example Flask session:
-
-```bash
-cd /workspace && ./venv/bin/python app.py
-```
-
-Health check: `curl -s http://127.0.0.1:5000/health`
+Optional OCR: `tesseract-ocr`, `tesseract-ocr-pol`, `poppler-utils`.
 
 ### Security defaults
 
 - App binds to **`127.0.0.1`** by default (`APP_HOST`). Set `APP_HOST=0.0.0.0` only behind a trusted reverse proxy.
-- Optional **`APP_API_KEY`**: when set, all API routes require header `X-API-Key` (SSE import uses `?api_key=`). The UI prompts once and stores the key in `sessionStorage`.
-- File import/browse/open are limited to **`SEARCH_ROOTS`** (or `~`, `/mnt`, repo root if unset).
+- Optional **`APP_API_KEY`**: API routes require `X-API-Key` (SSE import: `?api_key=`). UI stores key in `sessionStorage`.
+- File import/browse limited to **`SEARCH_ROOTS`** (or `~`, `/mnt`, repo root if unset).
+- Do not commit: `.env`, `.llm_config.json`, `.sql_config.json`, `embedding_cache.db`, `.local/`.
 
 ### Common commands
 
 | Task | Command |
 |------|---------|
-| Local dev bootstrap | `./scripts/setup-local-dev.sh` (see `--help`) |
+| Local dev bootstrap | `./scripts/setup-local-dev.sh` |
 | Install Python deps | `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt` |
 | Syntax check | `./venv/bin/python -m py_compile app.py wsgi.py` |
-| Import folder (SSE) | `curl -sN 'http://127.0.0.1:5000/import/stream?folder=/path&ext=txt'` |
-| Search (JSON) | `POST /search` with `{"query":"...","limit":5}` |
+| Health | `curl -s http://127.0.0.1:5000/health` |
+| Import (SSE) | `curl -sN 'http://127.0.0.1:5000/import/stream?folder=/path&ext=txt'` |
 
-There is **no** pytest/ruff/flake8 config in the repo; use `py_compile` for a quick sanity check.
+No pytest/ruff in repo — use `py_compile` for sanity checks.
 
 ### Gotchas
 
 - **Embeddings always use Ollama** (`nomic-embed-text`), even when chat uses OpenRouter.
-- **Collection must exist** before import: `POST /collections/create` with `{"name":"dokumenty","vector_size":768,"switch_to":true}` or create via UI.
-- Reinstalling Python packages does not restart Flask/Ollama/Qdrant — restart those processes after dependency changes.
-- `embedding_cache.db` is created beside `app.py` and is gitignored.
+- **LLM config from UI** writes `.llm_config.json` — overrides `.env` LLM vars at startup.
+- Reinstalling Python packages does not restart Flask/Ollama/Qdrant — restart those after dependency changes.
+
+---
+
+## Instrukcje dla AI coderów (pełny kontekst)
+
+### Architektura
+
+```
+app.py              — backend Flask (wszystkie endpointy)
+templates/index.html — frontend (Bootstrap 5 + D3.js)
+wsgi.py             — Waitress (produkcja)
+scripts/setup-local-dev.sh — bootstrap dev lokalny
+```
+
+### Konwencje
+
+- LLM: tylko `call_llm()` / `stream_llm_tokens()`
+- Qdrant: `get_qdrant_client()`
+- API: `jsonify({"success": True/False, ...})`
+- SSE: `data: {"event": ..., "data": ...}\n\n` — nie zmieniaj formatu
+- JS: unikaj `innerHTML` z danymi LLM/użytkownika — `textContent` / `escapeHtml`
+- Nie używaj `os.system()` — `subprocess.run()` bez `shell=True`
+- Wektor: **768 dim** — nie zmieniaj bez migracji kolekcji
+
+### Czego nie robić
+
+- Nie rozdzielaj `app.py` bez zgody użytkownika
+- Nie commituj sekretów ani `.llm_config.json`
+- Nie dodawaj zależności bez `requirements.txt`
+
+Szczegóły produktu i roadmap: README.md, IMPROVEMENT_PLAN.md, GitHub Issues.
+
+*Ostatnia aktualizacja: czerwiec 2026*
