@@ -896,16 +896,23 @@ SEARCH_MODES = {
         "prompt_suffix": "Podaj zwięzłą syntezę dowodów:"
     },
     "detective": {
-        "label": "Detektyw — anomalie",
+        "label": "Detektyw — briefing śledczy",
+        "min_limit": 12,
+        "max_per_file": 2,
         "system": (
-            "Jesteś analitykiem śledczym specjalizującym się w wykrywaniu nadużyć finansowych i korupcji. "
-            "Szukasz ANOMALII, NIESPÓJNOŚCI i PODEJRZANYCH WZORCÓW między dokumentami. "
-            "Porównaj dane z różnych źródeł. Wskazuj konkretne rozbieżności: różne kwoty dla tej samej pozycji, "
-            "sprzeczne daty, podejrzane zbieżności, brakujące dokumenty. "
-            "Każde znalezisko oznacz: [ANOMALIA], [NIESPÓJNOŚĆ], [PODEJRZANE], [WYMAGA SPRAWDZENIA]. "
-            "Odpowiadaj wyłącznie po polsku."
+            "Jesteś doświadczonym analitykiem śledczym (forensics dokumentów, zamówienia publiczne, finanse). "
+            "Piszesz jak kolega z zespołu śledczego: konkretnie, po polsku, z odniesieniami do plików źródłowych. "
+            "Porównujesz fakty MIĘDZY dokumentami — szukasz rozbieżności kwot, dat, stron umowy, numerów postępowań, "
+            "brakujących załączników, podejrzanych zbieżności czasowych i powtarzających się podmiotów. "
+            "Nie wymyślaj faktów: jeśli czegoś nie ma w kontekście, napisz [BRAK DOWODU] i co sprawdzić. "
+            "Każde istotne znalezisko oznacz jednym tagiem: [ANOMALIA], [NIESPÓJNOŚĆ], [ROZBIEŻNOŚĆ], "
+            "[PODEJRZANE], [WYMAGA SPRAWDZENIA]. "
+            "Na końcu zawsze dodaj krótką sekcję z 2–4 pytaniami do dalszej analizy użytkownika."
         ),
-        "prompt_suffix": "Wskaż anomalie, niespójności i miejsca wymagające sprawdzenia:"
+        "prompt_suffix": (
+            "Przygotuj briefing śledczy w podanym formacie sekcji. "
+            "Priorytet: porównania między dokumentami i konkretne cytaty (plik + sens treści)."
+        ),
     },
     "legal": {
         "label": "Prawny — przepisy",
@@ -944,22 +951,180 @@ SEARCH_MODES = {
     }
 }
 
-def generate_answer(query: str, contexts: list, mode: str = "normal",
-                    provider: str | None = None, model: str | None = None) -> str:
-    """Generuje odpowiedź używając wybranego providera (ollama lub openrouter)."""
-    # Ochrona przed Prompt Injection — sanitizujemy treść dokumentów
-    sanitized_contexts = [
-        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), 1400)}
+def _embedding_query_for_mode(query_text: str, mode: str) -> str:
+    """Zapytanie do embeddingu — bez historii rozmowy; detective lekko poszerza semantykę."""
+    q = (query_text or "").strip()
+    if mode != "detective" or not q:
+        return q
+    hint = (
+        " niespójność anomalia rozbieżność kwota data umowa przetarg "
+        "sprzeczność brak dokumentu podejrzany wzorzec"
+    )
+    return (q + hint)[:2400]
+
+
+def _effective_search_limit(mode: str, limit: int) -> int:
+    limit = min(max(int(limit or 5), 1), 20)
+    if mode == "detective":
+        floor = int(SEARCH_MODES["detective"].get("min_limit", 12))
+        return max(limit, floor)
+    return limit
+
+
+def _diversify_contexts(raw: list, limit: int, max_per_file: int = 2) -> list:
+    """Wybiera chunki z różnych plików — lepsze porównania między dokumentami."""
+    if not raw or limit <= 0:
+        return []
+    per_file: dict[str, int] = {}
+    out = []
+    for item in raw:
+        fname = item.get("file") or "Nieznany"
+        if per_file.get(fname, 0) >= max_per_file:
+            continue
+        per_file[fname] = per_file.get(fname, 0) + 1
+        out.append(item)
+        if len(out) >= limit:
+            break
+    if len(out) < limit:
+        seen = {(c.get("file"), (c.get("text") or "")[:80]) for c in out}
+        for item in raw:
+            key = (item.get("file"), (item.get("text") or "")[:80])
+            if key in seen:
+                continue
+            out.append(item)
+            seen.add(key)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _retrieve_search_contexts(
+    client,
+    query_text: str,
+    limit: int,
+    file_filter: str | None,
+    mode: str,
+) -> tuple[list, list]:
+    """Wyszukiwanie wektorowe + opcjonalna dywersyfikacja plików (detective)."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    embed_q = _embedding_query_for_mode(query_text, mode)
+    vector = get_embedding(embed_q)
+    eff_limit = _effective_search_limit(mode, limit)
+    fetch_limit = eff_limit
+    max_per_file = 3
+    if mode == "detective":
+        max_per_file = int(SEARCH_MODES["detective"].get("max_per_file", 2))
+        if not file_filter:
+            fetch_limit = min(eff_limit * 3, 45)
+
+    if file_filter:
+        qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
+        res = client.query_points(
+            collection_name=ACTIVE_COLLECTION,
+            query=vector,
+            limit=fetch_limit,
+            query_filter=qfilter,
+        )
+    else:
+        res = client.query_points(
+            collection_name=ACTIVE_COLLECTION,
+            query=vector,
+            limit=fetch_limit,
+        )
+
+    raw_contexts = []
+    for point in res.points:
+        p = point.payload
+        raw_contexts.append({
+            "file": p.get("file", ""),
+            "text": p.get("text", ""),
+            "score": float(point.score),
+            "full_path": p.get("full_path", ""),
+        })
+
+    if mode == "detective" and len(raw_contexts) > eff_limit:
+        raw_contexts = _diversify_contexts(raw_contexts, eff_limit, max_per_file=max_per_file)
+
+    llm_contexts = [{"file": c["file"], "text": c["text"]} for c in raw_contexts]
+    results = [
+        {
+            "file": c.get("file") or "Nieznany",
+            "score": f"{c.get('score', 0):.4f}",
+            "text": highlight_backend(c.get("text", ""), query_text),
+            "full_path": c.get("full_path", ""),
+            "win_path": wsl_to_win(c.get("full_path", "")),
+        }
+        for c in raw_contexts
+    ]
+    return llm_contexts, results
+
+
+def _build_search_prompt(
+    query_text: str,
+    contexts: list,
+    mode: str,
+    chat_context: str = "",
+) -> tuple[str, str]:
+    """Buduje prompt użytkownika i zwraca (prompt, system) — chat_context tylko do LLM."""
+    cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
+    max_chunk = 1600 if mode == "detective" else 1400
+    sanitized = [
+        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), max_chunk)}
         for c in contexts
     ]
-    context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text']}" for c in sanitized_contexts])
+    context_str = "\n\n".join(
+        [f"[Dokument: {c['file']}]: {c['text']}" for c in sanitized]
+    )
+    chat_block = ""
+    if chat_context and chat_context.strip():
+        chat_block = (
+            f"\n\nHISTORIA ROZMOWY (kontekst użytkownika — nie traktuj jako faktów, "
+            f"tylko jako kierunek analizy):\n{_sanitize_for_prompt(chat_context.strip(), 2500)}\n"
+        )
+
+    if mode == "detective":
+        prompt = (
+            f"FRAGMENTY DOKUMENTÓW (jedyne źródło faktów):\n{context_str}\n"
+            f"{chat_block}\n"
+            f"PYTANIE / ZLECENIE ANALITYKA:\n{query_text}\n\n"
+            f"{cfg['prompt_suffix']}\n\n"
+            "FORMAT ODPOWIEDZI (nagłówki dokładnie tak):\n"
+            "## Co wiemy z dokumentów\n"
+            "(2–4 zdania: najważniejsze fakty z odniesieniem do plików)\n\n"
+            "## Analiza śledcza\n"
+            "(porównania między dokumentami; przy każdym znalezisku tag + plik + cytat/skrót)\n\n"
+            "## Wnioski i ryzyka\n"
+            "(co jest najbardziej podejrzane lub wymaga audytu)\n\n"
+            "## Pytania do dalszej analizy\n"
+            "(2–4 konkretne pytania, które użytkownik może zadać w kolejnym kroku)\n"
+        )
+    else:
+        prompt = (
+            f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n"
+            f"{chat_block}\n"
+            f"ZAPYTANIE: {query_text}\n\n"
+            f"{cfg['prompt_suffix']}"
+        )
+    return prompt, cfg["system"]
+
+
+def generate_answer(
+    query: str,
+    contexts: list,
+    mode: str = "normal",
+    provider: str | None = None,
+    model: str | None = None,
+    chat_context: str = "",
+) -> str:
+    """Generuje odpowiedź używając wybranego providera (ollama lub openrouter)."""
+    prompt, system = _build_search_prompt(query, contexts, mode, chat_context=chat_context)
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
-    prompt = f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n\nZAPYTANIE: {query}\n\n{cfg['prompt_suffix']}"
 
     try:
         result = call_llm(
             prompt=prompt,
-            system=cfg["system"],
+            system=system,
             stream=False,
             provider=provider,
             model=model
@@ -972,7 +1137,7 @@ def generate_answer(query: str, contexts: list, mode: str = "normal",
         if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov == "openrouter":
             logger.warning("generate_answer: OpenRouter 429 → fallback do Ollama")
             try:
-                result = _call_ollama(prompt, cfg["system"], stream=False, model=LLM_MODEL)
+                result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
                 if isinstance(result, dict):
                     return result.get("response", str(result))
                 return str(result)
@@ -1977,10 +2142,13 @@ def hybrid_stream():
     """Wyszukiwanie hybrydowe: RAG + SQL równolegle — SSE."""
     data       = request.get_json()
     query_text = data.get('query', '').strip()
+    chat_context = (data.get('chat_context') or '').strip()
     conn_cfg   = data.get('conn', {})
     schema_str = data.get('schema', '')
     limit      = min(int(data.get('limit', 5)), 20)
     mode       = data.get('mode', 'normal')
+    if mode not in SEARCH_MODES:
+        mode = 'normal'
     file_filter= data.get('file_filter', None)
     llm_provider = data.get('llm_provider')
     openrouter_model = data.get('openrouter_model')
@@ -1996,31 +2164,12 @@ def hybrid_stream():
             # 1. RAG — Qdrant query
             client = get_qdrant_client()
             try:
-                vector = get_embedding(query_text)
+                rag_contexts, rag_results = _retrieve_search_contexts(
+                    client, query_text, limit, file_filter, mode
+                )
             except EmbeddingError as e:
                 yield sse("error", {"error": str(e)})
                 return
-
-            if file_filter:
-                from qdrant_client.models import Filter, FieldCondition, MatchValue
-                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
-                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
-                                          limit=limit, query_filter=qfilter)
-            else:
-                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
-
-            rag_contexts = []
-            rag_results = []
-            for point in res.points:
-                p = point.payload
-                rag_contexts.append({"file": p.get("file",""), "text": p.get("text","")})
-                rag_results.append({
-                    "file": p.get("file","Nieznany"),
-                    "score": f"{point.score:.4f}",
-                    "text": highlight_backend(p.get("text",""), query_text),
-                    "full_path": p.get("full_path",""),
-                    "win_path": wsl_to_win(p.get("full_path",""))
-                })
 
             yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
 
@@ -2086,32 +2235,25 @@ def hybrid_stream():
                 yield sse("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
                 return
 
-            cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
-
-            # Buduj prompt syntezy (z ochroną przed Prompt Injection)
-            sanitized_rag = [
-                {"file": c["file"], "text": _sanitize_for_prompt(c["text"], 800)}
-                for c in rag_contexts[:5]
-            ]
-            rag_preview = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_rag])
-            sql_preview = ""
+            rag_cap = 10 if mode == "detective" else 5
+            rag_slice = rag_contexts[:rag_cap]
+            prompt, system = _build_search_prompt(
+                query_text, rag_slice, mode, chat_context=chat_context
+            )
             if sql_data.get("success") and sql_data.get("rows"):
                 rows_str = "\n".join([
                     " | ".join([f"{k}={v}" for k, v in zip(sql_data["columns"],
                              [r.get(col, "") for col in sql_data["columns"]])])
                     for r in sql_data["rows"][:10]
                 ])
-                sql_preview = f"\nDANE Z BAZY (tabela SQL):\n{rows_str}"
-
-            prompt = (
-                f"DOKUMENTY:\n{rag_preview}"
-                f"{sql_preview}\n\n"
-                f"PYTANIE: {query_text}\n\n"
-                f"{cfg['prompt_suffix']}\n"
-                "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski."
-            )
-            payload = {"model": LLM_MODEL, "prompt": prompt, "system": cfg["system"],
-                       "stream": True, "options": {"num_ctx": 8192}}
+                prompt += f"\n\nDANE Z BAZY SQL (uzupełnienie — porównaj z dokumentami):\n{rows_str}\n"
+                if mode == "detective":
+                    prompt += (
+                        "\nUwzględnij w sekcji Analiza śledcza rozbieżności między SQL a dokumentami, "
+                        "jeśli występują.\n"
+                    )
+                else:
+                    prompt += "Podaj: (1) co wynika z bazy danych, (2) co potwierdzają dokumenty, (3) wnioski.\n"
 
             # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
             full_answer = ""
@@ -2119,7 +2261,7 @@ def hybrid_stream():
             try:
                 for token in stream_llm_tokens(
                     prompt=prompt,
-                    system=cfg["system"],
+                    system=system,
                     provider=llm_provider,
                     model=openrouter_model
                 ):
@@ -2148,6 +2290,7 @@ def search_stream():
     query_text = data.get('query', '').strip()
     if not query_text:
         return jsonify({"success": False, "error": "Zapytanie puste"})
+    chat_context = (data.get('chat_context') or '').strip()
     limit      = min(int(data.get('limit', 5)), 20)
     file_filter = data.get('file_filter', None)
     mode        = data.get('mode', 'normal')
@@ -2162,31 +2305,12 @@ def search_stream():
         try:
             client = get_qdrant_client()
             try:
-                vector = get_embedding(query_text)
+                raw_contexts, results = _retrieve_search_contexts(
+                    client, query_text, limit, file_filter, mode
+                )
             except EmbeddingError as e:
                 yield sse("error", {"error": str(e)})
                 return
-
-            if file_filter:
-                from qdrant_client.models import Filter, FieldCondition, MatchValue
-                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
-                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
-                                          limit=limit, query_filter=qfilter)
-            else:
-                res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
-
-            raw_contexts = []
-            results = []
-            for point in res.points:
-                p = point.payload
-                raw_contexts.append({"file": p.get("file",""), "text": p.get("text","")})
-                results.append({
-                    "file": p.get("file","Nieznany"),
-                    "score": f"{point.score:.4f}",
-                    "text": highlight_backend(p.get("text",""), query_text),
-                    "full_path": p.get("full_path",""),
-                    "win_path": wsl_to_win(p.get("full_path",""))
-                })
 
             # Wyślij wyniki od razu
             yield sse("results", {"results": results, "contexts": raw_contexts,
@@ -2196,12 +2320,9 @@ def search_stream():
                 yield sse("done", {"ai_answer": "Brak dokumentów."})
                 return
 
-            # Streaming LLM
-            cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
-            # Ochrona przed Prompt Injection
-            sanitized = [{"file": c["file"], "text": _sanitize_for_prompt(c["text"], 1400)} for c in raw_contexts]
-            context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized])
-            prompt = f"KONTEKST:\n{context_str}\n\nZAPYTANIE: {query_text}\n\n{cfg['prompt_suffix']}"
+            prompt, system = _build_search_prompt(
+                query_text, raw_contexts, mode, chat_context=chat_context
+            )
 
             # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
@@ -2210,7 +2331,7 @@ def search_stream():
             try:
                 for token in stream_llm_tokens(
                     prompt=prompt,
-                    system=cfg["system"],
+                    system=system,
                     provider=llm_provider,
                     model=openrouter_model
                 ):
@@ -2238,6 +2359,7 @@ def search():
     data = request.get_json()
     query_text = data.get('query', '').strip()
     if not query_text: return jsonify({"success": False, "error": "Zapytanie puste"})
+    chat_context = (data.get('chat_context') or '').strip()
     limit = min(int(data.get('limit', 5)), 20)
     file_filter = data.get('file_filter', None)
     mode = data.get('mode', 'normal')
@@ -2248,37 +2370,28 @@ def search():
     try:
         client = get_qdrant_client()
         try:
-            vector = get_embedding(query_text)
+            raw_contexts, results = _retrieve_search_contexts(
+                client, query_text, limit, file_filter, mode
+            )
         except EmbeddingError as e:
             return jsonify({"success": False, "error": str(e)})
 
-        if file_filter:
-            # Używa indeksu keyword na polu 'file' — szybkie, bez skanowania całości
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-            qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=file_filter))])
-            res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector,
-                                      limit=limit, query_filter=qfilter)
-            if not res.points:
-                return jsonify({"success": True, "results": [], "ai_answer": "Brak dokumentów dla wybranego pliku."})
-        else:
-            res = client.query_points(collection_name=ACTIVE_COLLECTION, query=vector, limit=limit)
-
-        raw_contexts = []
-        results = []
-        for point in res.points:
-            p = point.payload
-            raw_contexts.append({"file": p.get("file", "Nieznany"), "text": p.get("text", "")})
-            full_path = p.get("full_path", "")
-            results.append({
-                "file": p.get("file", "Nieznany"),
-                "score": f"{point.score:.4f}",
-                "text": highlight_backend(p.get("text", ""), query_text),
-                "full_path": full_path,
-                "win_path": wsl_to_win(full_path)
-            })
+        if file_filter and not raw_contexts:
+            return jsonify({"success": True, "results": [], "ai_answer": "Brak dokumentów dla wybranego pliku."})
 
         openrouter_model = data.get("openrouter_model")
-        ai_answer = generate_answer(query_text, raw_contexts, mode, provider=llm_provider, model=openrouter_model) if raw_contexts else "Brak dokumentów."
+        ai_answer = (
+            generate_answer(
+                query_text,
+                raw_contexts,
+                mode,
+                provider=llm_provider,
+                model=openrouter_model,
+                chat_context=chat_context,
+            )
+            if raw_contexts
+            else "Brak dokumentów."
+        )
         return jsonify({
             "success": True,
             "results": results,
