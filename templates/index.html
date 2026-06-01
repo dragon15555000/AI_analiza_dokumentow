@@ -232,7 +232,7 @@
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('reports'); return false;">Raporty śledcze</a>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" id="navItemSql" style="display:none;">
         <a class="nav-link" href="#" onclick="showTab('sql'); return false;">SQL</a>
     </li>
     <li class="nav-item">
@@ -1159,7 +1159,7 @@ function showTab(name) {
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
-    if (name === 'sql') sqlLoadSavedConn();
+    // SQL load detached per option A (no unconditional calls; tab shown only for configured users)
 }
 
 // ---- HEALTH DASHBOARD (nowy, bogatszy status) ----
@@ -3617,18 +3617,55 @@ const SQL_CONN_KEY = 'ai_sql_connection';
 
 function sqlLoadSavedConn() {
     fetch('/sql/config')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) {
+                // SQL nie jest skonfigurowany lub endpoint nie istnieje — to normalne
+                return null;
+            }
+            return r.json().catch(() => null);
+        })
         .then(d => {
-            if (d.has_config && d.config) {
-                const cfg = d.config;
-                document.getElementById('sqlServer').value   = cfg.server   || '127.0.0.1';
-                document.getElementById('sqlPort').value     = cfg.port     || '1433';
-                document.getElementById('sqlDatabase').value = cfg.database || '';
-                document.getElementById('sqlUser').value     = cfg.user     || '';
-                document.getElementById('sqlPass').value     = cfg.password || '';
+            if (!d || !d.has_config || !d.config) return;
+
+            const cfg = d.config;
+            const serverEl   = document.getElementById('sqlServer');
+            const portEl     = document.getElementById('sqlPort');
+            const dbEl       = document.getElementById('sqlDatabase');
+            const userEl     = document.getElementById('sqlUser');
+            const passEl     = document.getElementById('sqlPass');
+
+            if (serverEl)   serverEl.value   = cfg.server   || '127.0.0.1';
+            if (portEl)     portEl.value     = cfg.port     || '1433';
+            if (dbEl)       dbEl.value       = cfg.database || '';
+            if (userEl)     userEl.value     = cfg.user     || '';
+            if (passEl)     passEl.value     = cfg.password || '';
+        })
+        .catch(() => {
+            // Cisza — SQL jest opcjonalny
+        });
+}
+
+// ---- Opcja A: warunkowe pokazywanie zakładki SQL (tylko dla skonfigurowanych) ----
+function ensureSqlTabVisibility() {
+    const nav = document.getElementById('navItemSql');
+    if (!nav) return;
+    fetch('/sql/config')
+        .then(r => {
+            if (!r.ok) return null;
+            return r.json().catch(() => null);
+        })
+        .then(d => {
+            if (d && d.has_config) {
+                nav.style.display = '';  // pokaż
+                // Prefill formularza przy starcie (dla użytkowników z konfiguracją)
+                sqlLoadSavedConn();
+            } else {
+                nav.style.display = 'none';
             }
         })
-        .catch(e => console.warn('Nie udało się załadować config:', e));
+        .catch(() => {
+            nav.style.display = 'none';
+        });
 }
 
 function sqlSaveConn() {
@@ -4648,6 +4685,18 @@ function openDiagnostics() {
         .catch(() => {});
 }
 
+// Wsparcie dla opcji A — ręczne włączenie zakładki SQL z modala diagnostycznego (pierwsza konfiguracja)
+function enableSqlTab() {
+    const nav = document.getElementById('navItemSql');
+    if (nav) nav.style.display = '';
+    try { closeStartupModal(); } catch(e) {}
+    setTimeout(() => {
+        showTab('sql');
+        // Spróbuj pobrać zapisane dane (jeśli jakieś były ręcznie w .sql_config.json)
+        if (typeof sqlLoadSavedConn === 'function') sqlLoadSavedConn();
+    }, 120);
+}
+
 // --- Service management ---
 let _svcLogsVisible = false;
 
@@ -4757,12 +4806,26 @@ function runReadyReport(id) {
 
 function hideReportResult() { document.getElementById('reportResult').classList.add('d-none'); }
 
-const _oldShow = showTab;
-showTab = function(n) { _oldShow(n); if (n==='reports') setTimeout(loadReports, 80); };
+// Bezpieczne nadpisanie showTab (żeby nie rozwalić innych zakładek przy błędzie w raportach)
+try {
+    const _oldShow = showTab;
+    showTab = function(n) { 
+        _oldShow(n); 
+        if (n === 'reports') {
+            setTimeout(() => {
+                try { loadReports(); } catch(e) { console.warn('Reports tab error:', e); }
+            }, 80);
+        }
+    };
+} catch(e) {
+    console.warn('Nie udało się podpiąć zakładki Raporty:', e);
+}
 
 window.onload = function() {
     updateStats();           // jeden dodatkowy update statystyk (główny polling jest w startHealthAutoRefresh)
-    sqlLoadSavedConn();
+    // sqlLoadSavedConn() całkowicie odłączone (opcja A) — nie wołamy na starcie
+    // Zakładka SQL pokazywana warunkowo tylko jeśli has_config z /sql/config
+    ensureSqlTabVisibility();
     loadQdrantMode();
     // UWAGA: usunięto duplikat checkHealth + setInterval — polling jest teraz wyłącznie w startHealthAutoRefresh (DOMContentLoaded)
     // która używa updateHealthStatus z poprawną normalizacją obiektów z /health
@@ -4824,6 +4887,10 @@ window.onload = function() {
                 </div>
             </div>
             <pre id="svcLogsBox" style="display:none;margin-top:10px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:10px;border-radius:6px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+            <!-- Opcja A: dostęp do zakładki SQL dla zaawansowanych (ukryta domyślnie jeśli brak konfiguracji) -->
+            <div style="margin-top:8px; font-size:0.75rem;">
+                <button onclick="enableSqlTab()" class="btn btn-sm btn-outline-secondary" style="font-size:0.72rem; padding:2px 8px;">🗄 Włącz zakładkę SQL (integracja opcjonalna)</button>
+            </div>
         </div>
 
         <!-- Sekcja: Aktualizacje -->

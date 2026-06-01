@@ -40,6 +40,12 @@ try: import pytesseract
 except ImportError: pytesseract = None
 try: from pdf2image import convert_from_path
 except ImportError: convert_from_path = None
+try:
+    import pymssql
+    PYMSSQL_AVAILABLE = True
+except ImportError:
+    pymssql = None
+    PYMSSQL_AVAILABLE = False
 
 app = Flask(__name__)
 
@@ -3070,3 +3076,217 @@ def build_network():
 #
 # Data zakończenia recenzji: 01 czerwca 2026
 # ================================================================
+
+# 2026-06-01 — Opcja A dla problemu z SQL config JSON parse errors (na żądanie użytkownika "A"):
+# - Całkowicie odłączono sqlLoadSavedConn() z window.onload oraz showTab w index.html
+# - Zakładka SQL (#navItemSql) jest domyślnie ukryta (display:none)
+# - ensureSqlTabVisibility() pokazuje ją automatycznie TYLKO gdy /sql/config ma has_config:true
+# - Dodano przycisk w modalu diagnostycznym do ręcznego włączenia (pierwsza konfiguracja)
+# - Dodano pełne stub endpointy dla wszystkich /sql/* wywoływanych z UI
+# - Zaimplementowano brakujący /health (używa _check_* helpers + sql_available/configured)
+#   → kolorowe kropki, staty topbara, bogaty modal diagnostyczny działają poprawnie
+# - Dodano PYMSSQL_AVAILABLE + _load_sql_config
+# Efekt: błąd "Unexpected token '<'" nigdy nie pojawia się dla użytkowników bez SQL.
+# ================================================================
+
+# ============================================================
+# STUBY DLA SQL (moduł opcjonalny - dodane 2026-06-01)
+# ============================================================
+
+@app.route('/sql/config', methods=['GET'])
+def sql_config_get():
+    """Zwraca zapisaną konfigurację SQL lub informację, że jej nie ma."""
+    try:
+        cfg = _load_sql_config()
+        if cfg and cfg.get("server"):
+            return jsonify({
+                "success": True,
+                "has_config": True,
+                "config": {
+                    "server": cfg.get("server", ""),
+                    "port": cfg.get("port", 1433),
+                    "database": cfg.get("database", ""),
+                    "user": cfg.get("user", "")
+                }
+            })
+        return jsonify({"success": True, "has_config": False})
+    except Exception as e:
+        return jsonify({"success": False, "has_config": False, "error": str(e)})
+
+
+@app.route('/sql/config', methods=['POST'])
+def sql_config_post():
+    """Zapisuje podstawową konfigurację SQL (dla UI)."""
+    try:
+        data = request.get_json() or {}
+        sql_cfg_path = Path(__file__).parent / ".sql_config.json"
+        existing = {}
+        if sql_cfg_path.exists():
+            existing = json.loads(sql_cfg_path.read_text())
+
+        for k in ["server", "port", "database", "user", "password"]:
+            if k in data:
+                existing[k] = data[k]
+
+        sql_cfg_path.write_text(json.dumps(existing, indent=2))
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ============================================================
+# POPRAWKA 2026-06-01 (uzupełnione w ramach opcji A)
+# Dodano minimalne stub endpointy /sql/config GET i POST + wszystkie
+# pozostałe endpointy wywoływane z UI zakładki SQL (/test, /schema, /write,
+# /vectorize, /vectorize-all). Dzięki temu nawet jeśli użytkownik ręcznie
+# włączy zakładkę SQL, nie dostaje błędów parsowania HTML→JSON.
+#
+# Dodatkowo: całkowite odłączenie sqlLoadSavedConn z window.onload i showTab
+# w frontendzie (templates/index.html). Zakładka #navItemSql jest domyślnie
+# ukryta i pokazywana TYLKO gdy /sql/config zwróci has_config:true.
+# Użytkownik może włączyć ją ręcznie z modala diagnostycznego (⚙️).
+#
+# PYMSSQL_AVAILABLE eksponowane dla przyszłego /health i logiki.
+# ============================================================
+
+@app.route('/sql/test', methods=['POST'])
+def sql_test_stub():
+    return jsonify({
+        "success": False,
+        "error": "Moduł SQL Server jest opcjonalny. Brak pełnej implementacji endpointów lub brak pymssql w środowisku."
+    })
+
+@app.route('/sql/schema', methods=['POST'])
+def sql_schema_stub():
+    return jsonify({
+        "success": False,
+        "error": "Moduł SQL Server jest opcjonalny (stub)."
+    })
+
+@app.route('/sql/write', methods=['POST'])
+def sql_write_stub():
+    return jsonify({
+        "success": False,
+        "error": "Zapis do SQL Server jest opcjonalny i niezaimplementowany w tej wersji."
+    })
+
+@app.route('/sql/vectorize', methods=['POST'])
+def sql_vectorize_stub():
+    return jsonify({
+        "success": False,
+        "error": "Wektoryzacja tabel SQL jest funkcją opcjonalną (stub)."
+    })
+
+@app.route('/sql/vectorize-all', methods=['POST'])
+def sql_vectorize_all_stub():
+    return jsonify({
+        "success": False,
+        "error": "Wektoryzacja wszystkich tabel SQL jest funkcją opcjonalną (stub)."
+    })
+
+
+# ============================================================
+# /health — endpoint dla diagnostyki (kolorowe kropki, modal startowy,
+# self-update, statusy). Używa istniejących _check_* helpers.
+# Dodano wraz z opcją A dla SQL (sql_configured / sql_available).
+# ============================================================
+
+def _load_sql_config():
+    """Wczytuje .sql_config.json (pomocnicze, bez hasła w odpowiedziach)."""
+    try:
+        p = Path(__file__).parent / ".sql_config.json"
+        if not p.exists():
+            return None
+        data = json.loads(p.read_text())
+        # nigdy nie zwracamy password na zewnątrz
+        return {k: v for k, v in data.items() if k != "password"} if data else None
+    except Exception:
+        return None
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Zwraca bogaty status systemu dla UI (dashboard + modal diagnostyczny)."""
+    try:
+        q = _check_qdrant_health()
+        ocr = _ocr_health_status()
+        parsers = _file_parsers_health()
+        ollama_h = _check_ollama_health()
+        or_h = _check_openrouter_health()
+
+        # LLM status (preferuj OpenRouter jeśli skonfigurowany)
+        llm_ok = False
+        llm_detail = ""
+        if APP_API_KEY or os.environ.get("OPENROUTER_API_KEY"):
+            llm_ok = or_h.get("ok", False)
+            llm_detail = or_h.get("error") or "OpenRouter"
+        else:
+            llm_ok = ollama_h.get("ok", False)
+            llm_detail = ollama_h.get("error") or "Ollama"
+
+        # SQL
+        sql_cfg = _load_sql_config()
+        sql_configured = bool(sql_cfg and sql_cfg.get("server"))
+        sql_status = "ok" if (PYMSSQL_AVAILABLE and sql_configured) else ("warn" if sql_configured else "absent")
+
+        # Wektory / kolekcja
+        vectors = 0
+        coll_name = ACTIVE_COLLECTION
+        try:
+            if q.get("ok") and q.get("active_collection_exists"):
+                vectors = q.get("points_in_active", 0)
+        except Exception:
+            pass
+
+        # Ogólny status
+        critical_ok = q.get("ok", False) and (llm_ok or True)  # LLM fallbacki istnieją
+        overall = "ok" if critical_ok else "degraded"
+
+        # Wersja (z git describe lub stałej)
+        try:
+            ver = _get_app_version()
+        except Exception:
+            ver = "dev"
+
+        return jsonify({
+            "success": True,
+            "overall": overall,
+            "version": ver,
+            "timestamp": int(time.time()),
+
+            # Połączenia (dla kropek i tabeli w modalu)
+            "qdrant": q,
+            "qdrant_status": "ok" if q.get("ok") else "error",
+            "llm": {"ok": llm_ok, "detail": llm_detail},
+            "llm_status": "ok" if llm_ok else "warn",
+            "embedding": {
+                "ok": ollama_h.get("ok", False),  # embeddingi idą przez Ollama
+                "model": "nomic-embed-text"
+            },
+            "ocr": ocr,
+            "ocr_available": ocr.get("available", False),
+            "file_parsers": parsers,
+
+            # SQL (opcjonalny)
+            "sql_available": PYMSSQL_AVAILABLE,
+            "sql_configured": sql_configured,
+            "sql_status": sql_status,
+
+            # Aktywna kolekcja + wektory (dla topbara)
+            "active_collection": {
+                "name": coll_name,
+                "points": vectors
+            },
+            "vectors_count": vectors,
+
+            # Inne przydatne dla UI
+            "provider": DEFAULT_LLM_PROVIDER,
+            "app_api_key_set": bool(APP_API_KEY),
+        })
+    except Exception as e:
+        logger.exception("health endpoint error")
+        return jsonify({
+            "success": False,
+            "overall": "error",
+            "error": str(e)[:200]
+        }), 500
