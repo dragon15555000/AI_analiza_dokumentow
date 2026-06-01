@@ -401,38 +401,40 @@ def _check_qdrant_health() -> dict:
         return {"ok": False, "error": str(e)[:150]}
 
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Główny endpoint do Dashboardu statusu (używany przez frontend co 30s)."""
-    qdrant = _check_qdrant_health()
+def _ocr_health_status() -> dict:
+    """Status OCR (Tesseract) — opcjonalny fallback dla skanów PDF i obrazów."""
+    import shutil
+    tesseract_bin = shutil.which("tesseract") is not None
+    py_ok = pytesseract is not None
+    pdf_ok = convert_from_path is not None
+    available = py_ok and tesseract_bin
+    hints: list[str] = []
+    if not py_ok:
+        hints.append("./venv/bin/pip install pytesseract pdf2image Pillow")
+    if not pdf_ok:
+        hints.append("pip install pdf2image (wymagane dla skanów PDF)")
+    if not tesseract_bin:
+        hints.append("sudo apt install tesseract-ocr tesseract-ocr-pol poppler-utils")
+    return {
+        "available": available,
+        "python_module": py_ok,
+        "tesseract_binary": tesseract_bin,
+        "pdf2image": pdf_ok,
+        "install_hint": " · ".join(hints) if hints else None,
+        "lang": "pol",
+        "note": "Uruchamiane automatycznie gdy PDF ma <20 znaków tekstu lub dla JPG/PNG/TIFF",
+    }
 
-    provider = get_llm_provider()
-    if provider == "openrouter":
-        llm = _check_openrouter_health()
-    else:
-        llm = _check_ollama_health()
 
-    # Sprawdzenie embeddingów (dla uproszczenia używamy tego samego co LLM)
-    embedding_ok = llm.get("has_embedding", False) if provider == "ollama" else True
-
-    overall_ok = qdrant.get("ok", False) and llm.get("ok", False)
-
-    return jsonify({
-        "success": True,
-        "timestamp": int(time.time()),
-        "overall": "ok" if overall_ok else "degraded",
-        "provider": provider,
-        "qdrant": qdrant,
-        "llm": llm,
-        "embedding": {
-            "ok": embedding_ok,
-            "model": "nomic-embed-text" if provider == "ollama" else "via OpenRouter"
-        },
-        "active_collection": {
-            "name": ACTIVE_COLLECTION,
-            "points": qdrant.get("points_in_active", 0)
-        }
-    })
+def _file_parsers_health() -> dict:
+    """Dostępność parserów plików (Excel/PDF/DOCX) — bez OCR."""
+    return {
+        "pdf_text": pdfplumber is not None,
+        "excel": openpyxl is not None,
+        "docx": docx is not None,
+        "ocr_for_scans": _ocr_health_status()["available"],
+        "note": "Excel: wszystkie arkusze + forensyka; PDF: tekst cyfrowy, potem OCR jeśli skan",
+    }
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -3793,77 +3795,84 @@ def _parse_host_port(url: str, default_port: int) -> tuple:
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Sprawdza łączność z Qdrant, LLM, SQL i OCR — dla checklisty startowej i paska statusu."""
-    result = {
-        "qdrant": "error",
-        "llm": "error",
-        "llm_provider": DEFAULT_LLM_PROVIDER,
-        "llm_model": OPENROUTER_MODEL if DEFAULT_LLM_PROVIDER == "openrouter" else os.environ.get("LLM_MODEL", "llama3:latest"),
-        "collection": ACTIVE_COLLECTION,
-        "vectors_count": 0,
-        "sql_configured": False,
-        "ocr_available": pytesseract is not None,
-        "ports": {},
-    }
-
-    # Qdrant — test portu + klient
-    qdrant_host, qdrant_port = _parse_host_port(os.environ.get("QDRANT_URL", "http://localhost:6333"), 6333)
-    result["ports"]["qdrant"] = "ok" if _check_port(qdrant_host, qdrant_port) else "error"
-    try:
-        client = get_qdrant_client()
-        client.get_collections()
-        result["qdrant"] = "ok"
-        try:
-            info = client.get_collection(ACTIVE_COLLECTION)
-            result["vectors_count"] = info.points_count or 0
-        except Exception:
-            pass
-    except Exception as e:
-        result["qdrant_error"] = str(e)
-
-    # LLM
-    if DEFAULT_LLM_PROVIDER == "openrouter":
-        if not OPENROUTER_API_KEY:
-            result["llm"] = "no_key"
-        else:
-            # Realny test — GET /api/v1/models (bezpłatny, weryfikuje klucz)
-            try:
-                import urllib.request as _ur
-                req = _ur.Request(
-                    "https://openrouter.ai/api/v1/models",
-                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                )
-                resp = _ur.urlopen(req, timeout=5)
-                result["llm"] = "ok" if resp.status == 200 else "error"
-                result["ports"]["openrouter"] = "ok"
-            except Exception as e:
-                result["llm"] = "error"
-                result["llm_error"] = str(e)
-                result["ports"]["openrouter"] = "error"
+    """Dashboard statusu + checklista startowa (Qdrant, LLM, SQL, OCR, parsery plików)."""
+    qdrant = _check_qdrant_health()
+    provider = get_llm_provider()
+    if provider == "openrouter":
+        llm = _check_openrouter_health()
     else:
-        ollama_host, ollama_port = _parse_host_port(OLLAMA_URL, 11434)
-        result["ports"]["ollama"] = "ok" if _check_port(ollama_host, ollama_port) else "error"
-        if result["ports"]["ollama"] == "ok":
-            try:
-                import urllib.request as _ur
-                _ur.urlopen(_ur.Request(OLLAMA_URL + "/api/tags"), timeout=3)
-                result["llm"] = "ok"
-            except Exception:
-                result["llm"] = "error"
-        else:
-            result["llm"] = "error"
+        llm = _check_ollama_health()
 
-    # SQL
+    embedding_ok = llm.get("has_embedding", False) if provider == "ollama" else True
+    overall_ok = qdrant.get("ok", False) and llm.get("ok", False)
+    ocr = _ocr_health_status()
+    parsers = _file_parsers_health()
+    llm_model = (
+        OPENROUTER_MODEL
+        if provider == "openrouter"
+        else os.environ.get("LLM_MODEL", "llama3:latest")
+    )
+
+    ports: dict[str, str] = {}
+    qdrant_host, qdrant_port = _parse_host_port(
+        os.environ.get("QDRANT_URL", "http://127.0.0.1:6333"), 6333
+    )
+    ports["qdrant"] = "ok" if _check_port(qdrant_host, qdrant_port) else "error"
+    ollama_host, ollama_port = _parse_host_port(OLLAMA_URL, 11434)
+    ports["ollama"] = "ok" if _check_port(ollama_host, ollama_port) else "error"
+    if provider == "openrouter":
+        ports["openrouter"] = "ok" if llm.get("ok") else "error"
+
     sql_cfg = _load_sql_config()
-    result["sql_configured"] = bool(sql_cfg.get("server"))
-    if result["sql_configured"]:
-        result["sql_server"] = sql_cfg.get("server", "")
-        result["sql_database"] = sql_cfg.get("database", "")
-        sql_host, sql_port = _parse_host_port(sql_cfg.get("server", "127.0.0.1"),
-                                               int(sql_cfg.get("port", 1433)))
-        result["ports"]["sql"] = "ok" if _check_port(sql_host, sql_port) else "error"
+    sql_configured = bool(sql_cfg.get("server"))
+    sql_server = sql_cfg.get("server", "") if sql_configured else ""
+    sql_database = sql_cfg.get("database", "") if sql_configured else ""
+    if sql_configured:
+        sql_host, sql_port = _parse_host_port(
+            sql_cfg.get("server", "127.0.0.1"), int(sql_cfg.get("port", 1433))
+        )
+        ports["sql"] = "ok" if _check_port(sql_host, sql_port) else "error"
 
-    return jsonify(result)
+    if llm.get("ok"):
+        llm_status = "ok"
+    elif provider == "openrouter" and not OPENROUTER_API_KEY:
+        llm_status = "no_key"
+    else:
+        llm_status = "error"
+
+    qdrant_status = "ok" if qdrant.get("ok") else "error"
+
+    return jsonify({
+        "success": True,
+        "timestamp": int(time.time()),
+        "overall": "ok" if overall_ok else "degraded",
+        "provider": provider,
+        "qdrant": qdrant,
+        "llm": llm,
+        "embedding": {
+            "ok": embedding_ok,
+            "model": "nomic-embed-text" if provider == "ollama" else "via OpenRouter",
+        },
+        "active_collection": {
+            "name": ACTIVE_COLLECTION,
+            "points": qdrant.get("points_in_active", 0),
+        },
+        "ocr": ocr,
+        "ocr_available": ocr["available"],
+        "file_parsers": parsers,
+        "collection": ACTIVE_COLLECTION,
+        "vectors_count": qdrant.get("points_in_active", 0),
+        "llm_provider": provider,
+        "llm_model": llm_model,
+        "qdrant_status": qdrant_status,
+        "llm_status": llm_status,
+        "qdrant_error": qdrant.get("error"),
+        "llm_error": llm.get("error"),
+        "sql_configured": sql_configured,
+        "sql_server": sql_server,
+        "sql_database": sql_database,
+        "ports": ports,
+    })
 
 
 @app.route('/api/collection/profile', methods=['GET'])

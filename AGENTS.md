@@ -40,7 +40,7 @@ Optional OCR: `tesseract-ocr`, `tesseract-ocr-pol`, `poppler-utils`.
 | Local dev bootstrap | `./scripts/setup-local-dev.sh` |
 | Install Python deps | `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt` |
 | Syntax check | `./venv/bin/python -m py_compile app.py wsgi.py` |
-| Health | `curl -s http://127.0.0.1:5000/health` |
+| Health | `curl -s http://127.0.0.1:5000/health` (pola `ocr`, `file_parsers`) |
 | Import (SSE) | `curl -sN 'http://127.0.0.1:5000/import/stream?folder=/path&ext=txt'` |
 
 No pytest/ruff in repo — use `py_compile` for sanity checks.
