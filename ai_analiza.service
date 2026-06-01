@@ -4,15 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-User={{USER}}
-WorkingDirectory={{WORKDIR}}
+User=marcin
+WorkingDirectory=/home/marcin/projects/AI_analiza_dokumentow
 
-# Ścieżka do venv
-Environment="PATH={{WORKDIR}}/venv/bin"
-EnvironmentFile={{WORKDIR}}/.env
+Environment="PATH=/home/marcin/projects/AI_analiza_dokumentow/venv/bin"
+EnvironmentFile=/home/marcin/projects/AI_analiza_dokumentow/.env
 
-# Produkcyjny start przez waitress
-ExecStart={{WORKDIR}}/venv/bin/python -m waitress \
+ExecStart=/home/marcin/projects/AI_analiza_dokumentow/venv/bin/python -m waitress \
     --listen=0.0.0.0:5000 \
     --threads=8 \
     --url-scheme=http \
@@ -22,7 +20,6 @@ ExecStart={{WORKDIR}}/venv/bin/python -m waitress \
 Restart=always
 RestartSec=5
 
-# Ograniczenia (dostosuj pod serwer)
 MemoryMax=2G
 CPUQuota=200%
 
