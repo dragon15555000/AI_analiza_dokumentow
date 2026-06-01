@@ -203,6 +203,13 @@
     </div>
 </div>
 
+<!-- Toast sugestii modelu przy zmianie zakładki -->
+<div id="modelSuggestionToast" style="display:none; align-items:center; gap:10px; padding:6px 14px; background:#1e293b; border-bottom:2px solid #4f46e5; font-size:0.82rem; color:#e2e8f0;">
+    <span id="modelSuggestionText"></span>
+    <button id="modelSuggestionApply" onclick="applyTabModel()" style="display:none; background:#4f46e5; color:#fff; border:none; border-radius:6px; padding:2px 10px; cursor:pointer; font-size:0.78rem;">✔ Zastosuj</button>
+    <button onclick="document.getElementById('modelSuggestionToast').style.display='none'" style="background:none; border:none; color:#94a3b8; cursor:pointer; font-size:1rem; margin-left:auto;">✕</button>
+</div>
+
 <ul class="nav nav-tabs" id="mainTabs">
     <li class="nav-item">
         <a class="nav-link active" href="#" onclick="showTab('search'); return false;">Wyszukiwanie</a>
@@ -1020,6 +1027,63 @@ let maxChunks = 1;
 
 // ---- TABS ----
 let aiTabLoaded = false, colTabLoaded = false;
+// Konfiguracja optymalnych modeli per zakładka
+const _tabModelPrefs = {
+    import:     { provider: null,         model: null,                                          autoApply: false, icon: '📥', hint: 'Import nie używa LLM — tylko embeddingi (nomic-embed-text)' },
+    search:     { provider: 'ollama',     model: null,                                          autoApply: true,  icon: '🔍', hint: 'Wyszukiwanie: przełączono na lokalny Ollama (szybki)' },
+    ai:         { provider: 'ollama',     model: null,                                          autoApply: true,  icon: '🤖', hint: 'Analiza AI: przełączono na lokalny Ollama' },
+    compare:    { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',     autoApply: false, icon: '⚖️', hint: 'Porównanie dokumentów: zalecany duży model (70B+)' },
+    network:    { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',     autoApply: false, icon: '🕸️', hint: 'Sieć powiązań: zalecany duży model do ekstrakcji relacji' },
+};
+let _pendingTabModel = null;
+
+function _showModelToast(icon, text, showApply, autoHideMs) {
+    const toast = document.getElementById('modelSuggestionToast');
+    const txt   = document.getElementById('modelSuggestionText');
+    const btn   = document.getElementById('modelSuggestionApply');
+    if (!toast) return;
+    txt.textContent = icon + '  ' + text;
+    btn.style.display = showApply ? '' : 'none';
+    toast.style.display = 'flex';
+    if (autoHideMs) setTimeout(() => { toast.style.display = 'none'; }, autoHideMs);
+}
+
+function applyTabModel() {
+    if (!_pendingTabModel) return;
+    const { provider, model } = _pendingTabModel;
+    const sel = document.getElementById('llmProviderSelect');
+    if (sel && provider) {
+        sel.value = provider;
+        onLlmProviderChange();
+        if (provider === 'openrouter' && model) {
+            const msel = document.getElementById('openrouterModelSelect');
+            if (msel) { msel.value = model; onOpenRouterModelSelectChange(); }
+            const minp = document.getElementById('openrouterModelInput');
+            if (minp) { minp.value = model; localStorage.setItem('openrouter_model', model); }
+        }
+    }
+    document.getElementById('modelSuggestionToast').style.display = 'none';
+    _pendingTabModel = null;
+}
+
+function _suggestModelForTab(name) {
+    const pref = _tabModelPrefs[name];
+    if (!pref) return;
+    const currentProvider = getCurrentLlmProvider();
+    _pendingTabModel = pref;
+
+    if (pref.autoApply && pref.provider && pref.provider !== currentProvider) {
+        applyTabModel();
+        _showModelToast(pref.icon, pref.hint, false, 3000);
+    } else if (!pref.autoApply && pref.provider && pref.provider !== currentProvider) {
+        _showModelToast(pref.icon, pref.hint, true, 0);
+    } else if (pref.provider === null) {
+        _showModelToast(pref.icon, pref.hint, false, 3000);
+    } else {
+        document.getElementById('modelSuggestionToast') && (document.getElementById('modelSuggestionToast').style.display = 'none');
+    }
+}
+
 function showTab(name) {
     ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabSql','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
@@ -1031,6 +1095,7 @@ function showTab(name) {
     const map = {search:0, docs:1, ai:2, compare:3, network:4, sql:5, collections:6, import:7};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
+    _suggestModelForTab(name);
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
@@ -3851,19 +3916,21 @@ function buildCheckRow(label, state, detail) {
     const icon = {ok:'✅', error:'❌', no_key:'⚠️', warn:'⚠️'}[state] || '⬜';
     const color = {ok:'#166534', error:'#991b1b', no_key:'#92400e', warn:'#92400e'}[state] || '#6c757d';
     const tdIcon = document.createElement('td');
-    tdIcon.style.cssText = 'width:32px;font-size:1.1rem;padding:5px 2px;';
+    tdIcon.style.cssText = 'width:32px;font-size:1.1rem;padding:5px 2px;vertical-align:top;';
     tdIcon.textContent = icon;
     const tdLabel = document.createElement('td');
-    tdLabel.style.cssText = 'font-weight:600;padding:5px 8px;white-space:nowrap;';
+    tdLabel.style.cssText = 'font-weight:600;padding:5px 8px;white-space:nowrap;vertical-align:top;';
     tdLabel.textContent = label;
     const tdDetail = document.createElement('td');
-    tdDetail.style.cssText = `font-size:0.82rem;color:${color};padding:5px 4px;line-height:1.3;`;
+    tdDetail.style.cssText = `font-size:0.82rem;color:${color};padding:5px 4px;line-height:1.35;vertical-align:top;`;
     tdDetail.textContent = detail;
     tr.append(tdIcon, tdLabel, tdDetail);
     return tr;
 }
 
 function showStartupChecklist(d) {
+    window._lastHealthData = d; // dla przycisku "Kopiuj diagnostykę"
+
     const modal = document.getElementById('startupModal');
     const connectionsBody = document.getElementById('startupConnectionsBody');
     const componentsBody = document.getElementById('startupComponentsBody');
@@ -3912,6 +3979,16 @@ function showStartupChecklist(d) {
         buildCheckRow('LLM', d.llm_status || (d.llm?.ok ? 'ok' : 'error'), getLlmDetail(d))
     );
 
+    // Embedding (zawsze przez Ollama — kluczowe dla wyszukiwania)
+    const embed = d.embedding || {};
+    const embedOk = !!embed.ok;
+    const embedDetail = embedOk 
+        ? `Gotowy · ${embed.model || 'nomic-embed-text'}`
+        : 'Błąd — sprawdź czy model embeddingów jest pobrany w Ollama (ollama pull nomic-embed-text)';
+    connectionsBody.append(
+        buildCheckRow('Embedding', embedOk ? 'ok' : 'error', embedDetail)
+    );
+
     // SQL Server pokazujemy TYLKO gdy jest skonfigurowany (to funkcja w pełni opcjonalna)
     if (d.sql_configured) {
         connectionsBody.append(
@@ -3936,6 +4013,13 @@ function showStartupChecklist(d) {
     if (modalVer && d.version) {
         modalVer.textContent = d.version;
     }
+
+    // Czas ostatniego sprawdzenia
+    const tsEl = document.getElementById('startupTimestamp');
+    if (tsEl) {
+        const ts = d.timestamp ? new Date(d.timestamp * 1000) : new Date();
+        tsEl.textContent = 'Sprawdzono: ' + ts.toLocaleTimeString('pl-PL');
+    }
 }
 
 // Pomocnicze funkcje do generowania szczegółów
@@ -3950,11 +4034,19 @@ function getLlmDetail(d) {
             : `Połączono · Ollama (${model})`;
     }
     if (state === 'no_key') return 'Brak klucza OPENROUTER_API_KEY — przełącz na Ollama lub dodaj klucz w panelu LLM Config';
-    const err = d.llm_error || d.llm?.error || '';
-    if (err.toLowerCase().includes('429') || err.toLowerCase().includes('rate')) {
+
+    const err = (d.llm_error || d.llm?.error || '').toLowerCase();
+
+    if (err.includes('429') || err.includes('rate')) {
         return 'OpenRouter: rate limit (429) — włącz Fallback do Ollama lub poczekaj chwilę';
     }
-    return err || 'Nie odpowiada — sprawdź Ollama (docker) lub konfigurację OpenRouter';
+    if (err.includes('connection') || err.includes('refused') || err.includes('econnrefused')) {
+        return 'Ollama nie odpowiada — sprawdź czy `ollama serve` działa';
+    }
+    if (err.includes('model') && err.includes('not found')) {
+        return `Model "${model}" nie jest dostępny w Ollama — użyj: ollama pull ${model}`;
+    }
+    return (d.llm_error || d.llm?.error) || 'Nie odpowiada — sprawdź Ollama (docker) lub konfigurację OpenRouter';
 }
 
 function getSqlDetail(d) {
@@ -3997,6 +4089,39 @@ function refreshStartupChecklist() {
             if (modal) modal.style.display = 'flex';
             alert('Nie udało się odświeżyć diagnostyki');
         });
+}
+
+function copyDiagnostics() {
+    const data = window._lastHealthData || {};
+    const text = [
+        `Wersja: ${data.version || '?'}`,
+        `Czas: ${new Date().toLocaleString('pl-PL')}`,
+        `Ogólny status: ${data.overall || '?'}`,
+        '',
+        '=== Połączenia ===',
+        `Qdrant: ${data.qdrant?.ok ? 'OK' : 'BŁĄD'} ${data.qdrant?.error || ''}`,
+        `LLM: ${data.llm?.ok ? 'OK' : 'BŁĄD'} ${data.llm?.error || ''}`,
+        `Embedding: ${data.embedding?.ok ? 'OK' : 'BŁĄD'} (${data.embedding?.model || ''})`,
+        '',
+        '=== Komponenty ===',
+        `Parsery plików: ${data.file_parsers?.pdf_text && data.file_parsers?.excel ? 'OK' : 'BŁĄD'}`,
+        `OCR (Tesseract): ${data.ocr?.available ? 'OK' : 'Brak'}`,
+        '',
+        '=== Usługa ===',
+        `Provider: ${data.provider || '?'}`,
+        `Model LLM: ${data.llm_model || '?'}`
+    ].join('\n');
+
+    navigator.clipboard.writeText(text).then(() => {
+        const btns = document.querySelectorAll('#startupModal button');
+        btns.forEach(b => { if (b.textContent.includes('Kopiuj')) b.textContent = '✅ Skopiowano!'; });
+        setTimeout(() => {
+            btns.forEach(b => { if (b.textContent.includes('Skopiowano')) b.textContent = '📋 Kopiuj diagnostykę'; });
+        }, 1800);
+    }).catch(() => {
+        // Fallback
+        prompt('Skopiuj poniższy tekst:', text);
+    });
 }
 
 // --- LLM Config panel ---
@@ -4175,9 +4300,10 @@ window.onload = function() {
         </div>
 
         <!-- Ogólny status -->
-        <div id="startupOverallStatus" style="margin-bottom:16px;padding:10px 14px;border-radius:8px;font-weight:600;font-size:0.95rem;">
+        <div id="startupOverallStatus" style="margin-bottom:8px;padding:10px 14px;border-radius:8px;font-weight:600;font-size:0.95rem;">
             <!-- wypełniane dynamicznie przez JS -->
         </div>
+        <div id="startupTimestamp" style="font-size:0.7rem;color:#9ca3af;margin-bottom:12px;text-align:right;"></div>
 
         <!-- Sekcja: Połączenia -->
         <div style="margin-bottom:12px;">
@@ -4206,7 +4332,8 @@ window.onload = function() {
             <pre id="svcLogsBox" style="display:none;margin-top:10px;background:#1a1f36;color:#a0aec0;font-size:0.72rem;padding:10px;border-radius:6px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
         </div>
 
-        <div style="margin-top:18px;text-align:right;">
+        <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;">
+            <button onclick="copyDiagnostics()" class="btn btn-outline-secondary btn-sm">📋 Kopiuj diagnostykę</button>
             <button onclick="closeStartupModal()" class="btn btn-primary">OK, zaczynam pracę</button>
         </div>
     </div>
