@@ -192,6 +192,7 @@
         <select id="llmProviderSelect" onchange="onLlmProviderChange()" 
                 style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:999px; cursor:pointer;">
             <option value="openrouter">OpenRouter</option>
+            <option value="groq">Groq</option>
             <option value="ollama">Lokalny</option>
         </select>
 
@@ -210,6 +211,19 @@
                style="background:#1a1f36; color:#e2e8f0; border:1px solid #4a5568; font-size:0.7rem; padding:1px 6px; border-radius:6px; width:180px; display:none;"
                onchange="onOpenRouterModelChange()"
                title="Np: meta-llama/llama-3.3-70b-instruct:free">
+
+        <select id="groqModelSelect" onchange="onGroqModelSelectChange()"
+                style="display:none; background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:6px; cursor:pointer; font-size:0.7rem; max-width:220px;">
+            <option value="">-- model Groq --</option>
+            <option value="llama-3.3-70b-versatile">Llama 3.3 70B ★</option>
+            <option value="llama-3.1-8b-instant">Llama 3.1 8B (szybki)</option>
+            <option value="gemma2-9b-it">Gemma2 9B</option>
+            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+            <option value="custom">Własny…</option>
+        </select>
+        <input id="groqModelInput" type="text" placeholder="model Groq"
+               style="display:none; background:#1a1f36; color:#e2e8f0; border:1px solid #4a5568; font-size:0.7rem; padding:1px 6px; border-radius:6px; width:160px;"
+               onchange="onGroqModelChange()">
     </div>
 
     <!-- Wersja aplikacji (automatycznie z backendu /health) -->
@@ -1011,6 +1025,7 @@
           <select id="cfgProvider" class="form-select form-select-sm" onchange="llmConfigToggle()">
             <option value="ollama">Ollama (lokalny)</option>
             <option value="openrouter">OpenRouter (chmura)</option>
+            <option value="groq">Groq (testy)</option>
           </select>
         </div>
         <!-- Ollama -->
@@ -1049,6 +1064,26 @@
             <input class="form-check-input" type="checkbox" id="cfgOrFallback">
             <label class="form-check-label small" for="cfgOrFallback">Włącz fallback</label>
           </div>
+        </div>
+        <!-- Groq -->
+        <div class="col-md-6" id="cfgGroqKeyWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Groq API Key <span id="cfgGroqKeyStatus" class="text-muted small"></span></label>
+          <input type="password" id="cfgGroqKey" class="form-control form-control-sm font-monospace" placeholder="gsk_… (zostaw puste by nie zmieniać)">
+        </div>
+        <div class="col-md-6" id="cfgGroqModelWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Model Groq</label>
+          <select id="cfgGroqModelSelect" class="form-select form-select-sm" onchange="cfgGroqModelSyncInput()">
+            <option value="llama-3.3-70b-versatile">Llama 3.3 70B ★</option>
+            <option value="llama-3.1-8b-instant">Llama 3.1 8B (szybki)</option>
+            <option value="gemma2-9b-it">Gemma2 9B</option>
+            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+            <option value="custom">Własny…</option>
+          </select>
+          <input type="text" id="cfgGroqModel" class="form-control form-control-sm mt-1 font-monospace" placeholder="llama-3.3-70b-versatile" style="font-size:0.75rem;">
+        </div>
+        <div class="col-md-6" id="cfgGroqModelVerifyWrap" style="display:none;">
+          <label class="form-label small fw-bold mb-1">Model Krytyk (Groq)</label>
+          <input type="text" id="cfgGroqModelVerify" class="form-control form-control-sm font-monospace" placeholder="llama-3.1-8b-instant" style="font-size:0.75rem;">
         </div>
 
         <!-- App API Key (ochrona API) -->
@@ -1821,8 +1856,7 @@ function executeSearch() {
         chat_context: chatCtx,
         limit, mode,
         file_filter: activeFileFilter,
-        llm_provider: getCurrentLlmProvider(),
-        openrouter_model: getCurrentOpenRouterModel(),
+        ...getLlmRequestPayload(),
         ...(hasSQL ? {conn: activeConn, schema: sqlSchema} : {})
     };
 
@@ -1846,10 +1880,15 @@ function executeSearch() {
             document.getElementById('tokenSpeed').textContent = '—';
             document.getElementById('tokenFinalMsg').style.display = 'none';
             const prov = document.getElementById('llmProviderSelect').value;
-            const model = prov === 'openrouter'
-                ? (document.getElementById('openrouterModelInput').value || document.getElementById('openrouterModelSelect').value || '')
-                : (document.getElementById('cfgLlmModel')?.value || '');
-            document.getElementById('tokenProviderBadge').textContent = prov === 'openrouter' ? `OpenRouter · ${model.split('/').pop()}` : `Ollama · ${model}`;
+            let model = document.getElementById('cfgLlmModel')?.value || '';
+            if (prov === 'openrouter') {
+                model = document.getElementById('openrouterModelInput').value || document.getElementById('openrouterModelSelect').value || '';
+            } else if (prov === 'groq') {
+                model = getCurrentGroqModel();
+            }
+            const shortModel = model.includes('/') ? model.split('/').pop() : model;
+            const labels = { openrouter: 'OpenRouter', groq: 'Groq', ollama: 'Ollama' };
+            document.getElementById('tokenProviderBadge').textContent = `${labels[prov] || prov} · ${shortModel}`;
         }
 
         function _tickTokenCounter(token) {
@@ -2203,8 +2242,7 @@ function runVerification(query, answer, contexts) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             query, answer, contexts,
-            llm_provider: getCurrentLlmProvider(),
-            openrouter_model: getCurrentOpenRouterModel()
+            ...getLlmRequestPayload()
         })
     })
     .then(r => r.json())
@@ -3265,8 +3303,7 @@ function buildNetwork() {
         query,
         limit,
         include_briefing: true,
-        llm_provider: getCurrentLlmProvider(),
-        openrouter_model: getCurrentOpenRouterModel(),
+        ...getLlmRequestPayload(),
     }, {
         progress: (d) => {
             const pct = d.total ? Math.round((d.processed / d.total) * 85) + 5 : 10;
@@ -3658,13 +3695,39 @@ function initNetworkFilterListeners() {
 // OŚ CZASU / TIMELINE
 // ============================================================
 let timelineAbortController = null;
+let timelineRequestSeq = 0;
+const TIMELINE_MAX_RETRIES = 2;
+const TIMELINE_RETRY_BASE_MS = 700;
 
-function generateTimeline() {
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isTimelineRetryableError(message) {
+    const text = String(message || '').toLowerCase();
+    return [
+        'błąd strumienia sse',
+        'serwer zwrócił html',
+        'connection reset by peer',
+        'connection aborted',
+        'connection reset',
+        'remote disconnected',
+        'incomplete read',
+        'broken pipe',
+        'timed out',
+        'timeout',
+        'chwilowa niedostępność modelu',
+        'spróbuj ponownie za chwilę',
+    ].some(marker => text.includes(marker));
+}
+
+async function generateTimeline() {
     const query = document.getElementById('timelineQuery').value.trim();
     const limit = parseInt(document.getElementById('timelineLimit').value) || 25;
 
     if (timelineAbortController) timelineAbortController.abort();
     timelineAbortController = new AbortController();
+    const requestSeq = ++timelineRequestSeq;
 
     document.getElementById('timelineStatus').classList.remove('d-none');
     document.getElementById('timelineResult').innerHTML = '';
@@ -3680,27 +3743,91 @@ function generateTimeline() {
         }
     };
 
-    streamSSEPost('/timeline', {
-        query,
-        limit,
-        llm_provider: getCurrentLlmProvider(),
-        openrouter_model: getCurrentOpenRouterModel(),
-    }, {
-        progress: (d) => {
-            document.getElementById('timelineStatusText').textContent = d.message || 'Przetwarzanie…';
-        },
-        done: (d) => {
-            if (!d.success) {
-                finish(d.error || 'Błąd generowania osi czasu');
+    const runTimelineAttempt = async () => {
+        const payload = {
+            query,
+            limit,
+            ...getLlmRequestPayload(),
+        };
+
+        return await new Promise((resolve) => {
+            let settled = false;
+            const settle = (result) => {
+                if (settled) return;
+                settled = true;
+                resolve(result);
+            };
+
+            streamSSEPost('/timeline', payload, {
+                progress: (d) => {
+                    document.getElementById('timelineStatusText').textContent = d.message || 'Przetwarzanie…';
+                },
+                done: (d) => {
+                    if (!d.success) {
+                        settle({ kind: 'error', error: d.error || 'Błąd generowania osi czasu' });
+                        return;
+                    }
+                    settle({ kind: 'done', data: d });
+                },
+                error: (d) => {
+                    settle({ kind: 'error', error: d.error || d.msg || 'Błąd połączenia z serwerem' });
+                },
+            }, timelineAbortController.signal)
+            .then(() => {
+                if (!settled) {
+                    settle(timelineAbortController.signal.aborted
+                        ? { kind: 'aborted' }
+                        : { kind: 'error', error: 'Błąd strumienia SSE' });
+                }
+            })
+            .catch((err) => {
+                if (settled) return;
+                settle(err && err.name === 'AbortError'
+                    ? { kind: 'aborted' }
+                    : { kind: 'error', error: err?.message || 'Błąd połączenia z serwerem' });
+            });
+        });
+    };
+
+    for (let attempt = 0; attempt <= TIMELINE_MAX_RETRIES; attempt++) {
+        if (requestSeq !== timelineRequestSeq || timelineAbortController.signal.aborted) {
+            return;
+        }
+
+        if (attempt > 0) {
+            document.getElementById('timelineStatusText').textContent =
+                `Chwilowy problem, ponawiam próbę ${attempt + 1}/${TIMELINE_MAX_RETRIES + 1}...`;
+            await sleep(Math.min(4000, TIMELINE_RETRY_BASE_MS * (2 ** (attempt - 1))));
+            if (requestSeq !== timelineRequestSeq || timelineAbortController.signal.aborted) {
                 return;
             }
+        }
+
+        const result = await runTimelineAttempt();
+        if (requestSeq !== timelineRequestSeq || timelineAbortController.signal.aborted) {
+            return;
+        }
+
+        if (result.kind === 'done') {
             finish(null);
-            renderTimeline(d);
-        },
-        error: (d) => {
-            finish(d.error || d.msg || 'Błąd połączenia z serwerem');
-        },
-    }, timelineAbortController.signal);
+            renderTimeline(result.data);
+            return;
+        }
+
+        if (result.kind === 'aborted') {
+            return;
+        }
+
+        const errMsg = result.error || 'Błąd generowania osi czasu';
+        if (attempt < TIMELINE_MAX_RETRIES && isTimelineRetryableError(errMsg)) {
+            continue;
+        }
+
+        finish(errMsg);
+        return;
+    }
+
+    finish('Błąd generowania osi czasu');
 }
 
 function renderTimeline(data) {
@@ -3943,8 +4070,16 @@ function renderNetwork(nodes, edges) {
 }
 
 // ============================================================
-// PROSTY PRZEŁĄCZNIK LLM (Ollama <-> OpenRouter)
+// PRZEŁĄCZNIK LLM (Ollama / OpenRouter / Groq)
 // ============================================================
+function getLlmRequestPayload() {
+    const prov = getCurrentLlmProvider();
+    const payload = { llm_provider: prov };
+    if (prov === 'groq') payload.groq_model = getCurrentGroqModel();
+    else if (prov === 'openrouter') payload.openrouter_model = getCurrentOpenRouterModel();
+    return payload;
+}
+
 function getCurrentLlmProvider() {
     const sel = document.getElementById('llmProviderSelect');
     if (sel) return sel.value;
@@ -3993,11 +4128,27 @@ function onLlmProviderChange() {
     const sel = document.getElementById('llmProviderSelect');
     if (!sel) return;
     localStorage.setItem('llm_provider', sel.value);
-    
+    syncLlmModelPickerVisibility();
+
     const badge = sel.parentElement;
     badge.style.transition = 'all 0.2s';
-    badge.style.boxShadow = sel.value === 'openrouter' ? '0 0 0 2px #22c55e' : 'none';
+    const highlight = sel.value === 'openrouter' || sel.value === 'groq';
+    badge.style.boxShadow = highlight ? '0 0 0 2px #22c55e' : 'none';
     setTimeout(() => { badge.style.boxShadow = ''; }, 800);
+}
+
+function syncLlmModelPickerVisibility() {
+    const prov = getCurrentLlmProvider();
+    const orSel = document.getElementById('openrouterModelSelect');
+    const orInp = document.getElementById('openrouterModelInput');
+    const gSel = document.getElementById('groqModelSelect');
+    const gInp = document.getElementById('groqModelInput');
+    const showOr = prov === 'openrouter';
+    const showGr = prov === 'groq';
+    if (orSel) orSel.style.display = showOr ? '' : 'none';
+    if (gSel) gSel.style.display = showGr ? '' : 'none';
+    if (orInp) orInp.style.display = showOr && orSel && orSel.value === 'custom' ? 'inline-block' : 'none';
+    if (gInp) gInp.style.display = showGr && gSel && gSel.value === 'custom' ? 'inline-block' : 'none';
 }
 
 function onOpenRouterModelChange() {
@@ -4023,6 +4174,32 @@ function onOpenRouterModelSelectChange() {
         input.value = '';
         localStorage.removeItem('openrouter_model');
     }
+    syncLlmModelPickerVisibility();
+}
+
+function onGroqModelChange() {
+    const input = document.getElementById('groqModelInput');
+    if (!input) return;
+    localStorage.setItem('groq_model', input.value.trim());
+}
+
+function onGroqModelSelectChange() {
+    const select = document.getElementById('groqModelSelect');
+    const input = document.getElementById('groqModelInput');
+    if (!select || !input) return;
+    if (select.value === 'custom') {
+        input.style.display = 'inline-block';
+        input.focus();
+    } else if (select.value) {
+        input.style.display = 'none';
+        input.value = select.value;
+        localStorage.setItem('groq_model', select.value);
+    } else {
+        input.style.display = 'none';
+        input.value = '';
+        localStorage.removeItem('groq_model');
+    }
+    syncLlmModelPickerVisibility();
 }
 
 function restoreLlmProvider() {
@@ -4030,8 +4207,27 @@ function restoreLlmProvider() {
     if (!sel) return;
 
     const savedProvider = localStorage.getItem('llm_provider');
-    if (savedProvider === 'openrouter' || savedProvider === 'ollama') {
+    if (savedProvider === 'openrouter' || savedProvider === 'groq' || savedProvider === 'ollama') {
         sel.value = savedProvider;
+    }
+
+    // Przywróć zapisany model Groq
+    const savedGroqModel = localStorage.getItem('groq_model');
+    const groqSelect = document.getElementById('groqModelSelect');
+    const groqInput = document.getElementById('groqModelInput');
+    if (groqSelect && groqInput && savedGroqModel) {
+        let foundG = false;
+        for (let i = 0; i < groqSelect.options.length; i++) {
+            if (groqSelect.options[i].value === savedGroqModel) {
+                groqSelect.value = savedGroqModel;
+                foundG = true;
+                break;
+            }
+        }
+        if (!foundG) {
+            groqSelect.value = 'custom';
+            groqInput.value = savedGroqModel;
+        }
     }
 
     // Przywróć zapisany model OpenRouter
@@ -4060,6 +4256,15 @@ function restoreLlmProvider() {
             modelInput.style.display = 'none';
         }
     }
+    syncLlmModelPickerVisibility();
+}
+
+function getCurrentGroqModel() {
+    const select = document.getElementById('groqModelSelect');
+    const input = document.getElementById('groqModelInput');
+    if (select && select.value && select.value !== 'custom') return select.value;
+    if (input && input.value.trim()) return input.value.trim();
+    return localStorage.getItem('groq_model') || 'llama-3.3-70b-versatile';
 }
 
 function getCurrentOpenRouterModel() {
@@ -5142,11 +5347,11 @@ function getLlmDetail(d) {
     const state = d.llm_status || (d.llm?.ok ? 'ok' : 'error');
 
     if (state === 'ok') {
-        return provider === 'openrouter' 
-            ? `Połączono · OpenRouter (${model})` 
-            : `Połączono · Ollama (${model})`;
+        if (provider === 'openrouter') return `Połączono · OpenRouter (${model})`;
+        if (provider === 'groq') return `Połączono · Groq (${model})`;
+        return `Połączono · Ollama (${model})`;
     }
-    if (state === 'no_key') return 'Brak klucza OPENROUTER_API_KEY — przełącz na Ollama lub dodaj klucz w panelu LLM Config';
+    if (state === 'no_key') return 'Brak klucza API — przełącz na Ollama lub dodaj klucz w panelu LLM Config';
 
     const err = (d.llm_error || d.llm?.error || '').toLowerCase();
 
@@ -5490,18 +5695,48 @@ function llmConfigLoad() {
             document.getElementById('cfgOrModel').value        = d.openrouter_model || '';
             document.getElementById('cfgOrModelVerify').value  = d.openrouter_model_verify || '';
             document.getElementById('cfgOrFallback').checked   = !!d.openrouter_fallback;
+
+            const gStatus = document.getElementById('cfgGroqKeyStatus');
+            if (gStatus) {
+                gStatus.textContent = d.groq_key_set ? '(ustawiony)' : '(nie ustawiony)';
+                gStatus.style.color = d.groq_key_set ? '#166534' : '#991b1b';
+            }
+            const gSel = document.getElementById('cfgGroqModelSelect');
+            if (gSel) {
+                const knownGroq = Array.from(gSel.options).map(o => o.value);
+                if (d.groq_model && knownGroq.includes(d.groq_model)) gSel.value = d.groq_model;
+                else gSel.value = 'custom';
+            }
+            const gModel = document.getElementById('cfgGroqModel');
+            if (gModel) gModel.value = d.groq_model || '';
+            const gVerify = document.getElementById('cfgGroqModelVerify');
+            if (gVerify) gVerify.value = d.groq_model_verify || '';
+
             llmConfigToggle();
         });
 }
 
 function llmConfigToggle() {
-    const isOr = document.getElementById('cfgProvider').value === 'openrouter';
-    document.getElementById('cfgOllamaUrlWrap').style.display  = isOr ? 'none' : '';
-    document.getElementById('cfgLlmModelWrap').style.display   = isOr ? 'none' : '';
+    const prov = document.getElementById('cfgProvider').value;
+    const isOr = prov === 'openrouter';
+    const isGroq = prov === 'groq';
+    const isOllama = prov === 'ollama';
+    document.getElementById('cfgOllamaUrlWrap').style.display  = isOllama ? '' : 'none';
+    document.getElementById('cfgLlmModelWrap').style.display   = isOllama ? '' : 'none';
     document.getElementById('cfgOrKeyWrap').style.display          = isOr ? '' : 'none';
     document.getElementById('cfgOrModelWrap').style.display        = isOr ? '' : 'none';
     document.getElementById('cfgOrModelVerifyWrap').style.display  = isOr ? '' : 'none';
     document.getElementById('cfgOrFallbackWrap').style.display     = isOr ? '' : 'none';
+    document.getElementById('cfgGroqKeyWrap').style.display        = isGroq ? '' : 'none';
+    document.getElementById('cfgGroqModelWrap').style.display      = isGroq ? '' : 'none';
+    document.getElementById('cfgGroqModelVerifyWrap').style.display = isGroq ? '' : 'none';
+}
+
+function cfgGroqModelSyncInput() {
+    const sel = document.getElementById('cfgGroqModelSelect');
+    if (sel && sel.value !== 'custom') {
+        document.getElementById('cfgGroqModel').value = sel.value;
+    }
 }
 
 function cfgOrModelSyncInput() {
@@ -5532,6 +5767,11 @@ function llmConfigSave() {
         payload.openrouter_model        = document.getElementById('cfgOrModel').value.trim();
         payload.openrouter_model_verify = document.getElementById('cfgOrModelVerify').value.trim();
         payload.openrouter_fallback     = document.getElementById('cfgOrFallback').checked;
+    } else if (provider === 'groq') {
+        const gkey = document.getElementById('cfgGroqKey').value.trim();
+        if (gkey) payload.groq_key = gkey;
+        payload.groq_model        = document.getElementById('cfgGroqModel').value.trim();
+        payload.groq_model_verify = document.getElementById('cfgGroqModelVerify').value.trim();
     } else {
         payload.ollama_url = document.getElementById('cfgOllamaUrl').value.trim();
         payload.llm_model  = document.getElementById('cfgLlmModel').value.trim();
@@ -5691,7 +5931,7 @@ function runReadyReport(id) {
 
     fetchJson('/analyze', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, llm_provider: getCurrentLlmProvider()})
+        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, ...getLlmRequestPayload()})
     }).then(d => {
         document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(d.answer || 'Brak danych.')}</div>`;
     });
