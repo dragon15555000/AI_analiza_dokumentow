@@ -87,26 +87,15 @@ curl_with_retry() {
   done
 }
 
-test_preflight_health() {
-  local body="$TMP_DIR/health.json"
-  local code qdrant_ok
-  if ! code="$(curl_with_retry "json" "$BASE_URL/health" "$body" "" "${AUTH_ARGS[@]}")"; then
-    note_fail "Preflight GET /health transport error"
-    RETRIEVAL_AVAILABLE=0
-    return
-  fi
-  if [[ "$code" != "200" ]]; then
-    note_fail "Preflight GET /health -> HTTP $code"
-    RETRIEVAL_AVAILABLE=0
-    return
-  fi
+health_response_ok() {
+  local body="$1"
+  local key
   for key in success overall ocr file_parsers embedding qdrant; do
     if [[ "$(json_has "$body" "$key")" != "ok" ]]; then
-      note_fail "Preflight GET /health missing key: $key"
-      RETRIEVAL_AVAILABLE=0
-      return
+      return 1
     fi
   done
+
   if ! python3 - "$body" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -114,7 +103,44 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 sys.exit(0 if data.get("success") is True else 1)
 PY
   then
-    note_fail "Preflight GET /health returned success=false"
+    return 1
+  fi
+
+  return 0
+}
+
+test_preflight_health() {
+  local body="$TMP_DIR/health.json"
+  local code qdrant_ok
+  local attempt
+  local success_streak=0
+  local last_error=""
+
+  for attempt in 1 2 3; do
+    if ! code="$(curl_with_retry "json" "$BASE_URL/health" "$body" "" "${AUTH_ARGS[@]}")"; then
+      last_error="transport error"
+      success_streak=0
+      continue
+    fi
+    if [[ "$code" != "200" ]]; then
+      last_error="HTTP $code"
+      success_streak=0
+      continue
+    fi
+    if ! health_response_ok "$body"; then
+      last_error="invalid payload"
+      success_streak=0
+      continue
+    fi
+
+    success_streak=$((success_streak + 1))
+    if [[ "$success_streak" -ge 2 ]]; then
+      break
+    fi
+  done
+
+  if [[ "$success_streak" -lt 2 ]]; then
+    note_fail "Preflight GET /health unstable ($last_error)"
     RETRIEVAL_AVAILABLE=0
     return
   fi
