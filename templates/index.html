@@ -215,7 +215,7 @@
         <select id="groqModelSelect" onchange="onGroqModelSelectChange()"
                 style="display:none; background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:6px; cursor:pointer; font-size:0.7rem; max-width:220px;">
             <option value="">-- model Groq --</option>
-            <option value="llama-3.3-70b-versatile">Llama 3.3 70B ★</option>
+            <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
             <option value="llama-3.1-8b-instant">Llama 3.1 8B (szybki)</option>
             <option value="gemma2-9b-it">Gemma2 9B</option>
             <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
@@ -1073,7 +1073,7 @@
         <div class="col-md-6" id="cfgGroqModelWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">Model Groq</label>
           <select id="cfgGroqModelSelect" class="form-select form-select-sm" onchange="cfgGroqModelSyncInput()">
-            <option value="llama-3.3-70b-versatile">Llama 3.3 70B ★</option>
+            <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
             <option value="llama-3.1-8b-instant">Llama 3.1 8B (szybki)</option>
             <option value="gemma2-9b-it">Gemma2 9B</option>
             <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
@@ -5354,17 +5354,30 @@ function getLlmDetail(d) {
     if (state === 'no_key') return 'Brak klucza API — przełącz na Ollama lub dodaj klucz w panelu LLM Config';
 
     const err = (d.llm_error || d.llm?.error || '').toLowerCase();
+    const providerLabel = provider === 'groq' ? 'Groq' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama';
 
+    if (err.includes('blocked at the organization') || err.includes('console.groq.com')) {
+        return 'Groq: modele zablokowane w organizacji — włącz je w https://console.groq.com/settings/limits (admin org)';
+    }
     if (err.includes('429') || err.includes('rate')) {
-        return 'OpenRouter: rate limit (429) — włącz Fallback do Ollama lub poczekaj chwilę';
+        return `${providerLabel}: rate limit (429) — włącz fallback do Ollama lub poczekaj chwilę`;
     }
     if (err.includes('connection') || err.includes('refused') || err.includes('econnrefused')) {
+        if (provider === 'groq') {
+            return 'Groq nie odpowiada — sprawdź klucz API, model i połączenie sieciowe';
+        }
+        if (provider === 'openrouter') {
+            return 'OpenRouter nie odpowiada — sprawdź klucz API i połączenie sieciowe';
+        }
         return 'Ollama nie odpowiada — sprawdź czy `ollama serve` działa';
     }
     if (err.includes('model') && err.includes('not found')) {
+        if (provider === 'groq') {
+            return `Model "${model}" nie jest dostępny w Groq — wybierz model z listy albo wpisz poprawny identyfikator`;
+        }
         return `Model "${model}" nie jest dostępny w Ollama — użyj: ollama pull ${model}`;
     }
-    return (d.llm_error || d.llm?.error) || 'Nie odpowiada — sprawdź Ollama (docker) lub konfigurację OpenRouter';
+    return (d.llm_error || d.llm?.error) || `Nie odpowiada — sprawdź konfigurację ${providerLabel}`;
 }
 
 function getSqlDetail(d) {
