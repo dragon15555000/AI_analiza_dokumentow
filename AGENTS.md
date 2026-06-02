@@ -63,6 +63,7 @@ journalctl --user -u ai_analiza -f
 | Local dev bootstrap | `./scripts/setup-local-dev.sh` |
 | Install Python deps | `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt` |
 | Syntax check | `./venv/bin/python -m py_compile app.py wsgi.py` |
+| Testy integracyjne | `./scripts/run-tests.sh` (health, Groq, SSE search; `--skip-e2e` bez search) |
 | Health | `curl -s http://127.0.0.1:5000/health` (pola `ocr`, `file_parsers`) |
 | Import (SSE) | `curl -sN 'http://127.0.0.1:5000/import/stream?folder=/path&ext=txt'` |
 

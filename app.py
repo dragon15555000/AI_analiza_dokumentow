@@ -709,7 +709,13 @@ except ValueError:
     logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
     OPENROUTER_MAX_RETRIES = 3
 
-DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter (domyślnie dla LLM) | ollama (tylko dla importu/embeddings)
+# Groq (OpenAI-compatible API — szybkie testy)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL_VERIFY = os.environ.get("GROQ_MODEL_VERIFY", "llama-3.1-8b-instant")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter | groq | ollama
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
@@ -1296,6 +1302,7 @@ def _apply_llm_config(cfg: dict):
     """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
+    global GROQ_API_KEY, GROQ_MODEL, GROQ_MODEL_VERIFY
     global OLLAMA_URL, LLM_MODEL, APP_API_KEY
 
     if cfg.get("provider"):
@@ -1308,6 +1315,12 @@ def _apply_llm_config(cfg: dict):
         OPENROUTER_MODEL_VERIFY = cfg["openrouter_model_verify"]
     if "openrouter_fallback" in cfg:
         OPENROUTER_FALLBACK_TO_OLLAMA = bool(cfg["openrouter_fallback"])
+    if cfg.get("groq_key"):
+        GROQ_API_KEY = cfg["groq_key"]
+    if cfg.get("groq_model"):
+        GROQ_MODEL = cfg["groq_model"]
+    if cfg.get("groq_model_verify"):
+        GROQ_MODEL_VERIFY = cfg["groq_model_verify"]
     if cfg.get("ollama_url"):
         OLLAMA_URL = cfg["ollama_url"]
     if cfg.get("llm_model"):
@@ -1320,8 +1333,10 @@ def _apply_llm_config(cfg: dict):
         # Pozwól wyczyścić klucz przez UI
         APP_API_KEY = ""
 
+    _rebuild_provider_pools(cfg)
 
-_apply_llm_config(_load_llm_config())
+
+# (początkowe _apply_llm_config — wywołane po definicji pul, na końcu sekcji pool)
 
 
 # ============================================================
@@ -1345,10 +1360,22 @@ def get_llm_config():
         "openrouter_model": cfg.get("openrouter_model", OPENROUTER_MODEL),
         "openrouter_model_verify": cfg.get("openrouter_model_verify", OPENROUTER_MODEL_VERIFY),
         "openrouter_fallback": cfg.get("openrouter_fallback", OPENROUTER_FALLBACK_TO_OLLAMA),
+        "groq_model": cfg.get("groq_model", GROQ_MODEL),
+        "groq_model_verify": cfg.get("groq_model_verify", GROQ_MODEL_VERIFY),
 
         # Bezpieczne flagi zamiast podglądów kluczy
-        "openrouter_key_set": bool(cfg.get("openrouter_key")),
+        "openrouter_key_set": bool(cfg.get("openrouter_key") or cfg.get("openrouter_keys") or OPENROUTER_API_KEY),
+        "groq_key_set": bool(cfg.get("groq_key") or cfg.get("groq_keys") or GROQ_API_KEY),
         "app_api_key_set": bool(cfg.get("app_api_key")),
+
+        "groq_keys_count": GROQ_KEY_POOL.count(),
+        "openrouter_keys_count": OPENROUTER_KEY_POOL.count(),
+        "ollama_urls_count": OLLAMA_URL_POOL.count(),
+        "pools": {
+            "groq": GROQ_KEY_POOL.stats(),
+            "openrouter": OPENROUTER_KEY_POOL.stats(),
+            "ollama": OLLAMA_URL_POOL.stats(),
+        },
     })
 
 
@@ -1364,7 +1391,8 @@ def save_llm_config():
 
     # Aktualizuj tylko dozwolone pola
     allowed = ["provider", "ollama_url", "llm_model", "openrouter_model",
-               "openrouter_model_verify", "openrouter_fallback"]
+               "openrouter_model_verify", "openrouter_fallback",
+               "groq_model", "groq_model_verify"]
 
     for k in allowed:
         if k in data:
@@ -1373,6 +1401,14 @@ def save_llm_config():
     # Klucze — zapisujemy tylko jeśli użytkownik je podał (nie nadpisujemy pustymi)
     if data.get("openrouter_key"):
         current["openrouter_key"] = data["openrouter_key"]
+    if data.get("groq_key"):
+        current["groq_key"] = data["groq_key"]
+    if isinstance(data.get("openrouter_keys"), list):
+        current["openrouter_keys"] = [k.strip() for k in data["openrouter_keys"] if k and str(k).strip()]
+    if isinstance(data.get("groq_keys"), list):
+        current["groq_keys"] = [k.strip() for k in data["groq_keys"] if k and str(k).strip()]
+    if isinstance(data.get("ollama_urls"), list):
+        current["ollama_urls"] = [u.strip().rstrip("/") for u in data["ollama_urls"] if u and str(u).strip()]
     if "app_api_key" in data:
         current["app_api_key"] = data["app_api_key"] or ""
 
@@ -1383,16 +1419,261 @@ def save_llm_config():
 
 
 # ============================================================
-# LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
+# POOL KLUCZY / SERWERÓW (rotacja round-robin + cooldown)
+# ============================================================
+
+class EndpointPool:
+    """Thread-safe round-robin z cooldownem po błędach (429, auth, connection)."""
+
+    def __init__(self, label: str = "pool"):
+        self.label = label
+        self._lock = threading.Lock()
+        self._items: list[str] = []
+        self._idx = 0
+        self._cooldown: dict[str, float] = {}
+
+    def set_items(self, items: list[str]):
+        with self._lock:
+            clean: list[str] = []
+            seen: set[str] = set()
+            for x in items:
+                s = (x or "").strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    clean.append(s)
+            self._items = clean
+            if self._idx >= len(self._items):
+                self._idx = 0
+            stale = set(self._cooldown) - seen
+            for k in stale:
+                del self._cooldown[k]
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def stats(self) -> dict:
+        with self._lock:
+            now = time.monotonic()
+            available = sum(1 for i in self._items if self._cooldown.get(i, 0) <= now)
+            return {
+                "total": len(self._items),
+                "available": available,
+                "in_cooldown": len(self._items) - available,
+            }
+
+    def peek_primary(self) -> str | None:
+        with self._lock:
+            return self._items[0] if self._items else None
+
+    def acquire(self) -> str | None:
+        with self._lock:
+            if not self._items:
+                return None
+            now = time.monotonic()
+            n = len(self._items)
+            for _ in range(n):
+                item = self._items[self._idx]
+                self._idx = (self._idx + 1) % n
+                if self._cooldown.get(item, 0) <= now:
+                    return item
+            return min(self._items, key=lambda i: self._cooldown.get(i, 0))
+
+    def mark_failure(self, item: str, *, cooldown_sec: float = 60.0):
+        if not item:
+            return
+        with self._lock:
+            self._cooldown[item] = time.monotonic() + max(1.0, cooldown_sec)
+
+    def mark_success(self, item: str):
+        if not item:
+            return
+        with self._lock:
+            self._cooldown.pop(item, None)
+
+
+GROQ_KEY_POOL = EndpointPool("groq_keys")
+OPENROUTER_KEY_POOL = EndpointPool("openrouter_keys")
+OLLAMA_URL_POOL = EndpointPool("ollama_urls")
+
+
+def _parse_env_list(*names: str) -> list[str]:
+    out: list[str] = []
+    for name in names:
+        val = os.environ.get(name, "").strip()
+        if not val:
+            continue
+        for part in re.split(r"[,;\n\r]+", val):
+            p = part.strip()
+            if p:
+                out.append(p)
+    return out
+
+
+def _merge_unique(*lists) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for lst in lists:
+        for x in lst or []:
+            s = (x or "").strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
+def _normalize_key_list(cfg: dict, single_key: str, plural_key: str) -> list[str]:
+    items: list[str] = []
+    raw = cfg.get(plural_key)
+    if isinstance(raw, list):
+        items.extend(raw)
+    elif cfg.get(single_key):
+        items.append(cfg[single_key])
+    return items
+
+
+def _normalize_url_list(cfg: dict) -> list[str]:
+    urls: list[str] = []
+    raw = cfg.get("ollama_urls")
+    if isinstance(raw, list):
+        urls.extend(raw)
+    elif cfg.get("ollama_url"):
+        urls.append(cfg["ollama_url"])
+    return [u.rstrip("/") for u in urls if u and str(u).strip()]
+
+
+def _rebuild_provider_pools(cfg: dict | None = None):
+    """Buduje pule z .llm_config.json + zmiennych środowiskowych."""
+    global GROQ_API_KEY, OPENROUTER_API_KEY, OLLAMA_URL
+    cfg = cfg or {}
+
+    groq_keys = _merge_unique(
+        _normalize_key_list(cfg, "groq_key", "groq_keys"),
+        _parse_env_list("GROQ_API_KEYS", "GROQ_API_KEY"),
+    )
+    if not groq_keys and GROQ_API_KEY:
+        groq_keys = [GROQ_API_KEY.strip()]
+    GROQ_KEY_POOL.set_items(groq_keys)
+    if groq_keys:
+        GROQ_API_KEY = groq_keys[0]
+
+    or_keys = _merge_unique(
+        _normalize_key_list(cfg, "openrouter_key", "openrouter_keys"),
+        _parse_env_list("OPENROUTER_API_KEYS", "OPENROUTER_API_KEY"),
+    )
+    if not or_keys and OPENROUTER_API_KEY:
+        or_keys = [OPENROUTER_API_KEY.strip()]
+    OPENROUTER_KEY_POOL.set_items(or_keys)
+    if or_keys:
+        OPENROUTER_API_KEY = or_keys[0]
+
+    ollama_urls = _merge_unique(
+        _normalize_url_list(cfg),
+        _parse_env_list("OLLAMA_URLS", "OLLAMA_URL"),
+    )
+    if not ollama_urls and OLLAMA_URL:
+        ollama_urls = [OLLAMA_URL.rstrip("/")]
+    OLLAMA_URL_POOL.set_items(ollama_urls)
+    if ollama_urls:
+        OLLAMA_URL = ollama_urls[0]
+
+
+def _ollama_bases() -> list[str]:
+    """Kolejność serwerów Ollama do próby (round-robin z puli)."""
+    if OLLAMA_URL_POOL.count():
+        bases: list[str] = []
+        seen: set[str] = set()
+        for _ in range(OLLAMA_URL_POOL.count()):
+            u = OLLAMA_URL_POOL.acquire()
+            if u:
+                u = u.rstrip("/")
+                if u not in seen:
+                    seen.add(u)
+                    bases.append(u)
+        if bases:
+            return bases
+    return [OLLAMA_URL.rstrip("/")]
+
+
+def _cloud_headers(cloud_cfg: dict, api_key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        **cloud_cfg.get("extra_headers", {}),
+    }
+
+
+def _next_cloud_key(cloud_cfg: dict, exclude: set[str] | None = None) -> str | None:
+    exclude = exclude or set()
+    pool = cloud_cfg.get("pool")
+    if pool and pool.count():
+        for _ in range(pool.count()):
+            k = pool.acquire()
+            if k and k not in exclude:
+                return k
+    k = cloud_cfg.get("api_key")
+    return k if k and k not in exclude else None
+
+
+def _should_rotate_pool(exc: Exception) -> bool:
+    return _is_rate_limit_error(exc) or _is_auth_error(exc) or _is_transient_llm_error(exc)
+
+
+_apply_llm_config(_load_llm_config())
+
+
+# ============================================================
+# LLM PROVIDER ABSTRACTION (Ollama / OpenRouter / Groq)
 # ============================================================
 
 def get_llm_provider(request_provider: str | None = None) -> str:
-    """Zwraca aktywny provider: 'ollama' lub 'openrouter'."""
+    """Zwraca aktywny provider: 'ollama', 'openrouter' lub 'groq'."""
     if request_provider:
         p = request_provider.lower()
-        if p in ("ollama", "openrouter"):
+        if p in ("ollama", "openrouter", "groq"):
             return p
     return DEFAULT_LLM_PROVIDER
+
+
+def _model_from_request(data: dict, provider: str | None = None) -> str | None:
+    """Model z body requestu (groq_model / openrouter_model)."""
+    prov = get_llm_provider(provider or data.get("llm_provider"))
+    if prov == "groq":
+        return data.get("groq_model") or data.get("openrouter_model")
+    if prov == "openrouter":
+        return data.get("openrouter_model")
+    return None
+
+
+def _cloud_llm_settings(prov: str) -> dict:
+    """Ustawienia chmurowego providera (OpenAI-compatible chat/completions)."""
+    if prov == "groq":
+        pool = GROQ_KEY_POOL
+        fallback_key = GROQ_API_KEY
+        return {
+            "api_key": pool.acquire() or fallback_key,
+            "url": GROQ_API_URL,
+            "default_model": GROQ_MODEL,
+            "verify_model": GROQ_MODEL_VERIFY,
+            "label": "Groq",
+            "key_env": "GROQ_API_KEY",
+            "extra_headers": {},
+            "pool": pool,
+        }
+    pool = OPENROUTER_KEY_POOL
+    return {
+        "api_key": pool.acquire() or OPENROUTER_API_KEY,
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "default_model": OPENROUTER_MODEL,
+        "verify_model": OPENROUTER_MODEL_VERIFY,
+        "label": "OpenRouter",
+        "key_env": "OPENROUTER_API_KEY",
+        "extra_headers": {
+            "HTTP-Referer": "http://localhost",
+            "X-Title": "AI Analiza Dokumentów",
+        },
+        "pool": pool,
+    }
 
 
 # ---- Rate limit helpers (OpenRouter) ----
@@ -1403,8 +1684,9 @@ def get_llm_provider(request_provider: str | None = None) -> str:
 
 def _check_ollama_health() -> dict:
     """Sprawdza czy Ollama działa i czy modele są dostępne."""
+    base = (_ollama_bases()[0] if _ollama_bases() else OLLAMA_URL).rstrip("/")
     try:
-        url = OLLAMA_URL + "/api/tags"
+        url = base + "/api/tags"
         with urllib.request.urlopen(url, timeout=4) as r:
             data = json.loads(r.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
@@ -1412,35 +1694,123 @@ def _check_ollama_health() -> dict:
             has_embed = any(EMBED_MODEL in m for m in models)
             return {
                 "ok": True,
-                "url": OLLAMA_URL,
+                "url": base,
+                "pool": OLLAMA_URL_POOL.stats(),
                 "models_available": len(models),
                 "has_llm": has_llm,
                 "has_embedding": has_embed,
                 "error": None
             }
     except Exception as e:
-        return {"ok": False, "url": OLLAMA_URL, "error": str(e)[:120]}
+        return {"ok": False, "url": base, "pool": OLLAMA_URL_POOL.stats(), "error": str(e)[:120]}
 
 
 def _check_openrouter_health() -> dict:
     """Lekkie sprawdzenie OpenRouter (czy klucz działa)."""
-    if not OPENROUTER_API_KEY:
-        return {"ok": False, "error": "Brak OPENROUTER_API_KEY"}
+    api_key = OPENROUTER_KEY_POOL.peek_primary() or OPENROUTER_API_KEY
+    pool_stats = OPENROUTER_KEY_POOL.stats()
+    if not api_key:
+        return {"ok": False, "error": "Brak OPENROUTER_API_KEY", "pool": pool_stats}
 
     try:
-        # Używamy lekkiego endpointu (list models jest darmowy i szybki)
         url = "https://openrouter.ai/api/v1/models"
-        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+        headers = {"Authorization": f"Bearer {api_key}"}
         req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode("utf-8"))
             return {
                 "ok": True,
                 "models_available": len(data.get("data", [])),
+                "pool": pool_stats,
                 "error": None
             }
     except Exception as e:
-        return {"ok": False, "error": str(e)[:120]}
+        return {"ok": False, "pool": pool_stats, "error": str(e)[:120]}
+
+
+def _format_cloud_api_error(exc: Exception, label: str = "API") -> str:
+    """Wyciąga czytelny komunikat z odpowiedzi OpenAI-compatible API (Groq/OpenRouter)."""
+    try:
+        if hasattr(exc, "response") and exc.response is not None:
+            body = exc.response.json()
+            msg = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else None
+            if msg:
+                if "blocked at the organization" in msg.lower():
+                    return (
+                        f"{msg} Włącz model w panelu organizacji: "
+                        "https://console.groq.com/settings/limits"
+                    )
+                return msg
+    except Exception:
+        pass
+    return str(exc)[:300]
+
+
+def _check_groq_health() -> dict:
+    """Sprawdza Groq: klucz + czy chat na domyślnym modelu nie jest zablokowany w org."""
+    api_key = GROQ_KEY_POOL.peek_primary() or GROQ_API_KEY
+    pool_stats = GROQ_KEY_POOL.stats()
+    if not api_key:
+        return {"ok": False, "kind": "no_key", "error": "Brak GROQ_API_KEY", "pool": pool_stats}
+
+    try:
+        r = requests.post(
+            GROQ_API_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 5,
+            },
+            timeout=15,
+        )
+        if r.status_code == 403:
+            err = (r.json().get("error") or {}).get("message", r.text)
+            err_lower = str(err).lower()
+            kind = "forbidden"
+            if "blocked at the organization" in err_lower or "console.groq.com" in err_lower:
+                kind = "org_blocked"
+            return {
+                "ok": False,
+                "kind": kind,
+                "error": str(err)[:200],
+                "hint": "https://console.groq.com/settings/limits",
+                "pool": pool_stats,
+            }
+        if r.status_code == 401:
+            return {"ok": False, "kind": "auth", "error": "Nieprawidłowy GROQ_API_KEY", "pool": pool_stats}
+        if r.status_code == 404:
+            return {"ok": False, "kind": "model_not_found", "error": f"Model '{GROQ_MODEL}' nie jest dostępny w Groq", "pool": pool_stats}
+        if r.status_code == 429:
+            return {"ok": False, "kind": "rate_limit", "error": "Groq rate limit (429)", "pool": pool_stats}
+        r.raise_for_status()
+        models_r = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=6,
+        )
+        models_count = len(models_r.json().get("data", [])) if models_r.ok else 0
+        return {
+            "ok": True,
+            "kind": "ok",
+            "models_available": models_count,
+            "model_tested": GROQ_MODEL,
+            "pool": pool_stats,
+            "error": None,
+        }
+    except Exception as e:
+        err = _format_cloud_api_error(e, "Groq")[:200]
+        err_lower = err.lower()
+        kind = "network"
+        if "429" in err_lower or "rate limit" in err_lower:
+            kind = "rate_limit"
+        elif "unauthorized" in err_lower or "401" in err_lower or "invalid api key" in err_lower:
+            kind = "auth"
+        elif "blocked at the organization" in err_lower or "console.groq.com" in err_lower:
+            kind = "org_blocked"
+        elif "model" in err_lower and "not found" in err_lower:
+            kind = "model_not_found"
+        return {"ok": False, "kind": kind, "error": err, "pool": pool_stats}
 
 
 def _sanitize_for_prompt(text: str, max_len: int = 1400) -> str:
@@ -1604,6 +1974,24 @@ def _is_transient_llm_error(exc: Exception) -> bool:
     return any(marker in msg for marker in transient_markers)
 
 
+def _is_auth_error(exc: Exception) -> bool:
+    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
+        try:
+            return exc.response.status_code in (401, 403)
+        except Exception:
+            pass
+    msg = str(exc).lower()
+    return "401" in msg or "403" in msg or "unauthorized" in msg or "invalid api key" in msg
+
+
+def _failure_cooldown(exc: Exception) -> float:
+    if _is_rate_limit_error(exc):
+        return min(_get_retry_after(exc) or 60.0, 120.0)
+    if _is_auth_error(exc):
+        return 300.0
+    return 30.0
+
+
 def _get_retry_after(exc: Exception) -> float | None:
     """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
     try:
@@ -1625,12 +2013,14 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
     """
     prov = get_llm_provider(provider)
 
-    if prov == "openrouter":
-        if not OPENROUTER_API_KEY:
-            raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
-        return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
-    else:
-        return _call_ollama(prompt, system, stream, model or LLM_MODEL)
+    if prov in ("openrouter", "groq"):
+        cfg = _cloud_llm_settings(prov)
+        if not cfg["api_key"]:
+            raise RuntimeError(f"Brak {cfg['key_env']} w .env")
+        return _call_cloud_chat(
+            cfg, prompt, system, stream, model or cfg["default_model"], max_tokens, temperature
+        )
+    return _call_ollama(prompt, system, stream, model or LLM_MODEL)
 
 
 def stream_llm_tokens(prompt: str, system: str = "",
@@ -1641,18 +2031,17 @@ def stream_llm_tokens(prompt: str, system: str = "",
     Używany w streamingowych endpointach.
     """
     prov = get_llm_provider(provider)
-    effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
+    cloud_cfg = _cloud_llm_settings(prov) if prov in ("openrouter", "groq") else None
+    effective_model = model or (cloud_cfg["default_model"] if cloud_cfg else LLM_MODEL)
 
-    if prov == "openrouter":
-        if not OPENROUTER_API_KEY:
-            yield "Błąd: Brak klucza OPENROUTER_API_KEY"
+    if prov in ("openrouter", "groq"):
+        if not cloud_cfg["api_key"]:
+            yield f"Błąd: Brak klucza {cloud_cfg['key_env']}"
             return
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        url = cloud_cfg["url"]
+        cloud_label = cloud_cfg["label"]
+        pool = cloud_cfg.get("pool")
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -1666,11 +2055,21 @@ def stream_llm_tokens(prompt: str, system: str = "",
             "temperature": temperature
         }
 
+        pool_size = max(1, pool.count()) if pool else 1
+        max_attempts = OPENROUTER_MAX_RETRIES * pool_size
+        current_key = cloud_cfg["api_key"]
+        keys_tried: set[str] = set()
         last_error = None
-        for attempt in range(OPENROUTER_MAX_RETRIES):
+
+        for attempt in range(max_attempts):
+            if not current_key:
+                break
+            headers = _cloud_headers(cloud_cfg, current_key)
             try:
                 with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
                     r.raise_for_status()
+                    if pool:
+                        pool.mark_success(current_key)
                     for line in r.iter_lines():
                         if not line:
                             continue
@@ -1690,65 +2089,78 @@ def stream_llm_tokens(prompt: str, system: str = "",
                                     return
                             except Exception:
                                 continue
-                return  # sukces
+                return
             except Exception as e:
                 last_error = e
+                if _should_rotate_pool(e) and pool and pool.count() > 1:
+                    pool.mark_failure(current_key, cooldown_sec=_failure_cooldown(e))
+                    keys_tried.add(current_key)
+                    next_key = _next_cloud_key(cloud_cfg, exclude=keys_tried)
+                    if next_key:
+                        logger.warning(
+                            "%s stream: rotacja klucza (%d/%d) — %s",
+                            cloud_label, attempt + 1, max_attempts, type(e).__name__,
+                        )
+                        current_key = next_key
+                        continue
                 if _is_rate_limit_error(e):
-                    if attempt < OPENROUTER_MAX_RETRIES - 1:
-                        wait = _get_retry_after(e) or (1.5 ** attempt)
+                    if attempt < max_attempts - 1:
+                        wait = _get_retry_after(e) or (1.5 ** (attempt % OPENROUTER_MAX_RETRIES))
                         wait = min(wait, 12.0)
-                        logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                        logger.warning(f"{cloud_label} 429 (próba {attempt+1}/{max_attempts}) — czekam {wait:.1f}s")
                         time.sleep(wait)
                     continue
-                else:
-                    # Inny błąd — nie retry'ujemy
-                    break
+                break
 
         # Po wyczerpaniu prób
         err_msg = str(last_error) if last_error else "nieznany błąd"
 
-        # Opcjonalny automatyczny fallback na Ollama przy rate limitach OpenRouter
+        # Opcjonalny automatyczny fallback na Ollama przy rate limitach chmury
         if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
-            logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
-            # Przepuść przez ścieżkę Ollama
-            ollama_url = OLLAMA_URL + "/api/generate"
-            ollama_payload = {
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "system": system,
-                "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2}
-            }
-            try:
-                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
-                    r.raise_for_status()
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            tok = data.get("response", "")
-                            if tok:
-                                yield tok
-                            if data.get("done", False):
-                                return
-                        except Exception:
-                            continue
-                return
-            except Exception as fb_err:
-                yield f"[Błąd fallback na Ollama: {fb_err}]"
-                return
+            yield f"[FALLBACK] Limit {cloud_label} — przełączam na lokalny Ollama...\n\n"
+            logger.info(f"{cloud_label} rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+            for base in _ollama_bases():
+                ollama_url = base + "/api/generate"
+                ollama_payload = {
+                    "model": LLM_MODEL,
+                    "prompt": prompt,
+                    "system": system,
+                    "stream": True,
+                    "options": {"temperature": temperature if temperature is not None else 0.2}
+                }
+                try:
+                    with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
+                        r.raise_for_status()
+                        OLLAMA_URL_POOL.mark_success(base)
+                        for line in r.iter_lines():
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                                tok = data.get("response", "")
+                                if tok:
+                                    yield tok
+                                if data.get("done", False):
+                                    return
+                            except Exception:
+                                continue
+                    return
+                except Exception as fb_err:
+                    OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
+                    last_error = fb_err
+                    continue
+            yield f"[Błąd fallback na Ollama: {last_error}]"
+            return
 
         if _is_rate_limit_error(last_error):
-            friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
+            friendly = f"[RATE_LIMIT] Przekroczono limit zapytań {cloud_label}. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
             yield friendly
         else:
-            yield f"[Błąd OpenRouter streaming: {err_msg}]"
+            detail = _format_cloud_api_error(last_error, cloud_label) if last_error else err_msg
+            yield f"[Błąd {cloud_label} streaming: {detail}]"
 
     else:
-        # Ollama streaming
-        url = OLLAMA_URL + "/api/generate"
+        # Ollama streaming — rotacja serwerów z puli
         payload = {
             "model": effective_model,
             "prompt": prompt,
@@ -1756,27 +2168,34 @@ def stream_llm_tokens(prompt: str, system: str = "",
             "stream": True,
             "options": {"temperature": temperature}
         }
-        try:
-            with requests.post(url, json=payload, stream=True, timeout=300) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        token = data.get("response", "")
-                        if token:
-                            yield token
-                        if data.get("done", False):
-                            break
-                    except Exception:
-                        continue
-        except Exception as e:
-            yield f"[Błąd Ollama streaming: {str(e)}]"
+        last_error = None
+        for base in _ollama_bases():
+            url = base + "/api/generate"
+            try:
+                with requests.post(url, json=payload, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    OLLAMA_URL_POOL.mark_success(base)
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            token = data.get("response", "")
+                            if token:
+                                yield token
+                            if data.get("done", False):
+                                return
+                        except Exception:
+                            continue
+                    return
+            except Exception as e:
+                last_error = e
+                OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
+                logger.warning("Ollama stream (%s): %s — próba następnego serwera", base, e)
+        yield f"[Błąd Ollama streaming: {last_error}]"
 
 
 def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
-    url = OLLAMA_URL + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -1784,35 +2203,44 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | r
         "stream": stream,
         "options": {"temperature": 0.2}
     }
-    if stream:
-        return requests.post(url, json=payload, stream=True, timeout=300)
-
     last_error = None
-    for attempt in range(3):
-        try:
-            r = requests.post(url, json=payload, timeout=180)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_error = e
-            if _is_transient_llm_error(e) and attempt < 2:
-                wait = min(6.0, 0.5 * (2 ** attempt))
-                logger.warning(f"Ollama LLM transient error (próba {attempt+1}/3) — czekam {wait:.1f}s: {e}")
-                time.sleep(wait)
+    for base in _ollama_bases():
+        url = base + "/api/generate"
+        if stream:
+            try:
+                r = requests.post(url, json=payload, stream=True, timeout=300)
+                r.raise_for_status()
+                OLLAMA_URL_POOL.mark_success(base)
+                return r
+            except Exception as e:
+                last_error = e
+                OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
+                logger.warning("Ollama stream call (%s): %s — następny serwer", base, e)
                 continue
-            break
+        for attempt in range(3):
+            try:
+                r = requests.post(url, json=payload, timeout=180)
+                r.raise_for_status()
+                OLLAMA_URL_POOL.mark_success(base)
+                return r.json()
+            except Exception as e:
+                last_error = e
+                if _is_transient_llm_error(e) and attempt < 2:
+                    wait = min(6.0, 0.5 * (2 ** attempt))
+                    logger.warning(f"Ollama LLM transient error (próba {attempt+1}/3) — czekam {wait:.1f}s: {e}")
+                    time.sleep(wait)
+                    continue
+                break
+        OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
 
     raise last_error if last_error else RuntimeError("Ollama call failed")
 
 
-def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
+def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, model: str,
                      max_tokens: int, temperature: float) -> dict | requests.Response:
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "http://localhost",  # opcjonalnie
-        "X-Title": "AI Analiza Dokumentów"
-    }
+    url = cloud_cfg["url"]
+    cloud_label = cloud_cfg["label"]
+    pool = cloud_cfg.get("pool")
 
     messages = []
     if system:
@@ -1827,31 +2255,52 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
         "temperature": temperature
     }
 
+    pool_size = max(1, pool.count()) if pool else 1
+    max_attempts = OPENROUTER_MAX_RETRIES * pool_size
+    current_key = cloud_cfg["api_key"]
+    keys_tried: set[str] = set()
+
     if stream:
+        headers = _cloud_headers(cloud_cfg, current_key)
         return requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
 
-    # Non-streaming with retry on 429
     last_error = None
-    for attempt in range(OPENROUTER_MAX_RETRIES):
+    for attempt in range(max_attempts):
+        if not current_key:
+            break
+        headers = _cloud_headers(cloud_cfg, current_key)
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=180)
             r.raise_for_status()
             data = r.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if pool:
+                pool.mark_success(current_key)
             return {"response": content, "raw": data}
         except Exception as e:
             last_error = e
+            if _should_rotate_pool(e) and pool and pool.count() > 1:
+                pool.mark_failure(current_key, cooldown_sec=_failure_cooldown(e))
+                keys_tried.add(current_key)
+                next_key = _next_cloud_key(cloud_cfg, exclude=keys_tried)
+                if next_key:
+                    logger.warning(
+                        "%s: rotacja klucza (%d/%d) — %s",
+                        cloud_label, attempt + 1, max_attempts, type(e).__name__,
+                    )
+                    current_key = next_key
+                    continue
             if _is_rate_limit_error(e):
-                if attempt < OPENROUTER_MAX_RETRIES - 1:
-                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                if attempt < max_attempts - 1:
+                    wait = _get_retry_after(e) or (1.5 ** (attempt % OPENROUTER_MAX_RETRIES))
                     wait = min(wait, 12.0)
-                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    logger.warning(f"{cloud_label} 429 (non-stream, próba {attempt+1}/{max_attempts}) — czekam {wait:.1f}s")
                     time.sleep(wait)
                 continue
             if _is_transient_llm_error(e):
-                if attempt < OPENROUTER_MAX_RETRIES - 1:
-                    wait = min(6.0, 0.5 * (2 ** attempt))
-                    logger.warning(f"OpenRouter transient error (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s: {e}")
+                if attempt < max_attempts - 1:
+                    wait = min(6.0, 0.5 * (2 ** (attempt % OPENROUTER_MAX_RETRIES)))
+                    logger.warning(f"{cloud_label} transient error (non-stream, próba {attempt+1}/{max_attempts}) — czekam {wait:.1f}s: {e}")
                     time.sleep(wait)
                     continue
                 break
@@ -1863,7 +2312,7 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                     except Exception:
                         status = None
                     if status == 400:
-                        logger.warning("OpenRouter 400 → fallback do Ollama")
+                        logger.warning(f"{cloud_label} 400 → fallback do Ollama")
                         result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
                         if isinstance(result, dict):
                             return result
@@ -1872,13 +2321,15 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
 
     # Final failure — optional fallback na Ollama (np. generowanie SQL / synteza)
     if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
+        logger.info(f"{cloud_label} rate limit (non-stream) → fallback do Ollama")
         result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
         if isinstance(result, dict):
             return result
         return {"response": str(result)}
 
-    raise last_error if last_error else RuntimeError("OpenRouter call failed")
+    if last_error:
+        raise RuntimeError(_format_cloud_api_error(last_error, cloud_label)) from last_error
+    raise RuntimeError(f"{cloud_label} call failed")
 
 
 # ---- Qdrant Client (reuse connection) ----
@@ -1956,39 +2407,44 @@ def get_embedding(text: str) -> list:
     except Exception as e:
         logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
-    # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
-    url = OLLAMA_URL + "/api/embeddings"
+    # 2. Jeśli nie ma w cache, odpytaj Ollamę (rotacja serwerów + retry przy Connection reset)
     payload = {"model": EMBED_MODEL, "prompt": text[:1500]}
+    last_error = None
 
-    for attempt in range(4):  # max 4 próby
-        try:
-            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                         headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=45) as r:
-                vec = json.loads(r.read().decode("utf-8"))["embedding"]
-
-            # 3. Zapisz nowy wektor natychmiast do bazy SQLite
+    for base in _ollama_bases():
+        url = base + "/api/embeddings"
+        for attempt in range(4):
             try:
-                with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
-                    conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
-                                 (key, json.dumps(vec)))
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    vec = json.loads(r.read().decode("utf-8"))["embedding"]
+
+                try:
+                    with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+                        conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
+                                     (key, json.dumps(vec)))
+                except Exception as e:
+                    logger.warning(f"Błąd zapisu cache embeddingów: {e}")
+
+                OLLAMA_URL_POOL.mark_success(base)
+                return vec
+
             except Exception as e:
-                logger.warning(f"Błąd zapisu cache embeddingów: {e}")
+                last_error = e
+                if "Connection reset by peer" in str(e) or "104" in str(e) or _is_transient_llm_error(e):
+                    wait = (2 ** attempt) * 0.4
+                    logger.warning(f"Ollama embedding ({base}, próba {attempt+1}/4) — czekam {wait:.1f}s...")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"Ollama Embedding Error ({base}): {e}")
+                break
+        OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
 
-            return vec
-
-        except Exception as e:
-            if "Connection reset by peer" in str(e) or "104" in str(e):
-                wait = (2 ** attempt) * 0.4   # 0.4s, 0.8s, 1.6s, 3.2s
-                logger.warning(f"Ollama embedding reset (próba {attempt+1}/4) — czekam {wait:.1f}s...")
-                time.sleep(wait)
-                continue
-            else:
-                logger.error(f"Ollama Embedding Error: {e}")
-                raise EmbeddingError(f"Błąd embeddingu Ollama: {e}") from e
-
-    logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
-    raise EmbeddingError("Embedding niedostępny — Ollama nie odpowiada (connection reset)")
+    if last_error and ("Connection reset" in str(last_error) or "104" in str(last_error)):
+        logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
+        raise EmbeddingError("Embedding niedostępny — Ollama nie odpowiada (connection reset)")
+    raise EmbeddingError(f"Błąd embeddingu Ollama: {last_error}") from last_error
 
 def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
     """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
@@ -2264,8 +2720,8 @@ def generate_answer(
         return str(result)
     except Exception as e:
         prov = get_llm_provider(provider)
-        if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov == "openrouter":
-            logger.warning("generate_answer: OpenRouter 429 → fallback do Ollama")
+        if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov in ("openrouter", "groq"):
+            logger.warning(f"generate_answer: {prov} 429 → fallback do Ollama")
             try:
                 result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
                 if isinstance(result, dict):
@@ -2275,7 +2731,7 @@ def generate_answer(
                 return f"[RATE_LIMIT + Błąd fallback] {fb_e}"
         logger.error(f"LLM error in generate_answer ({prov}): {e}")
         if _is_rate_limit_error(e):
-            return "[RATE_LIMIT] Przekroczono limit OpenRouter. Spróbuj później lub użyj Ollama."
+            return "[RATE_LIMIT] Przekroczono limit API chmury. Spróbuj później lub użyj Ollama."
         return f"Błąd syntezy LLM ({prov}): {e}"
 
 def verify_answer(answer: str, contexts: list, query: str, provider: str | None = None, model: str | None = None) -> dict:
@@ -2310,8 +2766,9 @@ def verify_answer(answer: str, contexts: list, query: str, provider: str | None 
     try:
         # Używamy dedykowanego modelu do weryfikacji (jeśli ustawiony), żeby nie dobić limitu tego samego modelu co główna odpowiedź
         effective_verify_model = model
-        if not effective_verify_model and get_llm_provider(provider) == "openrouter":
-            effective_verify_model = OPENROUTER_MODEL_VERIFY
+        prov_verify = get_llm_provider(provider)
+        if not effective_verify_model and prov_verify in ("openrouter", "groq"):
+            effective_verify_model = _cloud_llm_settings(prov_verify)["verify_model"]
         result = call_llm(prompt=prompt, system=system, stream=False, provider=provider, model=effective_verify_model)
         raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
@@ -2355,7 +2812,7 @@ def verify_endpoint():
     query    = data.get('query', '').strip()
     contexts = data.get('contexts', [])
     llm_provider = data.get('llm_provider')
-    openrouter_model = data.get('openrouter_model')
+    openrouter_model = _model_from_request(data, data.get('llm_provider'))
     if not answer or not query or not contexts:
         return jsonify({"success": False, "error": "Brak danych do weryfikacji"})
     # Przekazujemy provider, żeby weryfikacja też szła przez wybrany model (w tym osobny model_verify)
@@ -3345,7 +3802,7 @@ def hybrid_stream():
         mode = 'normal'
     file_filter= data.get('file_filter', None)
     llm_provider = data.get('llm_provider')
-    openrouter_model = data.get('openrouter_model')
+    openrouter_model = _model_from_request(data, data.get('llm_provider'))
 
     if not query_text:
         return jsonify({"success": False, "error": "Zapytanie puste"}), 400
@@ -3498,7 +3955,7 @@ def search_stream():
 
             # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
-            openrouter_model = data.get("openrouter_model")
+            openrouter_model = _model_from_request(data, data.get("llm_provider"))
 
             try:
                 for token in stream_llm_tokens(
@@ -3551,7 +4008,7 @@ def search():
         if file_filter and not raw_contexts:
             return jsonify({"success": True, "results": [], "ai_answer": "Brak dokumentów dla wybranego pliku."})
 
-        openrouter_model = data.get("openrouter_model")
+        openrouter_model = _model_from_request(data, data.get("llm_provider"))
         ai_answer = (
             generate_answer(
                 query_text,
@@ -3587,7 +4044,7 @@ def analyze():
     file_filter = data.get('file_filter')
     mode = data.get('mode', 'normal')
     llm_provider = data.get('llm_provider')
-    openrouter_model = data.get('openrouter_model')
+    openrouter_model = _model_from_request(data, data.get('llm_provider'))
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -4257,7 +4714,7 @@ def build_network():
     query = data.get('query', '').strip()
     limit = min(int(data.get('limit', 10)), 20)
     llm_provider = data.get('llm_provider')
-    openrouter_model = data.get("openrouter_model")
+    openrouter_model = _model_from_request(data, data.get("llm_provider"))
     include_briefing = data.get("include_briefing", True)
     BATCH_SIZE = 5
 
@@ -4398,7 +4855,7 @@ def timeline_endpoint():
     query_text = (data.get('query') or '').strip()
     limit = min(int(data.get('limit', 20)), 50)
     llm_provider = data.get('llm_provider')
-    openrouter_model = data.get('openrouter_model')
+    openrouter_model = _model_from_request(data, data.get('llm_provider'))
 
     def generate():
         def sse(event, payload):
@@ -5713,14 +6170,18 @@ def health():
         parsers = _file_parsers_health() if not light else {}
         ollama_h = {"ok": True} if light else _check_ollama_health()
         or_h = {"ok": True} if light else _check_openrouter_health()
+        groq_h = {"ok": True} if light else _check_groq_health()
 
-        # LLM status (preferuj OpenRouter jeśli skonfigurowany)
+        # LLM status — według aktywnego providera
         llm_ok = False
         llm_detail = ""
         if light:
             llm_ok = True
             llm_detail = "light"
-        elif APP_API_KEY or os.environ.get("OPENROUTER_API_KEY"):
+        elif DEFAULT_LLM_PROVIDER == "groq":
+            llm_ok = groq_h.get("ok", False)
+            llm_detail = groq_h.get("error") or "Groq"
+        elif DEFAULT_LLM_PROVIDER == "openrouter":
             llm_ok = or_h.get("ok", False)
             llm_detail = or_h.get("error") or "OpenRouter"
         else:
@@ -5757,13 +6218,27 @@ def health():
             "success": True,
             "overall": overall,
             "version": ver,
+            "llm_model": (
+                GROQ_MODEL if DEFAULT_LLM_PROVIDER == "groq"
+                else OPENROUTER_MODEL if DEFAULT_LLM_PROVIDER == "openrouter"
+                else LLM_MODEL
+            ),
             "timestamp": int(time.time()),
 
             # Połączenia (dla kropek i tabeli w modalu)
             "qdrant": q,
             "qdrant_status": "ok" if q.get("ok") else "error",
-            "llm": {"ok": llm_ok, "detail": llm_detail},
+            "llm": {
+                "ok": llm_ok,
+                "detail": llm_detail,
+                "kind": groq_h.get("kind") if DEFAULT_LLM_PROVIDER == "groq" else (
+                    or_h.get("kind") if DEFAULT_LLM_PROVIDER == "openrouter" else (
+                        ollama_h.get("kind") if DEFAULT_LLM_PROVIDER == "ollama" else None
+                    )
+                ),
+            },
             "llm_status": "ok" if llm_ok else "warn",
+            "llm_error": llm_detail if not llm_ok else None,
             "embedding": {
                 "ok": ollama_h.get("ok", False),  # embeddingi idą przez Ollama
                 "model": "nomic-embed-text"
@@ -5787,6 +6262,11 @@ def health():
             # Inne przydatne dla UI
             "provider": DEFAULT_LLM_PROVIDER,
             "app_api_key_set": bool(APP_API_KEY),
+            "pools": {
+                "groq": GROQ_KEY_POOL.stats(),
+                "openrouter": OPENROUTER_KEY_POOL.stats(),
+                "ollama": OLLAMA_URL_POOL.stats(),
+            },
         })
     except Exception as e:
         logger.exception("health endpoint error")

@@ -215,10 +215,14 @@
         <select id="groqModelSelect" onchange="onGroqModelSelectChange()"
                 style="display:none; background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:6px; cursor:pointer; font-size:0.7rem; max-width:220px;">
             <option value="">-- model Groq --</option>
+            <option value="groq/compound">Compound ★ agent</option>
+            <option value="groq/compound-mini">Compound Mini</option>
             <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
+            <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B</option>
+            <option value="qwen/qwen3-32b">Qwen3 32B</option>
+            <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
+            <option value="openai/gpt-oss-20b">GPT-OSS 20B</option>
             <option value="llama-3.1-8b-instant">Llama 3.1 8B (szybki)</option>
-            <option value="gemma2-9b-it">Gemma2 9B</option>
-            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
             <option value="custom">Własny…</option>
         </select>
         <input id="groqModelInput" type="text" placeholder="model Groq"
@@ -1073,10 +1077,14 @@
         <div class="col-md-6" id="cfgGroqModelWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">Model Groq</label>
           <select id="cfgGroqModelSelect" class="form-select form-select-sm" onchange="cfgGroqModelSyncInput()">
+            <option value="groq/compound">Compound ★ agent</option>
+            <option value="groq/compound-mini">Compound Mini</option>
             <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
+            <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B</option>
+            <option value="qwen/qwen3-32b">Qwen3 32B</option>
+            <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
+            <option value="openai/gpt-oss-20b">GPT-OSS 20B</option>
             <option value="llama-3.1-8b-instant">Llama 3.1 8B (szybki)</option>
-            <option value="gemma2-9b-it">Gemma2 9B</option>
-            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
             <option value="custom">Własny…</option>
           </select>
           <input type="text" id="cfgGroqModel" class="form-control form-control-sm mt-1 font-monospace" placeholder="llama-3.3-70b-versatile" style="font-size:0.75rem;">
@@ -5237,12 +5245,67 @@ function buildCheckRow(label, state, detail) {
     return tr;
 }
 
+function getStartupHealthMissingFields(d) {
+    const missing = [];
+    if (!d || typeof d !== 'object') return ['pełny payload /health'];
+    if (d.success !== true) missing.push('success=true');
+    if (!('version' in d)) missing.push('version');
+    if (!('overall' in d)) missing.push('overall');
+    if (!('provider' in d)) missing.push('provider');
+    if (!('llm_model' in d)) missing.push('llm_model');
+    if (!('qdrant' in d)) missing.push('qdrant');
+    if (!('llm' in d)) missing.push('llm');
+    if (!('embedding' in d)) missing.push('embedding');
+    if (!('file_parsers' in d)) missing.push('file_parsers');
+    if (!('ocr' in d)) missing.push('ocr');
+    return missing;
+}
+
+function renderStartupHealthError(d, missing) {
+    const modal = document.getElementById('startupModal');
+    const connectionsBody = document.getElementById('startupConnectionsBody');
+    const componentsBody = document.getElementById('startupComponentsBody');
+    const overallEl = document.getElementById('startupOverallStatus');
+
+    if (overallEl) {
+        overallEl.innerHTML = `<strong style="color:#991b1b;">⚠️ Diagnostyka startowa niepełna</strong><div style="margin-top:4px;font-size:0.82rem;font-weight:500;color:#7f1d1d;">/health nie zwrócił pełnego payloadu: ${escapeHtml(missing.join(', '))}</div>`;
+        overallEl.style.background = '#fef2f2';
+        overallEl.style.borderLeft = '4px solid #ef4444';
+    }
+
+    if (connectionsBody) {
+        connectionsBody.innerHTML = '';
+        connectionsBody.append(
+            buildCheckRow('Diagnostyka', 'error', '/health nie zwrócił pełnego payloadu'),
+            buildCheckRow('Braki', 'warn', missing.join(', ')),
+        );
+    }
+
+    if (componentsBody) {
+        componentsBody.innerHTML = '';
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 3;
+        td.style.cssText = 'padding:8px 4px;color:#991b1b;font-size:0.85rem;';
+        td.textContent = 'Nie można ocenić komponentów, bo diagnostyka startowa jest niepełna.';
+        tr.appendChild(td);
+        componentsBody.appendChild(tr);
+    }
+
+    if (modal) modal.style.display = 'flex';
+}
+
 function showStartupChecklist(d) {
     window._lastHealthData = d; // dla przycisku "Kopiuj diagnostykę"
 
     const modal = document.getElementById('startupModal');
     const connectionsBody = document.getElementById('startupConnectionsBody');
     const componentsBody = document.getElementById('startupComponentsBody');
+    const missing = getStartupHealthMissingFields(d);
+    if (missing.length) {
+        renderStartupHealthError(d, missing);
+        return;
+    }
 
     if (!connectionsBody || !componentsBody) {
         // Bezpieczny fallback (nie powinien się zdarzyć po pełnej implementacji modala)
@@ -5345,6 +5408,7 @@ function getLlmDetail(d) {
     const provider = d.llm_provider || d.provider || 'ollama';
     const model = d.llm_model || '';
     const state = d.llm_status || (d.llm?.ok ? 'ok' : 'error');
+    const kind = d.llm?.kind || d.llm_kind || '';
 
     if (state === 'ok') {
         if (provider === 'openrouter') return `Połączono · OpenRouter (${model})`;
@@ -5352,6 +5416,15 @@ function getLlmDetail(d) {
         return `Połączono · Ollama (${model})`;
     }
     if (state === 'no_key') return 'Brak klucza API — przełącz na Ollama lub dodaj klucz w panelu LLM Config';
+
+    if (provider === 'groq') {
+        if (kind === 'no_key') return 'Groq: brak `GROQ_API_KEY`';
+        if (kind === 'auth') return 'Groq: nieprawidłowy klucz API';
+        if (kind === 'org_blocked') return 'Groq: model zablokowany w organizacji';
+        if (kind === 'model_not_found') return `Groq: model "${model}" niedostępny`;
+        if (kind === 'rate_limit') return 'Groq: rate limit (429) — spróbuj ponownie za chwilę';
+        if (kind === 'network') return 'Groq: problem z połączeniem sieciowym';
+    }
 
     const err = (d.llm_error || d.llm?.error || '').toLowerCase();
     const providerLabel = provider === 'groq' ? 'Groq' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama';
@@ -5424,6 +5497,19 @@ function refreshStartupChecklist() {
 
 function copyDiagnostics() {
     const data = window._lastHealthData || {};
+    const missing = getStartupHealthMissingFields(data);
+    if (missing.length) {
+        const text = [
+            'Diagnostyka startowa niepełna.',
+            `Brakuje pól /health: ${missing.join(', ')}`,
+            'Odśwież modal diagnostyczny lub zrestartuj usługi.',
+        ].join('\n');
+
+        navigator.clipboard.writeText(text).catch(() => {
+            prompt('Skopiuj poniższy tekst:', text);
+        });
+        return;
+    }
     const text = [
         `Wersja: ${data.version || '?'}`,
         `Czas: ${new Date().toLocaleString('pl-PL')}`,
