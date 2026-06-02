@@ -1587,6 +1587,23 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
+def _is_transient_llm_error(exc: Exception) -> bool:
+    """Sprawdza chwilowe błędy transportowe, które warto ponowić."""
+    msg = str(exc).lower()
+    transient_markers = (
+        "connection reset by peer",
+        "connection aborted",
+        "remote disconnected",
+        "incomplete read",
+        "broken pipe",
+        "timed out",
+        "timeout",
+        "104",
+        "connection reset",
+    )
+    return any(marker in msg for marker in transient_markers)
+
+
 def _get_retry_after(exc: Exception) -> float | None:
     """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
     try:
@@ -1769,10 +1786,23 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | r
     }
     if stream:
         return requests.post(url, json=payload, stream=True, timeout=300)
-    else:
-        r = requests.post(url, json=payload, timeout=180)
-        r.raise_for_status()
-        return r.json()
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json=payload, timeout=180)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_error = e
+            if _is_transient_llm_error(e) and attempt < 2:
+                wait = min(6.0, 0.5 * (2 ** attempt))
+                logger.warning(f"Ollama LLM transient error (próba {attempt+1}/3) — czekam {wait:.1f}s: {e}")
+                time.sleep(wait)
+                continue
+            break
+
+    raise last_error if last_error else RuntimeError("Ollama call failed")
 
 
 def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
@@ -1818,6 +1848,13 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                     logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
                     time.sleep(wait)
                 continue
+            if _is_transient_llm_error(e):
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = min(6.0, 0.5 * (2 ** attempt))
+                    logger.warning(f"OpenRouter transient error (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s: {e}")
+                    time.sleep(wait)
+                    continue
+                break
             else:
                 # 400 (zły model/ payload) — opcjonalny fallback na Ollama
                 if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
@@ -4460,7 +4497,10 @@ def timeline_endpoint():
                 raw_resp = result.get("response", str(result)) if isinstance(result, dict) else str(result)
             except Exception as llm_err:
                 logger.exception(f"Timeline LLM error: {llm_err}")
-                yield sse("error", {"error": f"Błąd LLM: {str(llm_err)[:200]}"})
+                if _is_transient_llm_error(llm_err):
+                    yield sse("error", {"error": "Błąd LLM: chwilowa niedostępność modelu. Spróbuj ponownie za chwilę."})
+                else:
+                    yield sse("error", {"error": f"Błąd LLM: {str(llm_err)[:200]}"})
                 return
 
             # Parsowanie JSON'a
