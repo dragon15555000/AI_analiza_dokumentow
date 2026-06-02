@@ -2092,6 +2092,76 @@ SEARCH_MODES = {
     }
 }
 
+# ---- Model Registry ----
+MODEL_REGISTRY: dict = {
+    "meta-llama/llama-3.3-70b-instruct:free": {
+        "name": "Llama 3.3 70B", "short": "Llama 70B", "provider": "Meta",
+        "icon": "🌟", "context_k": 128, "speed_tier": 2, "quality_tier": 3,
+        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "tags": ["analiza", "prawo", "długi_kontekst", "raporty", "rozumowanie"],
+    },
+    "google/gemini-2.0-flash-exp:free": {
+        "name": "Gemini 2.0 Flash", "short": "Gemini Flash", "provider": "Google",
+        "icon": "⚡", "context_k": 1000, "speed_tier": 1, "quality_tier": 2,
+        "free": True, "rate_rpm": 15, "rate_day": 1500,
+        "tags": ["szybkość", "bardzo_długi_kontekst", "podsumowania"],
+    },
+    "mistralai/mistral-7b-instruct:free": {
+        "name": "Mistral 7B", "short": "Mistral 7B", "provider": "Mistral AI",
+        "icon": "🎯", "context_k": 32, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 30, "rate_day": 500,
+        "tags": ["szybkość", "krótkie_pytania", "klasyfikacja"],
+    },
+    "qwen/qwen-2.5-7b-instruct:free": {
+        "name": "Qwen 2.5 7B", "short": "Qwen 7B", "provider": "Alibaba",
+        "icon": "🔷", "context_k": 128, "speed_tier": 1, "quality_tier": 2,
+        "free": True, "rate_rpm": 20, "rate_day": 300,
+        "tags": ["dane_strukturalne", "tabele", "kod", "ekstrakcja"],
+    },
+    "meta-llama/llama-3.1-8b-instruct:free": {
+        "name": "Llama 3.1 8B", "short": "Llama 8B", "provider": "Meta",
+        "icon": "🏃", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "tags": ["szybkość", "klasyfikacja", "ekstrakcja", "fragmenty"],
+    },
+    "deepseek/deepseek-r1:free": {
+        "name": "DeepSeek R1", "short": "DeepSeek R1", "provider": "DeepSeek",
+        "icon": "🧠", "context_k": 64, "speed_tier": 3, "quality_tier": 3,
+        "free": True, "rate_rpm": 10, "rate_day": 100,
+        "tags": ["rozumowanie", "matematyka", "analiza_krok_po_kroku"],
+    },
+    "microsoft/phi-3-mini-128k-instruct:free": {
+        "name": "Phi-3 Mini 128k", "short": "Phi-3 Mini", "provider": "Microsoft",
+        "icon": "🔬", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "tags": ["szybkość", "długi_kontekst", "fragmenty"],
+    },
+}
+
+# Statystyki live (reset przy restarcie)
+_model_live: dict = {
+    mid: {"ping_ok": None, "ping_ms": None, "ping_ts": None,
+          "err_count": 0, "ok_count": 0, "avg_ms": None}
+    for mid in MODEL_REGISTRY
+}
+
+
+def _model_score(model_id: str) -> float:
+    """Ranking 0–100. Jakość 40% + szybkość 30% + dostępność 30%."""
+    reg = MODEL_REGISTRY.get(model_id, {})
+    live = _model_live.get(model_id, {})
+    if live.get("ping_ok") is False:
+        return 0.0
+    quality = (reg.get("quality_tier", 1) - 1) / 2 * 40
+    speed   = (4 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej
+    if live.get("ping_ok") is True:
+        ms = live.get("avg_ms") or live.get("ping_ms") or 15000
+        avail = max(0.0, 30.0 - ms / 500.0)
+    else:
+        avail = 12.0  # nieznany — neutralny
+    return round(quality + speed + avail, 1)
+
+
 def _embedding_query_for_mode(query_text: str, mode: str) -> str:
     """Zapytanie do embeddingu — bez historii rozmowy; detective lekko poszerza semantykę."""
     q = (query_text or "").strip()
@@ -3972,6 +4042,105 @@ def agents_swarm_modes():
         "success": True,
         "modes": {k: {"label": v["label"], "desc": v["desc"]} for k, v in SWARM_MODES.items()},
     })
+
+
+# ===== MODEL FLEET =====
+
+@app.route('/api/models/registry', methods=['GET'])
+def models_registry_endpoint():
+    """Zwraca rejestr modeli + live statystyki."""
+    out = {}
+    for mid, info in MODEL_REGISTRY.items():
+        live = _model_live.get(mid, {})
+        out[mid] = {**info, "live": live, "score": _model_score(mid)}
+    return jsonify({"success": True, "models": out})
+
+
+@app.route('/api/models/ping/all', methods=['POST'])
+def models_ping_all():
+    """SSE: pinguje wszystkie modele równolegle i streamuje wyniki."""
+    _require_api_key()
+    TEST = "Odpowiedz jednym słowem: OK"
+
+    def generate():
+        import queue as _q
+        import json as _json
+
+        def sse(event, data):
+            payload = {"event": event, "data": data}
+            return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        rq: _q.Queue = _q.Queue()
+        yield sse('start', {'count': len(MODEL_REGISTRY)})
+
+        def _ping(mid: str):
+            t0 = time.time()
+            try:
+                res = call_llm(prompt=TEST, system="", stream=False,
+                               provider='openrouter', model=mid)
+                txt = _llm_response_text(res)
+                ms  = int((time.time() - t0) * 1000)
+                ok  = bool(txt and not txt.startswith('[') )
+                rq.put((mid, ok, ms, None))
+            except Exception as exc:
+                rq.put((mid, False, int((time.time() - t0) * 1000), str(exc)[:120]))
+
+        threads = [threading.Thread(target=_ping, args=(mid,), daemon=True)
+                   for mid in MODEL_REGISTRY]
+        for t in threads: t.start()
+
+        done = 0
+        while done < len(MODEL_REGISTRY):
+            try:
+                mid, ok, ms, err = rq.get(timeout=90)
+            except Exception:
+                yield sse('timeout', {}); break
+            live = _model_live[mid]
+            live['ping_ok'] = ok; live['ping_ms'] = ms
+            live['ping_ts'] = time.time()
+            if ok:
+                live['ok_count'] += 1
+                prev = live.get('avg_ms')
+                live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
+            else:
+                live['err_count'] += 1
+            score = _model_score(mid)
+            live_copy = dict(live)
+            yield sse('result', {
+                'model_id': mid,
+                'ok': ok, 'ms': ms, 'err': err,
+                'score': score,
+                'avg_ms': live_copy.get('avg_ms'),
+            })
+            done += 1
+
+        yield sse('done', {'pinged': done})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/models/recommend', methods=['GET'])
+def models_recommend():
+    """Zwraca ranking modeli dla zadanego typu zadania i min. kontekstu."""
+    task  = request.args.get('task', 'analysis')
+    ctx_k = int(request.args.get('context_k', 8))
+    task_tags = {
+        'analysis': ['analiza', 'prawo', 'raporty', 'rozumowanie'],
+        'speed':    ['szybkość', 'krótkie_pytania', 'klasyfikacja'],
+        'data':     ['dane_strukturalne', 'tabele', 'ekstrakcja'],
+        'long':     ['bardzo_długi_kontekst', 'długi_kontekst'],
+    }.get(task, [])
+    ranked = []
+    for mid, info in MODEL_REGISTRY.items():
+        if info.get('context_k', 0) < ctx_k:
+            continue
+        base  = _model_score(mid)
+        bonus = sum(4 for t in info.get('tags', []) if t in task_tags)
+        ranked.append({'model_id': mid, 'name': info['name'], 'icon': info['icon'],
+                       'score': round(base + bonus, 1)})
+    ranked.sort(key=lambda x: x['score'], reverse=True)
+    return jsonify({"success": True, "ranked": ranked[:5], "task": task})
 
 
 @app.route('/suggestions', methods=['GET'])

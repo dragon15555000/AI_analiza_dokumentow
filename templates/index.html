@@ -467,6 +467,29 @@ table { margin: 0; }
 .swarm-badge-run  { background: #e0f2fe; color: #0369a1; }
 .swarm-badge-done { background: #dcfce7; color: #15803d; }
 .swarm-badge-err  { background: #fee2e2; color: #b91c1c; }
+
+/* ===== FLEET ===== */
+.fleet-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+  transition: border-color var(--t), box-shadow var(--t);
+  height: 100%;
+}
+.fleet-card:hover { box-shadow: var(--shadow-md); }
+.fleet-card.fleet-ok   { border-left: 4px solid #4ade80; }
+.fleet-card.fleet-slow { border-left: 4px solid #fbbf24; }
+.fleet-card.fleet-err  { border-left: 4px solid #f87171; }
+.fleet-card.fleet-unk  { border-left: 4px solid #94a3b8; }
+.fleet-status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.fleet-dot-ok   { background: #4ade80; }
+.fleet-dot-slow { background: #fbbf24; }
+.fleet-dot-err  { background: #f87171; }
+.fleet-dot-unk  { background: #94a3b8; }
+.fleet-tier-bar { display: flex; gap: 2px; }
+.fleet-tier-pip { width: 8px; height: 8px; border-radius: 2px; background: var(--c-border); }
+.fleet-tier-pip.filled { background: var(--c-accent); }
     </style>
 </head>
 <body>
@@ -560,6 +583,9 @@ table { margin: 0; }
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('swarm'); return false;">🤖 Rój agentów</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('fleet'); return false;">⚡ Flota LLM</a>
     </li>
 </ul></div>
 
@@ -1627,6 +1653,53 @@ table { margin: 0; }
   </div>
 </div>
 
+<!-- TAB: FLOTA LLM -->
+<div id="tabFleet" class="main-wrap" style="display:none;">
+  <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+    <div>
+      <h4 style="margin:0;font-weight:700;">⚡ Flota modeli LLM</h4>
+      <p class="small text-muted mb-0">Live status, ranking i inteligentny routing dla roju agentów.</p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <button class="btn btn-primary btn-sm" onclick="fleetPingAll()" id="fleetPingBtn">🔄 Sprawdź wszystkie</button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="fleetLoad()">↺ Odśwież dane</button>
+    </div>
+  </div>
+
+  <!-- Progress ping -->
+  <div id="fleetPingProgress" style="display:none;" class="mb-3">
+    <div class="d-flex align-items-center gap-2 mb-1">
+      <div class="spinner-border spinner-border-sm text-primary"></div>
+      <span class="small fw-semibold" id="fleetPingLabel">Pingowanie modeli…</span>
+    </div>
+    <div class="progress" style="height:4px;">
+      <div id="fleetPingBar" class="progress-bar progress-bar-striped progress-bar-animated"
+           style="width:0%;background:var(--c-accent);"></div>
+    </div>
+  </div>
+
+  <!-- Karty modeli -->
+  <div id="fleetCards" class="row g-3 mb-4"></div>
+
+  <!-- Ranking tabela -->
+  <div class="search-card">
+    <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin-bottom:12px;">🏆 Ranking (szybkość × jakość × dostępność)</h5>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" id="fleetRankTable">
+        <thead>
+          <tr>
+            <th>#</th><th>Model</th><th>Wynik</th><th>Ping (ms)</th>
+            <th>Kontekst</th><th>RPM</th><th>Specjalizacje</th><th>Akcja</th>
+          </tr>
+        </thead>
+        <tbody id="fleetRankBody">
+          <tr><td colspan="8" class="text-center text-muted py-3">Kliknij "Sprawdź wszystkie" aby zmierzyć modele.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <script>
 window.API_KEY_REQUIRED = {{ 'true' if api_key_required else 'false' }};
 
@@ -1723,7 +1796,7 @@ function _suggestModelForTab(name) {
 
 function showTab(name) {
     // Ukrywamy WSZYSTKIE zakładki (w tym raporty) — wcześniej brakowało tabReports
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabSwarm','tabFleet'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
@@ -1732,7 +1805,7 @@ function showTab(name) {
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
 
     // Poprawiona mapa indeksów zakładek (raporty są na pozycji 5)
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8, swarm:9};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8, swarm:9, fleet:10};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
 
@@ -1742,6 +1815,7 @@ function showTab(name) {
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
+    if (name === 'fleet') fleetLoad();
     if (name === 'reports') {
         setTimeout(() => {
             try { loadReports(); } catch(e) { console.warn('Reports tab error:', e); }
@@ -6306,6 +6380,193 @@ function _swarmShowError(msg) {
     document.getElementById('swarmPlaceholder').style.display = 'flex';
     document.getElementById('swarmPlaceholder').innerHTML =
         `<div style="color:#dc2626;text-align:center;"><div style="font-size:2rem;">⚠️</div><div class="mt-2">${escapeHtml(msg)}</div></div>`;
+}
+
+// ===== FLEET LLM =====
+let _fleetPingSSE = null;
+let _fleetPingDone = 0;
+let _fleetPingTotal = 0;
+
+function fleetLoad() {
+    fetch('/api/models/registry')
+        .then(r => r.json())
+        .then(d => { if (d.success) _fleetRender(d.models); })
+        .catch(() => {});
+}
+
+function _fleetRender(models) {
+    const grid = document.getElementById('fleetCards');
+    grid.innerHTML = '';
+    Object.entries(models).forEach(([mid, m]) => {
+        const live = m.live || {};
+        const status = live.ping_ok === true
+            ? (live.avg_ms > 8000 ? 'slow' : 'ok')
+            : live.ping_ok === false ? 'err' : 'unk';
+        const statusLabel = {ok:'✓ online', slow:'⚠ wolny', err:'✗ błąd', unk:'? nieznany'}[status];
+        const pingText = live.ping_ms != null ? live.avg_ms + ' ms (avg)' : '—';
+
+        const tiers = n => Array.from({length:3}, (_,i) =>
+            `<div class="fleet-tier-pip${i < n ? ' filled' : ''}"></div>`).join('');
+
+        const tags = (m.tags||[]).slice(0,4).map(t =>
+            `<span style="background:#f1f5f9;color:#475569;padding:1px 7px;border-radius:999px;font-size:0.68rem;">${t}</span>`
+        ).join(' ');
+
+        const col = document.createElement('div');
+        col.className = 'col-sm-6 col-lg-4 col-xl-3';
+        col.id = `fleet-card-${mid.replace(/\//g,'_').replace(/:/g,'-')}`;
+        col.innerHTML = `
+          <div class="fleet-card fleet-${status}">
+            <div class="d-flex align-items-start justify-content-between mb-2">
+              <div class="d-flex align-items-center gap-2">
+                <span style="font-size:1.4rem;">${m.icon||'🤖'}</span>
+                <div>
+                  <div class="fw-bold" style="font-size:0.88rem;">${escapeHtml(m.name)}</div>
+                  <div class="small text-muted" style="font-size:0.72rem;">${escapeHtml(m.provider||'')}</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-center gap-1">
+                <div class="fleet-status-dot fleet-dot-${status}" id="fleet-dot-${mid.replace(/\//g,'_').replace(/:/g,'-')}"></div>
+                <span style="font-size:0.69rem;color:var(--c-muted);" id="fleet-status-lbl-${mid.replace(/\//g,'_').replace(/:/g,'-')}">${statusLabel}</span>
+              </div>
+            </div>
+            <div class="d-flex gap-3 mb-2" style="font-size:0.75rem;color:var(--c-muted);">
+              <span title="Okno kontekstu">📄 ${m.context_k}k</span>
+              <span title="Ping" id="fleet-ping-${mid.replace(/\//g,'_').replace(/:/g,'-')}">⏱ ${pingText}</span>
+              <span title="RPM limit">🔢 ${m.rate_rpm}/min</span>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div>
+                <div class="small text-muted" style="font-size:0.68rem;">Jakość</div>
+                <div class="fleet-tier-bar">${tiers(m.quality_tier||1)}</div>
+              </div>
+              <div>
+                <div class="small text-muted" style="font-size:0.68rem;">Szybkość</div>
+                <div class="fleet-tier-bar">${tiers(4-(m.speed_tier||2))}</div>
+              </div>
+              <div>
+                <div class="small text-muted" style="font-size:0.68rem;">Wynik</div>
+                <div class="fw-bold" style="font-size:0.88rem;color:var(--c-accent);" id="fleet-score-${mid.replace(/\//g,'_').replace(/:/g,'-')}">${m.score||'—'}</div>
+              </div>
+            </div>
+            <div class="d-flex flex-wrap gap-1">${tags}</div>
+          </div>`;
+        grid.appendChild(col);
+    });
+    _fleetUpdateRank(models);
+}
+
+function _fleetUpdateRank(models) {
+    const rows = Object.entries(models)
+        .map(([mid, m]) => ({mid, ...m, score: _fleetScore(m)}))
+        .sort((a, b) => b.score - a.score);
+    const tbody = document.getElementById('fleetRankBody');
+    tbody.innerHTML = rows.map((m, i) => {
+        const live = m.live || {};
+        const ping = live.avg_ms != null ? live.avg_ms + ' ms' : (live.ping_ms != null ? live.ping_ms + ' ms' : '—');
+        const ok = live.ping_ok;
+        const dot = ok === true ? '🟢' : ok === false ? '🔴' : '⚫';
+        const tags = (m.tags||[]).slice(0,3).join(', ');
+        return `<tr>
+            <td><strong>${i+1}</strong></td>
+            <td>${dot} ${escapeHtml(m.icon||'')} <strong>${escapeHtml(m.name)}</strong></td>
+            <td><span style="background:${m.score>60?'#dcfce7':'#f1f5f9'};color:${m.score>60?'#15803d':'#475569'};padding:2px 8px;border-radius:999px;font-size:0.78rem;font-weight:700;">${m.score}</span></td>
+            <td>${ping}</td>
+            <td>${m.context_k}k tokens</td>
+            <td>${m.rate_rpm}/min · ${m.rate_day}/dzień</td>
+            <td style="font-size:0.75rem;">${escapeHtml(tags)}</td>
+            <td><button class="btn btn-xs btn-outline-primary" style="font-size:0.72rem;padding:1px 8px;" onclick="fleetUseInSwarm('${m.mid}')">Użyj w roju</button></td>
+        </tr>`;
+    }).join('');
+}
+
+function _fleetScore(m) {
+    const live = m.live || {};
+    if (live.ping_ok === false) return 0;
+    const quality = ((m.quality_tier||1) - 1) / 2 * 40;
+    const speed   = (4 - (m.speed_tier||2)) / 2 * 30;
+    const ms = live.avg_ms || live.ping_ms || 15000;
+    const avail = live.ping_ok === true ? Math.max(0, 30 - ms / 500) : 12;
+    return Math.round(quality + speed + avail);
+}
+
+function fleetPingAll() {
+    if (_fleetPingSSE) return;
+    _fleetPingDone = 0;
+    _fleetPingTotal = 0;
+    document.getElementById('fleetPingProgress').style.display = 'block';
+    document.getElementById('fleetPingBar').style.width = '0%';
+    document.getElementById('fleetPingBtn').disabled = true;
+
+    const headers = {'Content-Type': 'application/json'};
+    if (window.API_KEY && window.API_KEY_REQUIRED) headers['X-API-Key'] = window.API_KEY;
+
+    fetch('/api/models/ping/all', {method:'POST', headers, body:'{}'})
+    .then(resp => {
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        function pump() {
+            return reader.read().then(({done, value}) => {
+                if (done) {
+                    document.getElementById('fleetPingBtn').disabled = false;
+                    document.getElementById('fleetPingProgress').style.display = 'none';
+                    fleetLoad();
+                    return;
+                }
+                buf += dec.decode(value, {stream:true});
+                const lines = buf.split('\n'); buf = lines.pop();
+                lines.forEach(line => {
+                    if (!line.startsWith('data:')) return;
+                    try {
+                        const ev = JSON.parse(line.slice(5).trim());
+                        if (ev.event === 'start') {
+                            _fleetPingTotal = ev.data.count;
+                            document.getElementById('fleetPingLabel').textContent = `Pingowanie ${_fleetPingTotal} modeli…`;
+                        } else if (ev.event === 'result') {
+                            _fleetPingDone++;
+                            const pct = Math.round(_fleetPingDone / _fleetPingTotal * 100);
+                            document.getElementById('fleetPingBar').style.width = pct + '%';
+                            document.getElementById('fleetPingLabel').textContent =
+                                `${_fleetPingDone}/${_fleetPingTotal} — ${ev.data.ok ? '✓' : '✗'} ${(ev.data.ms/1000).toFixed(1)}s`;
+                            const safeId = ev.data.model_id.replace(/\//g,'_').replace(/:/g,'-');
+                            const dot = document.getElementById(`fleet-dot-${safeId}`);
+                            const lbl = document.getElementById(`fleet-status-lbl-${safeId}`);
+                            const ping = document.getElementById(`fleet-ping-${safeId}`);
+                            const score = document.getElementById(`fleet-score-${safeId}`);
+                            const card = document.querySelector(`#fleet-card-${safeId} .fleet-card`);
+                            if (ev.data.ok) {
+                                const slow = ev.data.ms > 8000;
+                                if (dot) { dot.className = `fleet-status-dot fleet-dot-${slow?'slow':'ok'}`; }
+                                if (lbl) lbl.textContent = slow ? '⚠ wolny' : '✓ online';
+                                if (card) { card.classList.remove('fleet-unk','fleet-err','fleet-slow','fleet-ok'); card.classList.add(slow?'fleet-slow':'fleet-ok'); }
+                            } else {
+                                if (dot) dot.className = 'fleet-status-dot fleet-dot-err';
+                                if (lbl) lbl.textContent = '✗ błąd';
+                                if (card) { card.classList.remove('fleet-unk','fleet-ok','fleet-slow','fleet-err'); card.classList.add('fleet-err'); }
+                            }
+                            if (ping) ping.textContent = `⏱ ${ev.data.ms} ms`;
+                            if (score) score.textContent = ev.data.score;
+                        } else if (ev.event === 'done') {
+                            document.getElementById('fleetPingBtn').disabled = false;
+                            document.getElementById('fleetPingProgress').style.display = 'none';
+                        }
+                    } catch(e) {}
+                });
+                return pump();
+            });
+        }
+        return pump();
+    })
+    .catch(() => {
+        document.getElementById('fleetPingBtn').disabled = false;
+        document.getElementById('fleetPingProgress').style.display = 'none';
+    });
+}
+
+function fleetUseInSwarm(modelId) {
+    showTab('swarm');
+    alert(`Model ${modelId} zostanie użyty przy następnym uruchomieniu roju w trybie "Szybkość".`);
 }
 </script>
 
