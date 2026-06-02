@@ -2241,6 +2241,7 @@ function executeSearch() {
                             // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
                             const t = ev.token;
                             if (isLlmStreamError(t)) {
+                                _stopTokenCounter();
                                 handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
                                 return;
                             }
@@ -2267,6 +2268,7 @@ function executeSearch() {
                         } else if (ev.error) {
                             loader.classList.add('d-none');
                             if (isLlmStreamError(ev.error) || ev.kind === 'rate_limit') {
+                                _stopTokenCounter();
                                 handleRateLimitError(ev, container, loader, btn, stopBtn, query, mode);
                             } else {
                                 renderAppError(container, ev, {
@@ -2283,6 +2285,7 @@ function executeSearch() {
                 btn.disabled = false;
                 if (stopBtn) stopBtn.style.display = 'none';
                 if (err.name === 'AbortError') return; // użytkownik kliknął Stop
+                _stopTokenCounter();
                 renderAppError(container, {
                     error: 'Strumień SSE zerwany — serwer mógł się zrestartować lub połączenie wygasło.',
                     kind: 'network',
