@@ -1807,12 +1807,9 @@ def _fleet_record_outcome(prov: str, ok: bool, latency_ms: float | None = None,
                 st["calls_ok"] = int(st["calls_ok"]) + 1
             else:
                 st["calls_fail"] = int(st["calls_fail"]) + 1
-                if error_kind:
-                    st["last_error_kind"] = error_kind
-                if error_msg:
-                    st["last_error"] = str(error_msg)[:200]
-        elif ok:
+        if ok:
             st["last_ok_at"] = int(time.time())
+        elif error_kind or error_msg:
             if error_kind:
                 st["last_error_kind"] = error_kind
             if error_msg:
@@ -1997,6 +1994,16 @@ def _fleet_pick_provider(task: str | None = None) -> str | None:
     return ranked[0]["id"] if ranked else None
 
 
+def _fleet_effective_provider(task: str | None = None) -> str:
+    """Provider faktycznie używany przez LLM gdy auto-route włączone."""
+    task_key = (task or "general").strip().lower()
+    if FLEET_AUTO_ROUTE:
+        picked = _fleet_pick_provider(task_key)
+        if picked:
+            return picked
+    return DEFAULT_LLM_PROVIDER
+
+
 @app.route('/api/llm/fleet', methods=['GET'])
 def api_llm_fleet():
     auth = _require_config_access()
@@ -2006,10 +2013,12 @@ def api_llm_fleet():
     ranked = _fleet_rank_providers(task)
     hint = FLEET_TASK_HINTS.get(task, FLEET_TASK_HINTS["general"])
     recommended = ranked[0]["id"] if ranked else DEFAULT_LLM_PROVIDER
+    active = _fleet_effective_provider(task)
     return jsonify({
         "success": True,
         "auto_route": FLEET_AUTO_ROUTE,
-        "active_provider": DEFAULT_LLM_PROVIDER,
+        "active_provider": active,
+        "configured_provider": DEFAULT_LLM_PROVIDER,
         "recommended_provider": recommended,
         "recommended_for_task": task,
         "task_hint": hint,
@@ -4595,6 +4604,7 @@ def search_stream():
     file_filter = data.get('file_filter', None)
     mode        = data.get('mode', 'normal')
     llm_provider = data.get('llm_provider')
+    fleet_task = _fleet_task_from_data(data, "search")
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -4627,6 +4637,7 @@ def search_stream():
             # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
             openrouter_model = _model_from_request(data, data.get("llm_provider"))
+            resolved_prov = get_llm_provider(llm_provider, task=fleet_task)
 
             try:
                 for token in stream_llm_tokens(
@@ -4634,7 +4645,7 @@ def search_stream():
                     system=system,
                     provider=llm_provider,
                     model=openrouter_model,
-                    task="search",
+                    task=fleet_task,
                 ):
                     if isinstance(token, str) and token.startswith("[FALLBACK]"):
                         logger.info("LLM fallback (search): %s", token[:120])
@@ -4650,7 +4661,11 @@ def search_stream():
                 logger.warning(f"LLM stream error w search_stream: {e}")
                 yield sse("error", {"error": "Błąd streamingu modelu językowego."})
 
-            yield sse("done", {"ai_answer": full_answer})
+            yield sse("done", {
+                "ai_answer": full_answer,
+                "llm_provider_used": resolved_prov,
+                "fleet_auto_route": FLEET_AUTO_ROUTE,
+            })
 
         except Exception as e:
             yield sse("error", {"error": str(e)})
@@ -7793,9 +7808,7 @@ def health():
             "llm_error": llm_detail if not llm_ok else None,
             "llm_provider": DEFAULT_LLM_PROVIDER,
             "fleet_auto_route": FLEET_AUTO_ROUTE,
-            "fleet_effective_provider": (
-                _fleet_pick_provider("general") if FLEET_AUTO_ROUTE else DEFAULT_LLM_PROVIDER
-            ),
+            "fleet_effective_provider": _fleet_effective_provider("general"),
             "embedding": {
                 "ok": ollama_h.get("ok", False),  # embeddingi idą przez Ollama
                 "model": "nomic-embed-text"

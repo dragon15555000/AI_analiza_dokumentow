@@ -1165,7 +1165,7 @@
       <div class="d-flex flex-wrap align-items-center gap-3 mb-3 p-2 rounded" style="background:#f8fafc;border:1px solid #e2e8f0;">
         <div class="form-check form-switch mb-0">
           <input class="form-check-input" type="checkbox" id="fleetAutoRoute" onchange="fleetSetAutoRoute(this.checked)">
-          <label class="form-check-label small fw-semibold" for="fleetAutoRoute" style="cursor:pointer;">Auto-routing (najlepszy dostawca gdy UI nie wybiera)</label>
+          <label class="form-check-label small fw-semibold" for="fleetAutoRoute" style="cursor:pointer;">Auto-routing — wysyła <code>llm_provider: auto</code>; w topbarze pill „Auto → …”</label>
         </div>
         <span id="fleetRecommendBadge" class="dash-pill dash-pill--info"></span>
         <button class="btn btn-sm btn-outline-primary" id="fleetApplyBtn" onclick="fleetApplyRecommended()" style="display:none;">Użyj rekomendowanego</button>
@@ -4585,7 +4585,7 @@ function runSwarm() {
         query,
         limit,
         swarm_mode: mode,
-        ...getLlmRequestPayload(),
+        ...getLlmRequestPayload('swarm'),
         ...getSwarmPrivacyPayload(),
     }, {
         start: (d) => {
@@ -4594,7 +4594,7 @@ function runSwarm() {
             state.doneWorkers = 0;
             const priv = [];
             if (d.mask_pii) priv.push('🛡️ maskowanie PII');
-            if (d.strict_incognito) priv.push('🏠 synteza lokalna (Ollama)');
+            if (d.strict_incognito) priv.push('synteza lokalna (Ollama)');
             const piiTxt = formatSwarmPiiStats(d.pii_redactions);
             if (piiTxt) priv.push(`redakcje: ${piiTxt}`);
             state.privacy = priv.join(' · ');
@@ -4639,7 +4639,8 @@ function runSwarm() {
             if (Array.isArray(d.workers)) state.workers = d.workers;
             const priv = [];
             if (d.mask_pii) priv.push('🛡️ maskowanie PII');
-            if (d.strict_incognito) priv.push('🏠 synteza lokalna');
+            if (d.strict_incognito) priv.push('synteza lokalna');
+            if (d.synth_cloud_fallback) priv.push('zapasowa synteza w chmurze (Ollama niedostępna)');
             const piiTxt = formatSwarmPiiStats(d.pii_redactions);
             if (piiTxt) priv.push(`redakcje: ${piiTxt}`);
             state.privacy = priv.join(' · ');
@@ -6433,6 +6434,10 @@ function fleetLoad(opts) {
             _fleetLastData = d;
             const autoEl = document.getElementById('fleetAutoRoute');
             if (autoEl) autoEl.checked = !!d.auto_route;
+            localStorage.setItem('fleet_auto_route', d.auto_route ? '1' : '0');
+            if (typeof updateFleetAutoRouteBadge === 'function') {
+                updateFleetAutoRouteBadge({ fleet_auto_route: d.auto_route, fleet_effective_provider: d.recommended_provider });
+            }
             const badge = document.getElementById('fleetRecommendBadge');
             const applyBtn = document.getElementById('fleetApplyBtn');
             const rec = d.recommended_provider || '';
@@ -6481,6 +6486,7 @@ function fleetProbeAll() {
 }
 
 function fleetSetAutoRoute(enabled) {
+    localStorage.setItem('fleet_auto_route', enabled ? '1' : '0');
     fetchJson('/api/llm/fleet/auto-route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -6488,6 +6494,7 @@ function fleetSetAutoRoute(enabled) {
     })
         .then(d => {
             if (!d.success) throw new Error(d.error || 'Błąd');
+            updateHealthStatus();
             fleetLoad();
         })
         .catch(e => alert('Auto-routing: ' + (e.message || e)));
