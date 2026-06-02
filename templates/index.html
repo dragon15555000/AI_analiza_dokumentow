@@ -261,6 +261,7 @@
             style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
     <div class="badge-stat" title="Aktywny model czatu (OpenRouter / Groq / Ollama)">
         Chat: <span id="statLlmChat">...</span>
+        <span id="fleetAutoRouteBadge" class="dash-pill dash-pill--compact dash-pill--info" style="display:none;margin-left:6px;" title="Flota LLM wybiera provider per zadanie"></span>
     </div>
     <div class="badge-stat" id="swarmTopbarBadge" title="Tryb roju LLM — A Incognito / B Szybkość / C Jakość" style="display:flex;align-items:flex-start;gap:6px;flex-direction:column;">
         <div class="swarm-mode-segment swarm-mode-topbar" style="align-items:center;">
@@ -1606,7 +1607,7 @@ function showTab(name) {
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if ((name === 'ai' || name === 'swarm') && typeof updateSwarmModeUI === 'function') updateSwarmModeUI();
     if (name === 'swarm' && typeof initSwarmTemplates === 'function') initSwarmTemplates();
-    if (name === 'fleet' && typeof fleetLoad === 'function') fleetLoad({ autoProbe: true });
+    if (name === 'fleet' && typeof fleetLoad === 'function') fleetLoad();
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
@@ -2121,7 +2122,7 @@ function executeSearch() {
         chat_context: chatCtx,
         limit, mode,
         file_filter: activeFileFilter,
-        ...getLlmRequestPayload(),
+        ...getLlmRequestPayload('search'),
         ...(hasSQL ? {conn: activeConn, schema: sqlSchema} : {})
     };
 
@@ -2383,7 +2384,7 @@ function compareDocuments() {
 
     fetchJson('/compare', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({file_a: fa, file_b: fb, focus, ...getLlmRequestPayload()})
+        body: JSON.stringify({file_a: fa, file_b: fb, focus, ...getLlmRequestPayload('compare')})
     })
     .then(d => {
         btn.disabled = false; st.classList.add('d-none');
@@ -2423,7 +2424,7 @@ function runVerification(query, answer, contexts) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             query, answer, contexts,
-            ...getLlmRequestPayload()
+            ...getLlmRequestPayload('network')
         })
     })
     .then(r => r.json())
@@ -3495,7 +3496,7 @@ function buildNetwork() {
         query,
         limit,
         include_briefing: true,
-        ...getLlmRequestPayload(),
+        ...getLlmRequestPayload('network'),
     }, {
         progress: (d) => {
             const pct = d.total ? Math.round((d.processed / d.total) * 85) + 5 : 10;
@@ -3939,7 +3940,7 @@ async function generateTimeline() {
         const payload = {
             query,
             limit,
-            ...getLlmRequestPayload(),
+            ...getLlmRequestPayload('timeline'),
         };
 
         return await new Promise((resolve) => {
@@ -4268,9 +4269,17 @@ function renderNetwork(nodes, edges) {
 // ============================================================
 // PRZEŁĄCZNIK LLM (Ollama / OpenRouter / Groq)
 // ============================================================
-function getLlmRequestPayload() {
+function isFleetAutoRouteEnabled() {
+    return localStorage.getItem('fleet_auto_route') === '1';
+}
+
+function getLlmRequestPayload(fleetTask) {
+    const task = fleetTask || 'general';
+    if (isFleetAutoRouteEnabled()) {
+        return { llm_provider: 'auto', fleet_task: task };
+    }
     const prov = getCurrentLlmProvider();
-    const payload = { llm_provider: prov };
+    const payload = { llm_provider: prov, fleet_task: task };
     if (prov === 'groq') payload.groq_model = getCurrentGroqModel();
     else if (prov === 'openrouter') payload.openrouter_model = getCurrentOpenRouterModel();
     return payload;
@@ -4282,10 +4291,27 @@ function getCurrentLlmProvider() {
     return localStorage.getItem('llm_provider') || 'openrouter';
 }
 
+function updateFleetAutoRouteBadge(healthData) {
+    const badge = document.getElementById('fleetAutoRouteBadge');
+    if (!badge) return;
+    const autoOn = !!(healthData && healthData.fleet_auto_route) || isFleetAutoRouteEnabled();
+    if (!autoOn) {
+        badge.style.display = 'none';
+        return;
+    }
+    const eff = (healthData && healthData.fleet_effective_provider) || '';
+    const labels = { openrouter: 'OR', groq: 'Groq', ollama: 'Ollama' };
+    dashPillFill(badge, 'info', `Auto → ${labels[eff] || eff || '…'}`);
+    badge.style.display = 'inline-flex';
+}
+
 function updateTopbarLlmBadge(healthData) {
     const el = document.getElementById('statLlmChat');
     if (!el) return;
-    const prov = (healthData && (healthData.llm_provider || healthData.provider)) || getCurrentLlmProvider();
+    const autoOn = !!(healthData && healthData.fleet_auto_route) || isFleetAutoRouteEnabled();
+    const prov = autoOn && healthData && healthData.fleet_effective_provider
+        ? healthData.fleet_effective_provider
+        : ((healthData && (healthData.llm_provider || healthData.provider)) || getCurrentLlmProvider());
     const labels = { openrouter: 'OR', groq: 'Groq', ollama: 'Ollama' };
     let model = (healthData && healthData.llm_model) || '';
     if (!model) {
@@ -4294,7 +4320,9 @@ function updateTopbarLlmBadge(healthData) {
         else model = 'llama3';
     }
     const short = model ? (model.includes('/') ? model.split('/').pop() : model) : '?';
-    el.textContent = `${labels[prov] || prov} · ${short}`;
+    const prefix = autoOn ? `${labels[prov] || prov} (auto) · ` : `${labels[prov] || prov} · `;
+    el.textContent = prefix + short;
+    updateFleetAutoRouteBadge(healthData);
 }
 
 const SWARM_MODE_META = {
@@ -6745,7 +6773,7 @@ function runReadyReport(id) {
 
     fetchJson('/analyze', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, ...getLlmRequestPayload()})
+        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, ...getLlmRequestPayload('ai')})
     }).then(d => {
         document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(d.answer || 'Brak danych.')}</div>`;
     });

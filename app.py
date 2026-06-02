@@ -1795,17 +1795,24 @@ def _fleet_compute_score(stats: dict, probe: dict | None, health: dict | None) -
 
 
 def _fleet_record_outcome(prov: str, ok: bool, latency_ms: float | None = None,
-                          error_kind: str | None = None, error_msg: str | None = None):
+                          error_kind: str | None = None, error_msg: str | None = None,
+                          count_call: bool = True):
     with _fleet_stats_lock:
         all_s = _fleet_load_all_stats()
         st = _fleet_default_stats()
         st.update(all_s.get(prov) or {})
-        st["calls_total"] = int(st["calls_total"]) + 1
-        if ok:
-            st["calls_ok"] = int(st["calls_ok"]) + 1
+        if count_call:
+            st["calls_total"] = int(st["calls_total"]) + 1
+            if ok:
+                st["calls_ok"] = int(st["calls_ok"]) + 1
+            else:
+                st["calls_fail"] = int(st["calls_fail"]) + 1
+                if error_kind:
+                    st["last_error_kind"] = error_kind
+                if error_msg:
+                    st["last_error"] = str(error_msg)[:200]
+        elif ok:
             st["last_ok_at"] = int(time.time())
-        else:
-            st["calls_fail"] = int(st["calls_fail"]) + 1
             if error_kind:
                 st["last_error_kind"] = error_kind
             if error_msg:
@@ -1889,7 +1896,7 @@ def _fleet_probe_provider(prov: str) -> dict:
             st["score"] = _fleet_compute_score(st, out, h)
             all_s[prov] = st
             _fleet_save_all_stats(all_s)
-        _fleet_record_outcome(prov, ok, latency_ms, error_kind=kind, error_msg=err)
+        _fleet_record_outcome(prov, ok, latency_ms, error_kind=kind, error_msg=err, count_call=False)
         return out
     except Exception as e:
         latency_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -2053,10 +2060,20 @@ def api_llm_fleet_auto_route():
 # LLM PROVIDER ABSTRACTION (Ollama / OpenRouter / Groq)
 # ============================================================
 
+def _fleet_task_from_data(data: dict | None, default: str = "general") -> str:
+    if not data:
+        return default
+    return (data.get("fleet_task") or data.get("task") or default).strip().lower()
+
+
 def get_llm_provider(request_provider: str | None = None, task: str | None = None) -> str:
     """Zwraca aktywny provider: 'ollama', 'openrouter' lub 'groq'."""
     if request_provider:
         p = request_provider.lower()
+        if p == "auto" and FLEET_AUTO_ROUTE:
+            picked = _fleet_pick_provider(task or "general")
+            if picked:
+                return picked
         if p in ("ollama", "openrouter", "groq"):
             return p
     if FLEET_AUTO_ROUTE:
@@ -5903,11 +5920,13 @@ def timeline_endpoint():
 # /agents/swarm — rój LLM z przełącznikiem A/B/C
 # ============================================================
 
+SWARM_CLOUD_MAX_PARALLEL = 3  # limit równoległych workerów w chmurze (429)
+
 SWARM_MODE_CONFIG = {
     "A": {
         "label": "A · Incognito",
         "description": "Każdy worker dostaje potasowane fragmenty i losowy model. Priorytet: prywatność.",
-        "workers": 5,
+        "workers": 4,
         "max_chunks_per_worker": 4,
         "shuffle_chunks": True,
         "random_models": True,
@@ -6201,7 +6220,8 @@ def _swarm_synthesis_prompt(query: str, worker_outputs: list[dict], mode_label: 
 
 
 def _swarm_call_with_fallback(prompt: str, system: str, provider: str | None, models: list[str],
-                              max_tokens: int, temperature: float) -> tuple[str, str]:
+                              max_tokens: int, temperature: float,
+                              task: str | None = None) -> tuple[str, str]:
     last_error = None
     for model in models or [None]:
         try:
@@ -6213,12 +6233,75 @@ def _swarm_call_with_fallback(prompt: str, system: str, provider: str | None, mo
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                task=task,
             )
             return (model or "", _llm_response_text(result))
         except Exception as e:
             last_error = e
             continue
     raise RuntimeError(str(last_error) if last_error else "Błąd wywołania LLM")
+
+
+def _swarm_run_synthesis(
+    query: str,
+    chat_context: str,
+    worker_outputs: list[dict],
+    config: dict,
+    model_pool: list[str],
+    provider: str | None,
+    *,
+    strict_incognito: bool,
+) -> tuple[str, str, str | None, bool]:
+    """
+    Synteza roju. Przy strict_incognito najpierw Ollama; gdy padnie — zapasowo chmura
+    (tylko streszczenia workerów, bez pełnych dokumentów).
+    """
+    synth_models, synth_max_tokens, synth_temp, synth_provider = _swarm_synthesis_settings(
+        config["key"], model_pool, strict_local=strict_incognito,
+    )
+    synth_llm_provider = synth_provider or provider
+    synth_prompt = _swarm_synthesis_prompt(
+        query + (f"\n\nKontekst rozmowy:\n{chat_context}" if chat_context else ""),
+        worker_outputs,
+        config["label"],
+        config["key"],
+    )
+    synth_system = (
+        "Jesteś syntezatorem roju LLM. "
+        "Masz połączyć częściowe analizy w jedną odpowiedź. "
+        "Trzymaj się faktów i jasno zaznaczaj niepewności."
+    )
+    try:
+        used_model, final_answer = _swarm_call_with_fallback(
+            synth_prompt,
+            synth_system,
+            synth_llm_provider,
+            synth_models,
+            synth_max_tokens,
+            synth_temp,
+            task="swarm",
+        )
+        return used_model, final_answer, get_llm_provider(synth_llm_provider), False
+    except Exception as e:
+        if not strict_incognito:
+            raise
+        logger.warning("Swarm strict incognito: synteza Ollama nieudana — fallback chmura: %s", e)
+        cloud_prov = get_llm_provider(provider, task="swarm")
+        if cloud_prov == "ollama":
+            cloud_prov = _fleet_pick_provider("swarm") or DEFAULT_LLM_PROVIDER
+            if cloud_prov == "ollama":
+                cloud_prov = "openrouter"
+        cloud_models = _swarm_model_candidates(cloud_prov)[:3]
+        used_model, final_answer = _swarm_call_with_fallback(
+            synth_prompt,
+            synth_system,
+            cloud_prov,
+            cloud_models,
+            synth_max_tokens,
+            synth_temp,
+            task="swarm",
+        )
+        return used_model, final_answer, get_llm_provider(cloud_prov), True
 
 
 @app.route('/api/swarm/modes', methods=['GET'])
@@ -6321,8 +6404,12 @@ def agents_swarm():
 
             worker_outputs = []
             worker_max_tokens, worker_temp = _swarm_worker_params(config["key"])
+            worker_prov = get_llm_provider(provider, task="swarm")
+            max_parallel = len(groups)
+            if worker_prov != "ollama":
+                max_parallel = min(len(groups), SWARM_CLOUD_MAX_PARALLEL)
 
-            with ThreadPoolExecutor(max_workers=len(groups)) as ex:
+            with ThreadPoolExecutor(max_workers=max_parallel) as ex:
                 futures = []
                 for idx, group in enumerate(groups):
                     models = _swarm_assign_worker_models(config["key"], model_pool, idx)
@@ -6386,37 +6473,24 @@ def agents_swarm():
                 "strict_incognito": strict_incognito,
             })
 
-            synth_models, synth_max_tokens, synth_temp, synth_provider = _swarm_synthesis_settings(
-                config["key"], model_pool, strict_local=strict_incognito,
-            )
-            synth_llm_provider = synth_provider or provider
-
-            synth_prompt = _swarm_synthesis_prompt(
-                query + (f"\n\nKontekst rozmowy:\n{chat_context}" if chat_context else ""),
+            used_model, final_answer, synth_prov_used, synth_cloud_fallback = _swarm_run_synthesis(
+                query,
+                chat_context,
                 worker_outputs,
-                config["label"],
-                config["key"],
-            )
-            synth_system = (
-                "Jesteś syntezatorem roju LLM. "
-                "Masz połączyć częściowe analizy w jedną odpowiedź. "
-                "Trzymaj się faktów i jasno zaznaczaj niepewności."
-            )
-            used_model, final_answer = _swarm_call_with_fallback(
-                synth_prompt,
-                synth_system,
-                synth_llm_provider,
-                synth_models,
-                synth_max_tokens,
-                synth_temp,
+                config,
+                model_pool,
+                provider,
+                strict_incognito=strict_incognito,
             )
 
             yield sse("done", {
                 "success": True,
                 "mode": config["key"],
                 "mode_label": config["label"],
-                "provider": get_llm_provider(provider),
-                "synth_provider": get_llm_provider(synth_llm_provider),
+                "provider": get_llm_provider(provider, task="swarm"),
+                "synth_provider": synth_prov_used,
+                "synth_cloud_fallback": synth_cloud_fallback,
+                "parallel_workers": max_parallel,
                 "used_model": used_model,
                 "workers": worker_outputs,
                 "answer": final_answer,
@@ -7718,6 +7792,10 @@ def health():
             "llm_status": "ok" if llm_ok else "warn",
             "llm_error": llm_detail if not llm_ok else None,
             "llm_provider": DEFAULT_LLM_PROVIDER,
+            "fleet_auto_route": FLEET_AUTO_ROUTE,
+            "fleet_effective_provider": (
+                _fleet_pick_provider("general") if FLEET_AUTO_ROUTE else DEFAULT_LLM_PROVIDER
+            ),
             "embedding": {
                 "ok": ollama_h.get("ok", False),  # embeddingi idą przez Ollama
                 "model": "nomic-embed-text"

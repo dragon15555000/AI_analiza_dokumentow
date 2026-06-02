@@ -18,6 +18,8 @@ Testy integracyjne (wymaga działającej aplikacji na :5000):
   - GET /health (Qdrant, embedding, LLM)
   - Groq chat API (compound-mini, llama-3.3-70b, compound)
   - GET /api/config/llm
+  - GET /api/swarm/modes + walidacja POST /agents/swarm (bez pełnego LLM)
+  - GET /api/llm/fleet (cache, bez sondy)
   - POST /search/stream (SSE: results, token, done) — opcjonalnie
 
 Opcje:
@@ -245,6 +247,88 @@ try:
         check("/api/config/llm", d.get("success"), f"provider={d.get('provider')}")
 except requests.RequestException as e:
     check("/api/config/llm", False, str(e)[:80])
+
+# 4b. Rój LLM — konfiguracja i endpoint (bez czekania na workery LLM)
+try:
+    sm = requests.get(f"{BASE}/api/swarm/modes", headers=headers(), timeout=10)
+    if sm.status_code == 401:
+        check("/api/swarm/modes", False, "401")
+    else:
+        sd = sm.json()
+        modes = sd.get("modes") or {}
+        templates = sd.get("templates") or []
+        check("/api/swarm/modes", sd.get("success") and "A" in modes and "B" in modes and "C" in modes,
+              f"templates={len(templates)} default={sd.get('default')}")
+        check("  swarm mode A privacy", modes.get("A", {}).get("mask_pii_default") is True, "mask_pii_default")
+except requests.RequestException as e:
+    check("/api/swarm/modes", False, str(e)[:80])
+
+try:
+    bad = requests.post(
+        f"{BASE}/agents/swarm",
+        headers={**headers(), "Content-Type": "application/json"},
+        json={},
+        timeout=10,
+    )
+    check("POST /agents/swarm pusty", bad.status_code == 400, f"HTTP {bad.status_code}")
+except requests.RequestException as e:
+    check("POST /agents/swarm pusty", False, str(e)[:80])
+
+try:
+    swarm_events: list[str] = []
+    swarm_detail = ""
+    with requests.post(
+        f"{BASE}/agents/swarm",
+        headers={**headers(), "Content-Type": "application/json"},
+        json={
+            "query": "__run_tests_swarm_smoke__",
+            "limit": 2,
+            "swarm_mode": "B",
+            "mask_pii": False,
+            "strict_incognito": False,
+            "llm_provider": "ollama",
+        },
+        stream=True,
+        timeout=25,
+    ) as sresp:
+        check("POST /agents/swarm SSE HTTP", sresp.status_code == 200, str(sresp.status_code))
+        current_event = None
+        for raw in sresp.iter_lines(decode_unicode=True):
+            if raw is None:
+                continue
+            if raw.startswith("event: "):
+                current_event = raw[7:].strip()
+            elif raw.startswith("data: ") and current_event:
+                swarm_events.append(current_event)
+                if current_event in ("start", "error"):
+                    try:
+                        swarm_detail = json.loads(raw[6:]).get("error", "start ok")[:80]
+                    except Exception:
+                        swarm_detail = raw[6:][:80]
+                    break
+                if len(swarm_events) > 20:
+                    break
+    if sresp.status_code == 200:
+        ok_ev = "start" in swarm_events or "error" in swarm_events
+        if "error" in swarm_events and "Brak dokumentów" in swarm_detail:
+            check("  swarm SSE start/error", ok_ev, "Brak dokumentów (OK bez LLM)")
+        else:
+            check("  swarm SSE start/error", ok_ev, safe_detail(swarm_detail))
+except requests.RequestException as e:
+    check("POST /agents/swarm SSE", False, str(e)[:80])
+
+# 4c. Flota LLM — ranking z cache (bez POST /fleet/probe)
+try:
+    fl = requests.get(f"{BASE}/api/llm/fleet?task=general", headers=headers(), timeout=15)
+    if fl.status_code == 401:
+        check("/api/llm/fleet", False, "401")
+    else:
+        fd = fl.json()
+        providers = fd.get("providers") or []
+        check("/api/llm/fleet", fd.get("success") and len(providers) >= 2,
+              f"providers={len(providers)} auto_route={fd.get('auto_route')}")
+except requests.RequestException as e:
+    check("/api/llm/fleet", False, str(e)[:80])
 
 # 5. SSE search/stream (z ponowieniem przy chwilowym reset połączenia)
 if not SKIP_E2E:
