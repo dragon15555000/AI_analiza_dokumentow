@@ -66,9 +66,13 @@ PDF · DOCX · XLSX / XLS (wszystkie arkusze + formuły) · CSV · JSON · MD ·
 ### LLM — Ollama lub OpenRouter / LLM Provider
 - **Ollama** (domyślny) — lokalny Llama3, bez limitu zapytań
 - **OpenRouter** — dostęp do dziesiątek modeli przez jeden klucz API (w tym darmowe: Llama3, Gemini, Qwen)
+- **Groq** — szybkie testy i modele agentowe (Compound)
 - Automatyczny retry przy limicie OpenRouter (429) + opcjonalny fallback na Ollama
+- **Flota LLM** (zakładka w UI) — ranking dostawców (dostępność, opóźnienie, score), sonda `POST /api/llm/fleet/probe`, opcjonalny auto-routing do najlepszego providera per typ zadania
 
-*Ollama (local Llama3, no rate limits) or OpenRouter (dozens of models incl. free tier). Auto-retry on 429 + optional fallback.*
+*Ollama (local Llama3, no rate limits) or OpenRouter (dozens of models incl. free tier). Auto-retry on 429 + optional fallback. **Fleet tab**: provider ranking, latency probe, auto-route.*
+
+**API floty:** `GET /api/llm/fleet?task=search` · `POST /api/llm/fleet/probe` · `POST /api/llm/fleet/auto-route` — statystyki w `.llm_fleet_stats.json`.
 
 ### Sieć powiązań / Connection Network
 - LLM wyciąga osoby, firmy, kwoty, umowy i rysuje interaktywny graf (**D3.js force-directed**)

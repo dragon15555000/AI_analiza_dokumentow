@@ -36,6 +36,48 @@
         .prompt-btn { cursor: pointer; display: block; width: 100%; text-align: left; padding: 7px 10px; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; font-size: 0.82rem; color: #343a40; margin-bottom: 5px; transition: all 0.15s; white-space: normal; }
         .prompt-btn:hover { background: #e9ecef; border-color: #adb5bd; transform: translateX(2px); }
         .cat-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; color: #6c757d; margin: 12px 0 6px; }
+        .swarm-mode-btn { border:1px solid #cbd5e1; background:#f8fafc; color:#334155; border-radius:10px; padding:8px 14px; font-size:0.75rem; font-weight:700; cursor:pointer; transition:all 0.15s; text-align:left; }
+        .swarm-mode-btn:hover { background:#eef2ff; border-color:#818cf8; }
+        .swarm-mode-btn.active { background:#4f46e5; border-color:#4f46e5; color:#fff; box-shadow:0 0 0 2px rgba(79,70,229,0.18); }
+        .swarm-mode-segment { display:flex; gap:8px; flex-wrap:wrap; }
+        .swarm-mode-btn .swarm-mode-key { display:block; font-size:0.65rem; font-weight:600; opacity:0.75; letter-spacing:0.04em; }
+        .swarm-mode-btn .swarm-mode-name { display:block; font-size:0.88rem; font-weight:800; line-height:1.2; }
+        .swarm-mode-btn .swarm-mode-tag { display:block; font-size:0.65rem; font-weight:500; opacity:0.8; margin-top:2px; }
+        .swarm-mode-btn.active .swarm-mode-key,
+        .swarm-mode-btn.active .swarm-mode-tag { opacity:1; }
+        .swarm-mode-topbar .swarm-mode-btn { padding:2px 8px; font-size:0.68rem; border-radius:999px; text-align:center; min-width:auto; }
+        .swarm-mode-topbar .swarm-mode-name { font-size:0.68rem; display:inline; }
+        .swarm-mode-topbar .swarm-mode-key,
+        .swarm-mode-topbar .swarm-mode-tag { display:none; }
+        .swarm-mode-pill {
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            padding:2px 8px;
+            border-radius:999px;
+            font-size:0.68rem;
+            font-weight:700;
+            line-height:1.2;
+            border:1px solid transparent;
+            white-space:nowrap;
+        }
+        .swarm-mode-pill .swarm-dot {
+            width:8px;
+            height:8px;
+            border-radius:999px;
+            flex:0 0 auto;
+        }
+        .swarm-mode-pill.mode-a { background:#e0f2fe; border-color:#7dd3fc; color:#0c4a6e; }
+        .swarm-mode-pill.mode-a .swarm-dot { background:#0284c7; }
+        .swarm-mode-pill.mode-b { background:#ecfdf5; border-color:#86efac; color:#14532d; }
+        .swarm-mode-pill.mode-b .swarm-dot { background:#16a34a; }
+        .swarm-mode-pill.mode-c { background:#eef2ff; border-color:#a5b4fc; color:#3730a3; }
+        .swarm-mode-pill.mode-c .swarm-dot { background:#4f46e5; }
+        .swarm-mode-pill.mode-hidden { display:none; }
+        #swarmModeDetails { background:#eef2ff; border:1px solid #c7d2fe; border-radius:8px; padding:10px 12px; font-size:0.8rem; color:#3730a3; line-height:1.55; }
+        .swarm-worker { background:#fff; border:1px solid #e2e8f0; border-left:4px solid #4f46e5; border-radius:10px; padding:12px 14px; margin-bottom:10px; box-shadow:0 1px 4px rgba(0,0,0,0.04); }
+        .swarm-worker h6 { font-size:0.82rem; margin:0 0 6px; color:#1e293b; }
+        .swarm-worker pre { white-space:pre-wrap; margin:0; font-size:0.8rem; line-height:1.55; color:#334155; }
 
         /* Wyniki */
         .ai-box { 
@@ -144,12 +186,58 @@
         .vs-warn { background:#fef9c3; color:#854d0e; }
         .vs-bad  { background:#fee2e2; color:#991b1b; }
 
-        /* Status dots */
-        .status-dot { font-size:0.65rem; vertical-align:middle; transition:color 0.4s; }
-        .dot-ok   { color:#48bb78; }
-        .dot-err  { color:#fc8181; }
-        .dot-warn { color:#f6ad55; }
-        .dot-pending { color:#a0aec0; }
+        /* Status dots (topbar) */
+        .status-dot {
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            vertical-align: middle;
+            margin-right: 2px;
+            transition: background 0.35s, box-shadow 0.35s;
+        }
+        .dot-ok   { background:#22c55e; box-shadow:0 0 0 2px rgba(34,197,94,0.25); }
+        .dot-err  { background:#ef4444; box-shadow:0 0 0 2px rgba(239,68,68,0.2); }
+        .dot-warn { background:#f59e0b; box-shadow:0 0 0 2px rgba(245,158,11,0.2); }
+        .dot-pending { background:#94a3b8; }
+
+        /* Dashboard pills — kolorowa kropka zamiast emoji */
+        .dash-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            line-height: 1.25;
+            border: 1px solid transparent;
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+        .dash-pill .dash-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .dash-pill--ok { background:#ecfdf5; border-color:#bbf7d0; color:#14532d; }
+        .dash-pill--ok .dash-dot { background:#22c55e; }
+        .dash-pill--err { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
+        .dash-pill--err .dash-dot { background:#ef4444; }
+        .dash-pill--warn { background:#fffbeb; border-color:#fde68a; color:#92400e; }
+        .dash-pill--warn .dash-dot { background:#f59e0b; }
+        .dash-pill--neutral { background:#f1f5f9; border-color:#e2e8f0; color:#475569; }
+        .dash-pill--neutral .dash-dot { background:#94a3b8; }
+        .dash-pill--info { background:#eef2ff; border-color:#c7d2fe; color:#3730a3; }
+        .dash-pill--info .dash-dot { background:#6366f1; }
+        .dash-pill--score-high { background:#ecfdf5; border-color:#86efac; color:#166534; }
+        .dash-pill--score-high .dash-dot { background:#16a34a; }
+        .dash-pill--score-mid { background:#fffbeb; border-color:#fde68a; color:#854d0e; }
+        .dash-pill--score-mid .dash-dot { background:#eab308; }
+        .dash-pill--score-low { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
+        .dash-pill--score-low .dash-dot { background:#ef4444; }
+        .dash-pill--compact { padding: 2px 8px; font-size: 0.68rem; gap: 5px; }
 
         /* Context suggestion banner */
         #contextBanner { background:#eff6ff; border-left:4px solid #3b82f6; padding:10px 16px; display:none; align-items:center; gap:10px; flex-wrap:wrap; font-size:0.85rem; color:#1e3a5f; }
@@ -165,21 +253,30 @@
     <div class="badge-stat">Wektory: <span id="statVectors">...</span></div>
     <div class="badge-stat">Status: <span id="statStatus">...</span></div>
     <div class="badge-stat" title="Status połączeń">
-        <span id="dotQdrant" class="status-dot dot-pending" title="Qdrant">⬤</span> Qdrant &nbsp;
-        <span id="dotLlm"    class="status-dot dot-pending" title="LLM">⬤</span> LLM &nbsp;
-        <span id="dotOcr"    class="status-dot dot-pending" title="OCR (Tesseract)">⬤</span> OCR
+        <span class="dash-pill dash-pill--compact dash-pill--neutral" title="Qdrant"><span id="dotQdrant" class="dash-dot dot-pending"></span>Qdrant</span>
+        <span class="dash-pill dash-pill--compact dash-pill--neutral" title="LLM"><span id="dotLlm" class="dash-dot dot-pending"></span>LLM</span>
+        <span class="dash-pill dash-pill--compact dash-pill--neutral" title="OCR"><span id="dotOcr" class="dash-dot dot-pending"></span>OCR</span>
     </div>
     <button onclick="openDiagnostics()" title="Diagnostyka / Zarządzanie usługą"
             style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
     <div class="badge-stat" title="Aktywny model czatu (OpenRouter / Groq / Ollama)">
         Chat: <span id="statLlmChat">...</span>
     </div>
+    <div class="badge-stat" id="swarmTopbarBadge" title="Tryb roju LLM — A Incognito / B Szybkość / C Jakość" style="display:flex;align-items:flex-start;gap:6px;flex-direction:column;">
+        <div class="swarm-mode-segment swarm-mode-topbar" style="align-items:center;">
+            <span style="color:#a0aec0;font-size:0.68rem;">Rój:</span>
+            <button type="button" class="swarm-mode-btn" data-mode="A" onclick="setSwarmMode('A')" title="A · Incognito — tasowanie fragmentów, losowy model na workera"><span class="swarm-mode-name">A·Incognito</span></button>
+            <button type="button" class="swarm-mode-btn" data-mode="B" onclick="setSwarmMode('B')" title="B · Szybkość — najszybsze modele, max paralelizm"><span class="swarm-mode-name">B·Szybkość</span></button>
+            <button type="button" class="swarm-mode-btn" data-mode="C" onclick="setSwarmMode('C')" title="C · Jakość — mocniejsza synteza końcowa"><span class="swarm-mode-name">C·Jakość</span></button>
+        </div>
+        <div id="swarmTopbarModeLabel" class="swarm-mode-pill mode-a"><span class="swarm-dot"></span><span class="swarm-text">A: prywatność</span></div>
+    </div>
     <div class="badge-stat" title="Embeddingi — zawsze Ollama nomic-embed-text">
         Emb: <span>nomic</span>
     </div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
-    <div class="badge-stat" title="Tokeny zużyte w tej sesji">
-        🔤 <span id="sessionTokenCount">0</span>
+    <div class="badge-stat dash-pill dash-pill--compact dash-pill--neutral" title="Tokeny zużyte w tej sesji">
+        <span class="dash-dot"></span><span>Tok.</span> <span id="sessionTokenCount" style="color:#63b3ed;font-weight:700;">0</span>
     </div>
 
     <!-- Przełącznik Qdrant lokalny/cloud -->
@@ -187,8 +284,8 @@
         <span style="color:#a0aec0;">Qdrant:</span>
         <select id="qdrantModeSelect" onchange="onQdrantModeChange()"
                 style="background:#1a1f36; color:#e2e8f0; border:none; padding:2px 6px; border-radius:999px; cursor:pointer;">
-            <option value="local">🏠 Lokalny</option>
-            <option value="cloud">☁️ Cloud</option>
+            <option value="local">Lokalny</option>
+            <option value="cloud">Cloud</option>
         </select>
     </div>
 
@@ -261,6 +358,9 @@
         <a class="nav-link" href="#" onclick="showTab('ai'); return false;">AI z bazy</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('swarm'); return false;">Rój LLM</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('compare'); return false;">Porównaj</a>
     </li>
     <li class="nav-item">
@@ -274,6 +374,9 @@
     </li>
     <li class="nav-item" id="navItemSql" style="display:none;">
         <a class="nav-link" href="#" onclick="showTab('sql'); return false;">SQL</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('fleet'); return false;">Flota LLM</a>
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('collections'); return false;">Bazy</a>
@@ -351,7 +454,7 @@
             <div id="tokenCountBar" style="display:none;padding:6px 14px;background:#f0f4ff;border-radius:8px;margin-bottom:10px;font-size:0.78rem;color:#4338ca;display:none;align-items:center;gap:14px;flex-wrap:wrap;">
                 <span>🔤 Tokeny: <strong id="tokenCount">0</strong></span>
                 <span>⚡ Prędkość: <strong id="tokenSpeed">—</strong> tok/s</span>
-                <span id="tokenProviderBadge" style="background:#e0e7ff;padding:1px 8px;border-radius:10px;font-size:0.7rem;"></span>
+                <span id="tokenProviderBadge" class="dash-pill dash-pill--compact dash-pill--info"></span>
                 <span id="tokenFinalMsg" style="color:#166534;display:none;"></span>
             </div>
 
@@ -497,18 +600,101 @@
                     <div class="text-center py-4 text-muted small">Przejdź do tej zakładki aby załadować sugestie.</div>
                 </div>
             </div>
+            <div class="search-card" style="background:#f8f9ff;border:1px solid #dbeafe;">
+                <h2 style="margin:0;font-size:1rem;color:#1e293b;">Rój LLM (A / B / C)</h2>
+                <p class="small text-muted mb-2 mt-2">Map-Reduce: lokalny dyrygent dzieli dokument na fragmenty, workery online analizują równolegle, synteza składa wynik.</p>
+                <button type="button" class="btn btn-primary btn-sm" onclick="showTab('swarm')">Otwórz Rój LLM →</button>
+            </div>
         </div>
         <div class="col-lg-4">
             <div class="search-card" style="background:#f8f9ff;border:1px solid #e0e0ff;">
-                <h2 style="font-size:1rem;color:#4f46e5;">Jak to działa?</h2>
-                <ol class="small text-muted ps-3" style="line-height:1.9;">
-                    <li>Pobiera 25 losowych fragmentów z różnych plików z Qdrant Cloud</li>
-                    <li>Wysyła je do Llama3 z poleceniem wygenerowania pytań śledczych</li>
-                    <li>Wyniki są cache'owane 30 minut</li>
-                    <li>Kliknięcie pytania przenosi do wyszukiwania i od razu uruchamia analizę</li>
-                </ol>
+                <h2 style="font-size:1rem;color:#4f46e5;">Sugestie pytań</h2>
+                <p class="small text-muted mb-0">Kliknięcie pytania przenosi do wyszukiwania i od razu uruchamia analizę. Rój LLM ma osobną zakładkę z trybami Incognito / Szybkość / Jakość.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- TAB: RÓJ LLM -->
+<div id="tabSwarm" class="main-wrap" style="display:none;">
+    <div class="row g-3">
+        <div class="col-lg-8">
+            <div class="search-card" style="background:#f8f9ff;border:1px solid #dbeafe;">
+                <div class="mb-3">
+                    <h2 style="margin:0;font-size:1.08rem;color:#1e293b;">Rój LLM — dyrygent lokalny</h2>
+                    <p class="text-muted small mb-0 mt-1">Wybierz tryb <strong>A · Incognito</strong>, <strong>B · Szybkość</strong> lub <strong>C · Jakość</strong>. Każdy tryb inaczej dzieli fragmenty, dobiera modele i syntezuje wynik.</p>
+                </div>
+                <div class="swarm-mode-segment mb-2" role="group" aria-label="Tryb roju LLM">
+                    <button type="button" class="swarm-mode-btn" data-mode="A" onclick="setSwarmMode('A')">
+                        <span class="swarm-mode-key">TRYB A</span>
+                        <span class="swarm-mode-name">Incognito</span>
+                        <span class="swarm-mode-tag">prywatność · tasowanie · losowe modele</span>
+                    </button>
+                    <button type="button" class="swarm-mode-btn" data-mode="B" onclick="setSwarmMode('B')">
+                        <span class="swarm-mode-key">TRYB B</span>
+                        <span class="swarm-mode-name">Szybkość</span>
+                        <span class="swarm-mode-tag">paralelizm · najszybsze modele</span>
+                    </button>
+                    <button type="button" class="swarm-mode-btn" data-mode="C" onclick="setSwarmMode('C')">
+                        <span class="swarm-mode-key">TRYB C</span>
+                        <span class="swarm-mode-name">Jakość</span>
+                        <span class="swarm-mode-tag">mocniejsza synteza · spójny wynik</span>
+                    </button>
+                </div>
+                <div id="swarmModeDetails" class="mb-3"></div>
+                <div class="mb-2">
+                    <div class="small fw-semibold text-muted mb-1">Szablon zadania</div>
+                    <div id="swarmTemplateBtns" class="d-flex flex-wrap gap-2"></div>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-check small mb-0">
+                            <input class="form-check-input" type="checkbox" id="swarmMaskPii" checked>
+                            Maskuj PII przed chmurą (PESEL, NIP, IBAN, e-mail, tel.)
+                        </label>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-check small mb-0">
+                            <input class="form-check-input" type="checkbox" id="swarmStrictIncognito" checked>
+                            Strict incognito — synteza tylko lokalnie (Ollama)
+                        </label>
+                    </div>
+                </div>
+                <div class="row g-2">
+                    <div class="col-md-8">
+                        <textarea id="swarmQuery" class="form-control" rows="3" placeholder="Wpisz pytanie do roju, np. 'wskaż główne powiązania finansowe między firmami i osobami'"></textarea>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="d-grid gap-2">
+                            <select id="swarmLimit" class="form-select">
+                                <option value="10">10 fragmentów</option>
+                                <option value="15">15 fragmentów</option>
+                                <option value="20">20 fragmentów</option>
+                            </select>
+                            <button class="btn btn-primary" id="swarmRunBtn" onclick="runSwarm()">Uruchom rój</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="swarmModeHint" class="small text-muted mt-2"></div>
+                <div class="mt-3">
+                    <div class="progress" style="height:6px;">
+                        <div id="swarmProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+                    </div>
+                    <div id="swarmStatus" class="small text-muted mt-2">Gotowe do uruchomienia roju.</div>
+                </div>
+                <div id="swarmResult" class="mt-3"></div>
+            </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="search-card" style="background:#f8f9ff;border:1px solid #e0e0ff;">
+                <h2 style="font-size:1rem;color:#4f46e5;">Jak działają tryby A / B / C</h2>
+                <ul class="small text-muted ps-3 mb-0" style="line-height:1.9;">
+                    <li><strong>A · Incognito</strong> — tasuje fragmenty; każdy worker dostaje <em>inny</em> losowy model. Żaden model online nie widzi całości dokumentu.</li>
+                    <li><strong>B · Szybkość</strong> — 4 workery równolegle, najszybsze modele free, krótka synteza. Priorytet: czas.</li>
+                    <li><strong>C · Jakość</strong> — 3 workery z większymi fragmentami, mocniejsze modele i dłuższa synteza końcowa. Priorytet: spójność.</li>
+                </ul>
                 <hr style="border-color:#e0e0ff;">
-                <p class="small text-muted mb-0">Każde "Generuj nowe" losuje inną próbkę → inne pytania. Przydatne do odkrywania nowych wątków w bazie.</p>
+                <p class="small text-muted mb-0">Przełącznik w topbarze (Rój: A/B/C) zmienia ten sam tryb — ustawienie jest wspólne dla całej aplikacji.</p>
             </div>
         </div>
     </div>
@@ -951,6 +1137,68 @@
 </div>
 
 <!-- TAB: BAZY -->
+<!-- TAB: FLOTA LLM -->
+<div id="tabFleet" class="main-wrap" style="display:none;">
+<div class="row g-3">
+  <div class="col-12">
+    <div class="search-card">
+      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+        <div>
+          <h2 style="margin:0;">Flota LLM — dostawcy i ranking</h2>
+          <div class="small text-muted mt-1">Sprawdza dostępność, opóźnienie i limity. Ten sam rój agentów może korzystać z OpenRouter, Groq i Ollama.</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <select id="fleetTaskSelect" class="form-select form-select-sm" style="max-width:200px;" onchange="fleetLoad()">
+            <option value="general">Zadanie: ogólne</option>
+            <option value="search">Wyszukiwanie</option>
+            <option value="ai">AI z bazy</option>
+            <option value="compare">Porównaj</option>
+            <option value="network">Sieć powiązań</option>
+            <option value="timeline">Oś czasu</option>
+            <option value="swarm">Rój agentów</option>
+          </select>
+          <button class="btn btn-outline-secondary btn-sm" onclick="fleetLoad()">↺ Odśwież</button>
+          <button class="btn btn-primary btn-sm" id="fleetProbeBtn" onclick="fleetProbeAll()">⚡ Sonduj wszystkich</button>
+        </div>
+      </div>
+      <div class="d-flex flex-wrap align-items-center gap-3 mb-3 p-2 rounded" style="background:#f8fafc;border:1px solid #e2e8f0;">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="fleetAutoRoute" onchange="fleetSetAutoRoute(this.checked)">
+          <label class="form-check-label small fw-semibold" for="fleetAutoRoute" style="cursor:pointer;">Auto-routing (najlepszy dostawca gdy UI nie wybiera)</label>
+        </div>
+        <span id="fleetRecommendBadge" class="dash-pill dash-pill--info"></span>
+        <button class="btn btn-sm btn-outline-primary" id="fleetApplyBtn" onclick="fleetApplyRecommended()" style="display:none;">Użyj rekomendowanego</button>
+      </div>
+      <div id="fleetStatus" class="small text-muted mb-2">Ładowanie…</div>
+      <div id="fleetTableWrap" class="table-responsive">
+        <table class="table table-sm align-middle mb-0" style="font-size:0.82rem;">
+          <thead class="table-light">
+            <tr>
+              <th>#</th>
+              <th>Dostawca</th>
+              <th>Status</th>
+              <th>Score</th>
+              <th>Opóźnienie</th>
+              <th>Model</th>
+              <th>Limity / kontekst</th>
+              <th>Agenty</th>
+              <th>Statystyki</th>
+            </tr>
+          </thead>
+          <tbody id="fleetTableBody">
+            <tr><td colspan="9" class="text-muted text-center py-4">Ładowanie…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-3 small text-muted">
+        Score: dostępność + szybkość sondy + historia wywołań. Przy 429/auth rotacja puli kluczy (patrz <code>/health</code>).
+        Fallback na Ollama przy limitach — ustawienie w konfiguracji LLM poniżej.
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
 <div id="tabCollections" class="main-wrap" style="display:none;">
 <div class="row g-3">
   <div class="col-lg-5">
@@ -1340,7 +1588,7 @@ function _suggestModelForTab(name) {
 
 function showTab(name) {
     // Ukrywamy WSZYSTKIE zakładki (w tym raporty) — wcześniej brakowało tabReports
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabSwarm','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabFleet','tabCollections','tabImport'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
@@ -1349,13 +1597,16 @@ function showTab(name) {
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
 
     // Poprawiona mapa indeksów zakładek (raporty są na pozycji 5)
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8};
+    const map = {search:0, docs:1, ai:2, swarm:3, compare:4, network:5, timeline:6, reports:7, sql:8, fleet:9, collections:10, import:11};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
 
     _suggestModelForTab(name);
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
+    if ((name === 'ai' || name === 'swarm') && typeof updateSwarmModeUI === 'function') updateSwarmModeUI();
+    if (name === 'swarm' && typeof initSwarmTemplates === 'function') initSwarmTemplates();
+    if (name === 'fleet' && typeof fleetLoad === 'function') fleetLoad({ autoProbe: true });
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
@@ -1409,18 +1660,14 @@ function updateHealthStatus() {
                 setStatusDot('dotQdrant', d.qdrant_status || (d.qdrant?.ok ? 'ok' : 'error'));
                 setStatusDot('dotLlm',    d.llm_status    || (d.llm?.ok    ? 'ok' : 'error'));
 
-                const ocrDot = document.getElementById('dotOcr');
-                if (ocrDot) {
-                    const ocrOk = d.ocr_available ?? false;
-                    ocrDot.className = 'status-dot ' + (ocrOk ? 'dot-ok' : 'dot-warn');
-                    ocrDot.title = ocrOk
-                        ? 'OCR (Tesseract) — dostępny'
-                        : 'OCR niedostępny';
-                }
+                setStatusDot('dotOcr', (d.ocr_available ?? false) ? 'ok' : 'warn');
             }
 
             if (typeof updateTopbarLlmBadge === 'function') {
                 updateTopbarLlmBadge(d);
+            }
+            if (typeof updateSwarmTopbarUI === 'function') {
+                updateSwarmTopbarUI();
             }
         })
         .catch(() => {
@@ -1432,8 +1679,7 @@ function updateHealthStatus() {
             if (typeof setStatusDot === 'function') {
                 setStatusDot('dotQdrant', 'error');
                 setStatusDot('dotLlm',    'error');
-                const ocrDot = document.getElementById('dotOcr');
-                if (ocrDot) ocrDot.className = 'status-dot dot-err';
+                setStatusDot('dotOcr',    'error');
             }
             // Wersja — zostawiamy poprzednią wartość lub pokazujemy "dev"
             const verEl = document.getElementById('appVersion');
@@ -1907,7 +2153,7 @@ function executeSearch() {
             }
             const shortModel = model.includes('/') ? model.split('/').pop() : model;
             const labels = { openrouter: 'OpenRouter', groq: 'Groq', ollama: 'Ollama' };
-            document.getElementById('tokenProviderBadge').textContent = `${labels[prov] || prov} · ${shortModel}`;
+            dashPillFill(document.getElementById('tokenProviderBadge'), 'info', `${labels[prov] || prov} · ${shortModel}`);
         }
 
         function _tickTokenCounter(token) {
@@ -1916,9 +2162,6 @@ function executeSearch() {
             document.getElementById('tokenCount').textContent = _tokCount.toLocaleString('pl');
             if (secs > 0.5)
                 document.getElementById('tokenSpeed').textContent = Math.round(_tokCount / secs);
-
-            // Live update global session counter (przybliżenie)
-            updateSessionTokenCounter(1);
         }
 
         function _stopTokenCounter(realUsage = null) {
@@ -1928,25 +2171,27 @@ function executeSearch() {
             const fin = document.getElementById('tokenFinalMsg');
 
             let finalCount = _tokCount;
-
-            // Jeśli dostaliśmy prawdziwe dane usage z OpenRouter
             if (realUsage && realUsage.completion_tokens) {
                 finalCount = realUsage.completion_tokens;
-                _tokCount = finalCount; // nadpisz przybliżenie
                 document.getElementById('tokenCount').textContent = finalCount.toLocaleString('pl');
             }
 
             fin.textContent = `Gotowe — ${finalCount.toLocaleString('pl')} tokenów w ${secs}s`;
             fin.style.display = 'inline';
-
-            // Zaktualizuj globalny licznik sesji dokładniejszą wartością
-            updateSessionTokenCounter(finalCount - (_tokCount - finalCount)); // korekta
+            updateSessionTokenCounter(finalCount);
         }
 
         const readChunk = async () => {
             try {
                 const {done, value} = await reader.read();
-                if (done) { btn.disabled = false; return; }
+                if (done) {
+                    _stopTokenCounter();
+                    const box = document.getElementById('aiStreamBox');
+                    if (box) { const sp = box.querySelector('.spinner-border'); if (sp) sp.remove(); }
+                    if (stopBtn) stopBtn.style.display = 'none';
+                    btn.disabled = false;
+                    return;
+                }
                 buffer += decoder.decode(value, {stream: true});
                 const parts = buffer.split('\n\n');
                 buffer = parts.pop();
@@ -1963,11 +2208,11 @@ function executeSearch() {
                             aiContainer.innerHTML = `
                                 <div class="ai-box" style="border-left-color:${modeColor};" id="aiStreamBox">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <h5 style="color:${modeColor};margin:0;">${ev.mode_label||'Analiza LLM'} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
+                                        <h5 style="color:${modeColor};margin:0;">${escapeHtml(ev.mode_label||'Analiza LLM')} <span class="spinner-border spinner-border-sm ms-2" style="color:${modeColor};"></span></h5>
                                         <div class="d-flex gap-2">
                                             <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
                             ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
-                                            <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                                            <button data-query="${escapeHtml(query)}" onclick="openNetworkForQuery(this.dataset.query); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
                                         </div>
                                     </div>
                                     <div id="aiAnswerBody" style="font-size:0.96rem;line-height:1.65;color:#1e2937;white-space:pre-wrap;"></div>
@@ -1979,7 +2224,7 @@ function executeSearch() {
                         } else if (ev.token !== undefined) {
                             // Obsługa błędów rate limit / błędów OpenRouter jako zwykłych tokenów (stary sposób)
                             const t = ev.token;
-                            if (typeof t === 'string' && (t.startsWith('[RATE_LIMIT]') || t.startsWith('[Błąd OpenRouter'))) {
+                            if (isLlmStreamError(t)) {
                                 handleRateLimitError(t, container, loader, btn, stopBtn, query, mode);
                                 return;
                             }
@@ -1988,7 +2233,7 @@ function executeSearch() {
                             aiText += t;
                             const body = document.getElementById('aiAnswerBody');
                             if (body) body.innerHTML = formatAiText(aiText, mode);
-                        } else if (ev.done !== undefined) {
+                        } else if (ev.ai_answer !== undefined || ev.done === true) {
                             _stopTokenCounter();
                             const box = document.getElementById('aiStreamBox');
                             if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
@@ -2005,7 +2250,7 @@ function executeSearch() {
                             btn.disabled = false; return;
                         } else if (ev.error) {
                             loader.classList.add('d-none');
-                            if (typeof ev.error === 'string' && (ev.error.includes('RATE_LIMIT') || ev.error.includes('429') || ev.error.includes('Too Many'))) {
+                            if (isLlmStreamError(ev.error)) {
                                 handleRateLimitError(ev.error, container, loader, btn, stopBtn, query, mode);
                             } else {
                                 container.innerHTML = `<div class="alert alert-danger">${escapeHtml(ev.error)}</div>`;
@@ -2032,89 +2277,6 @@ function executeSearch() {
         btn.disabled = false;
         container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(err)}</div>`;
     });
-    return;
-
-    // === stary kod (niedostępny) ===
-    fetch('/search_old', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
-    .then(r => r.json())
-    .then(data => {
-        loader.classList.add('d-none');
-        btn.disabled = false;
-        if (!data.success) {
-            container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(data.error)}</div>`;
-            return;
-        }
-
-        const modeColors = {
-            detective: '#b45309', legal: '#1d4ed8',
-            inconsistency: '#7c3aed', extract: '#065f46', normal: '#4f46e5'
-        };
-        const modeColor = modeColors[data.mode] || '#4f46e5';
-        const isExtract = data.mode === 'extract';
-
-        // Zapisz dane do eksportu
-        window._lastSearchData = {query, results: data.results, ai_answer: data.ai_answer, mode_label: data.mode_label};
-
-        aiContainer.innerHTML = `
-            <div class="ai-box" style="border-left-color:${modeColor};">
-                <div class="d-flex justify-content-between align-items-start mb-2">
-                    <h5 style="color:${modeColor};margin:0;">${data.mode_label || 'Analiza LLM'}</h5>
-                    <div class="d-flex gap-2">
-                        <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm"
-                            style="font-size:0.75rem;padding:2px 10px;" title="Pobierz raport Word">
-                            📄 Pobierz DOCX
-                        </button>
-                        <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');"
-                            class="btn btn-outline-primary btn-sm"
-                            style="font-size:0.75rem;padding:2px 10px;" title="Wizualizuj sieć powiązań">
-                            🕸 Sieć powiązań
-                        </button>
-                    </div>
-                </div>
-                <div style="font-size:0.95rem;line-height:1.7;font-weight:500;">
-                    ${isExtract ? renderMarkdownTable(data.ai_answer) : data.ai_answer.replace(/\n/g,'<br>').replace(/\[(ANOMALIA|NIESPÓJNOŚĆ|PODEJRZANE|WYMAGA SPRAWDZENIA|PRZEPIS NIEAKTUALNY|PRZEPIS NIEADEKWATNY|BŁĘDNE ZASTOSOWANIE|SPRZECZNOŚĆ)\]/g, '<span class="badge" style="background:#fee2e2;color:#b91c1c;font-size:0.78rem;margin:0 2px;">$1</span>')}
-                </div>
-            </div>
-            <div id="verifyContainer"></div>`;
-
-        // Weryfikacja — uruchamia się asynchronicznie po wyświetleniu odpowiedzi
-        if (document.getElementById('verifyToggle').checked && data.contexts && data.contexts.length) {
-            runVerification(query, data.ai_answer, data.contexts);
-        }
-
-        if (!data.results.length) {
-            container.innerHTML = `<div class="alert alert-warning">Brak dokumentów źródłowych spełniających kryteria semantyczne.</div>`;
-            return;
-        }
-        container.innerHTML = data.results.map((item, idx) => {
-            const hasPath = item.win_path && item.win_path.length > 3;
-            const pathHtml = hasPath
-                ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
-                    📂 <span style="font-family:monospace;">${item.win_path}</span>
-                    <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
-                        style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
-                   </div>`
-                : '';
-            return `
-            <div class="result-card">
-                <div class="result-header" onclick="toggleResult(${idx})">
-                    <span class="result-fname">📄 ${item.file}</span>
-                    <span class="result-meta">
-                        <span class="badge bg-secondary">${(parseFloat(item.score)*100).toFixed(1)}%</span>
-                        <span class="chevron" id="chev${idx}">▼</span>
-                    </span>
-                </div>
-                <div class="result-preview" id="prev${idx}">${item.text.replace(/<[^>]*>/g,'').slice(0,200)}</div>
-                <div class="result-body" id="body${idx}">${item.text}</div>
-                ${pathHtml}
-            </div>`;
-        }).join('');
-    })
-    .catch(err => {
-        loader.classList.add('d-none');
-        btn.disabled = false;
-        container.innerHTML = `<div class="alert alert-danger">Błąd połączenia: ${escapeHtml(err)}</div>`;
-    });
 }
 
 // ---- HISTORIA ZAPYTAŃ ----
@@ -2134,8 +2296,8 @@ function renderHistoryPanel() {
     panel.innerHTML = h.map((item, i) => `
         <div class="d-flex align-items-start gap-2 mb-1 pb-1 border-bottom" style="font-size:0.78rem;">
             <div class="flex-grow-1" style="min-width:0;">
-                <div class="text-muted" style="font-size:0.68rem;">${item.ts} · ${item.mode||'normal'}</div>
-                <a href="#" onclick="reuseHistory(${i});return false;" class="text-truncate d-block fw-semibold">${item.query}</a>
+                <div class="text-muted" style="font-size:0.68rem;">${escapeHtml(item.ts)} · ${escapeHtml(item.mode||'normal')}</div>
+                <a href="#" onclick="reuseHistory(${i});return false;" class="text-truncate d-block fw-semibold">${escapeHtml(item.query)}</a>
             </div>
             <button onclick="deleteHistory(${i})" style="background:none;border:none;color:#adb5bd;padding:0;font-size:0.85rem;">✕</button>
         </div>`).join('');
@@ -2194,10 +2356,10 @@ function renderCompareFileList() {
     const filtered = allDocs.filter(d => d.file.toLowerCase().includes(q)).slice(0,50);
     list.innerHTML = filtered.map(d => `
         <div class="d-flex justify-content-between align-items-center py-1 border-bottom">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${d.file}">${d.file}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${escapeHtml(d.file)}">${escapeHtml(d.file)}</span>
             <div class="d-flex gap-1 flex-shrink-0 ms-1">
-                <button class="doc-row-btn" onclick="setCompareFile('A','${d.file.replace(/'/g,"\\'")}')">A</button>
-                <button class="doc-row-btn" onclick="setCompareFile('B','${d.file.replace(/'/g,"\\'")}')">B</button>
+                <button class="doc-row-btn" data-file="${escapeHtml(d.file)}" onclick="setCompareFile('A', this.dataset.file)">A</button>
+                <button class="doc-row-btn" data-file="${escapeHtml(d.file)}" onclick="setCompareFile('B', this.dataset.file)">B</button>
             </div>
         </div>`).join('');
 }
@@ -2219,11 +2381,10 @@ function compareDocuments() {
     st.classList.remove('d-none'); st.textContent = 'LLM czyta oba dokumenty...';
     res.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary"></div><p class="mt-2 small text-muted">Porównywanie dokumentów przez LLM (~30-60 sek)...</p></div>`;
 
-    fetch('/compare', {
+    fetchJson('/compare', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({file_a: fa, file_b: fb, focus})
+        body: JSON.stringify({file_a: fa, file_b: fb, focus, ...getLlmRequestPayload()})
     })
-    .then(r=>r.json())
     .then(d => {
         btn.disabled = false; st.classList.add('d-none');
         if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`; return; }
@@ -2241,7 +2402,7 @@ function compareDocuments() {
                 <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
             </div>`;
     })
-    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e)}</div>`; });
+    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e.message || e)}</div>`; });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
@@ -2320,11 +2481,11 @@ function renderDocResults(results, query, container) {
     }
     container.innerHTML = results.map((item, idx) => {
         const hasPath = item.win_path && item.win_path.length > 3;
-        const snippet = item.snippet || (item.text ? item.text.replace(/<[^>]*>/g, '').slice(0, 200) : '');
+        const snippet = escapeHtml(item.snippet || (item.text ? item.text.replace(/<[^>]*>/g, '').slice(0, 200) : ''));
         const pathHtml = hasPath
             ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
                 📂 <span style="font-family:monospace;">${escapeHtml(item.win_path)}</span>
-                <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
+                <button data-path="${escapeHtml(item.full_path || '')}" onclick="openFile(this.dataset.path)"
                     style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
                </div>` : '';
         return `<div class="result-card">
@@ -2377,7 +2538,7 @@ function openContextPreview(pointId, file, query) {
             if (m.size_human) meta.push('Rozmiar: ' + m.size_human);
             if (d.truncated) meta.push('(skrócono do 12k znaków)');
             document.getElementById('contextPreviewMeta').textContent = meta.join(' · ');
-            document.getElementById('contextPreviewBody').innerHTML = d.text || '(pusty fragment)';
+            document.getElementById('contextPreviewBody').textContent = d.text || '(pusty fragment)';
             const openBtn = document.getElementById('contextPreviewOpenBtn');
             if (d.full_path) {
                 openBtn.style.display = '';
@@ -3064,7 +3225,8 @@ function loadSuggestions(force) {
         if (sideContainer) {
             sideContainer.innerHTML = d.suggestions.map(s =>
                 `<button class="prompt-btn" style="border-color:#e0e0ff;background:#fafafe;"
-                    onclick="selectPrompt('${s.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${s}</button>`
+                    data-prompt="${escapeHtml(s)}"
+                    onclick="selectPrompt(this.dataset.prompt)">${escapeHtml(s)}</button>`
             ).join('') + (d.cached ? '<div class="small text-muted px-1 mt-1" style="font-size:0.7rem;">z cache · kliknij ↺ aby odświeżyć</div>' : '');
         }
         // Zakładka AI z bazy — większe karty
@@ -3073,11 +3235,12 @@ function loadSuggestions(force) {
             d.suggestions.map((s, i) =>
                 `<div class="col-md-6">
                     <div class="card border-0 shadow-sm h-100" style="border-left:4px solid #4f46e5 !important;cursor:pointer;"
-                        onclick="selectPrompt('${s.replace(/'/g,"\\'").replace(/"/g,'&quot;')}'); showTab('search');">
+                        data-prompt="${escapeHtml(s)}"
+                        onclick="selectPrompt(this.dataset.prompt); showTab('search');">
                         <div class="card-body py-3 px-3">
                             <div class="d-flex gap-2 align-items-start">
                                 <span style="color:#4f46e5;font-weight:800;font-size:1.1rem;">${i+1}</span>
-                                <span style="font-size:0.9rem;line-height:1.5;">${s}</span>
+                                <span style="font-size:0.9rem;line-height:1.5;">${escapeHtml(s)}</span>
                             </div>
                         </div>
                         <div class="card-footer bg-transparent border-0 pt-0 pb-2 px-3">
@@ -3136,7 +3299,7 @@ function analyzeExcel(fname) {
     .then(d => {
         if (!d.success) {
             document.getElementById('excelModalBody').innerHTML =
-                `<div class="alert alert-danger">❌ ${d.error}</div>`;
+                `<div class="alert alert-danger">❌ ${escapeHtml(d.error)}</div>`;
             return;
         }
         const s = d.summary || {};
@@ -3245,7 +3408,7 @@ function analyzeExcel(fname) {
     })
     .catch(e => {
         document.getElementById('excelModalBody').innerHTML =
-            `<div class="alert alert-danger">Błąd połączenia: ${e}</div>`;
+            `<div class="alert alert-danger">Błąd połączenia: ${escapeHtml(String(e?.message || e || 'Nieznany błąd'))}</div>`;
     });
 }
 
@@ -3504,7 +3667,7 @@ function showNetworkTooltip(event, html) {
     const wrap = document.getElementById('networkSvg')?.parentElement;
     if (!tt || !wrap) return;
     const [px, py] = d3.pointer(event, wrap);
-    tt.innerHTML = html;
+    tt.innerHTML = String(html || '');
     tt.style.display = 'block';
     tt.style.left = (px + 14) + 'px';
     tt.style.top  = (py - 8) + 'px';
@@ -3897,6 +4060,7 @@ function renderTimeline(data) {
 document.addEventListener('DOMContentLoaded', () => {
     initNetworkFilterListeners();
     restoreLlmProvider();
+    updateSwarmModeUI();
     startHealthAutoRefresh();
 });
 
@@ -4079,7 +4243,10 @@ function renderNetwork(nodes, edges) {
     });
 
     node.append('text')
-        .text(d => d.label.length > 13 ? d.label.slice(0,12) + '…' : d.label)
+        .text(d => {
+            const label = String(d?.label || '');
+            return label.length > 13 ? label.slice(0, 12) + '…' : label;
+        })
         .attr('text-anchor', 'middle')
         .attr('dy', '0.35em')
         .attr('font-size', 9)
@@ -4118,14 +4285,354 @@ function getCurrentLlmProvider() {
 function updateTopbarLlmBadge(healthData) {
     const el = document.getElementById('statLlmChat');
     if (!el) return;
-    const prov = getCurrentLlmProvider();
+    const prov = (healthData && (healthData.llm_provider || healthData.provider)) || getCurrentLlmProvider();
     const labels = { openrouter: 'OR', groq: 'Groq', ollama: 'Ollama' };
-    let model = '';
-    if (prov === 'openrouter') model = getCurrentOpenRouterModel();
-    else if (prov === 'groq') model = getCurrentGroqModel();
-    else model = (healthData && healthData.llm_model) || 'llama3';
+    let model = (healthData && healthData.llm_model) || '';
+    if (!model) {
+        if (prov === 'openrouter') model = getCurrentOpenRouterModel();
+        else if (prov === 'groq') model = getCurrentGroqModel();
+        else model = 'llama3';
+    }
     const short = model ? (model.includes('/') ? model.split('/').pop() : model) : '?';
     el.textContent = `${labels[prov] || prov} · ${short}`;
+}
+
+const SWARM_MODE_META = {
+    A: {
+        label: 'A · Incognito',
+        short: 'Incognito',
+        description: 'Tasuje fragmenty, losuje model na każdego workera — maksymalna prywatność w chmurze.',
+        workers: 5,
+        chunksPerWorker: 4,
+        defaultLimit: 20,
+        shuffle: true,
+        randomModels: true,
+        mask_pii_default: true,
+        strict_incognito_default: true,
+        features: [
+            '5 workerów równolegle',
+            'Tasowanie fragmentów przed podziałem',
+            'Każdy worker → inny losowy model',
+            'Niższa temperatura (mniej halucynacji)',
+            'Maskowanie PII + synteza lokalna (domyślnie)',
+        ],
+    },
+    B: {
+        label: 'B · Szybkość',
+        short: 'Szybkość',
+        description: 'Najszybsze modele free, 4 workery, krótka synteza — minimalny czas oczekiwania.',
+        workers: 4,
+        chunksPerWorker: 5,
+        defaultLimit: 20,
+        shuffle: false,
+        randomModels: false,
+        mask_pii_default: false,
+        strict_incognito_default: false,
+        features: [
+            '4 workery równolegle',
+            'Jeden szybki model na workera',
+            'Fragmenty w kolejności trafności RAG',
+            'Krótka synteza końcowa',
+        ],
+    },
+    C: {
+        label: 'C · Jakość',
+        short: 'Jakość',
+        description: 'Mocniejsze modele, większe fragmenty na workera, rozbudowana synteza końcowa.',
+        workers: 3,
+        chunksPerWorker: 6,
+        defaultLimit: 18,
+        shuffle: false,
+        randomModels: false,
+        mask_pii_default: false,
+        strict_incognito_default: false,
+        features: [
+            '3 workery — więcej tekstu na worker',
+            'Top modele jakości (70B, Compound…)',
+            'Długa synteza z wielu modeli fallback',
+            'Priorytet spójności i głębi wniosków',
+        ],
+    },
+};
+
+const SWARM_TASK_TEMPLATES = [
+    { id: 'overpayments', label: 'Przepłaty / faktury', hint: 'Duplikaty kwot, rozbieżności NIP–kwota', query: 'Przeanalizuj fragmenty pod kątem przepłat, duplikatów faktur, rozbieżności kwot vs terminów płatności oraz podejrzanej fragmentacji zamówień. Wypisz konkretne kwoty, daty i kontrahentów z oznaczeniem ryzyka.', suggested_mode: 'A' },
+    { id: 'thesis', label: 'Praca dyplomowa', hint: 'Metodologia, luki, odwołania', query: 'Oceń fragmenty pod kątem spójności metodologii, jakości argumentacji, brakujących odwołań i powtórzeń. Wskaż mocne strony, luki i sugestie poprawy dla recenzenta merytorycznego.', suggested_mode: 'C' },
+    { id: 'contracts', label: 'Umowy / klauzule', hint: 'Ryzyka prawne i niespójności', query: 'Przeanalizuj fragmenty umów i aneksów: wskaż klauzule wysokiego ryzyka, niespójności między załącznikami, terminy, kary umowne i brakujące elementy. Zwróć checklistę ryzyk z priorytetem.', suggested_mode: 'A' },
+    { id: 'links', label: 'Powiązania', hint: 'Osoby, firmy, kontekst', query: 'Na podstawie fragmentów wskaż powiązania między osobami, firmami i kwotami. Wypisz role, daty i kontekst współwystępowania. Zaznacz powiązania wymagające weryfikacji.', suggested_mode: 'B' },
+];
+
+function initSwarmTemplates() {
+    const wrap = document.getElementById('swarmTemplateBtns');
+    if (!wrap || wrap.dataset.ready === '1') return;
+    wrap.dataset.ready = '1';
+    wrap.innerHTML = SWARM_TASK_TEMPLATES.map(t =>
+        `<button type="button" class="btn btn-sm btn-outline-secondary" title="${escapeHtml(t.hint)}"
+            onclick="applySwarmTemplate('${t.id}')">${escapeHtml(t.label)}</button>`
+    ).join('');
+}
+
+function applySwarmTemplate(id) {
+    const tpl = SWARM_TASK_TEMPLATES.find(t => t.id === id);
+    if (!tpl) return;
+    const q = document.getElementById('swarmQuery');
+    if (q) q.value = tpl.query;
+    if (tpl.suggested_mode) setSwarmMode(tpl.suggested_mode);
+    showTab('swarm');
+}
+
+function isSwarmCloudProvider() {
+    const p = getCurrentLlmProvider();
+    return p === 'openrouter' || p === 'groq';
+}
+
+function updateSwarmPrivacyControls() {
+    const meta = SWARM_MODE_META[getSwarmMode()] || SWARM_MODE_META.A;
+    const cloud = isSwarmCloudProvider();
+    const maskEl = document.getElementById('swarmMaskPii');
+    const strictEl = document.getElementById('swarmStrictIncognito');
+    if (maskEl) {
+        maskEl.checked = cloud && !!meta.mask_pii_default;
+        maskEl.disabled = !cloud;
+    }
+    if (strictEl) {
+        strictEl.checked = cloud && !!meta.strict_incognito_default;
+        strictEl.disabled = !cloud;
+    }
+}
+
+function getSwarmPrivacyPayload() {
+    const cloud = isSwarmCloudProvider();
+    const maskEl = document.getElementById('swarmMaskPii');
+    const strictEl = document.getElementById('swarmStrictIncognito');
+    return {
+        mask_pii: cloud && !!(maskEl && maskEl.checked),
+        strict_incognito: cloud && !!(strictEl && strictEl.checked),
+    };
+}
+
+function formatSwarmPiiStats(stats) {
+    if (!stats || typeof stats !== 'object') return '';
+    const parts = Object.entries(stats).filter(([, v]) => v > 0).map(([k, v]) => `${k}: ${v}`);
+    return parts.length ? parts.join(', ') : '';
+}
+
+function updateSwarmLimitForMode(mode) {
+    const sel = document.getElementById('swarmLimit');
+    const meta = SWARM_MODE_META[mode] || SWARM_MODE_META.A;
+    if (!sel || !meta.defaultLimit) return;
+    const val = String(meta.defaultLimit);
+    if (sel.querySelector(`option[value="${val}"]`)) sel.value = val;
+}
+
+function renderSwarmModeDetails(mode) {
+    const box = document.getElementById('swarmModeDetails');
+    if (!box) return;
+    const meta = SWARM_MODE_META[mode] || SWARM_MODE_META.A;
+    const feats = (meta.features || []).map(f => `<li>${escapeHtml(f)}</li>`).join('');
+    box.innerHTML = `
+        <strong>${escapeHtml(meta.label)}</strong> — ${escapeHtml(meta.description)}
+        <ul class="mb-0 mt-1 ps-3">${feats}</ul>
+        <div class="mt-1 text-muted" style="font-size:0.75rem;">
+            Konfiguracja: ${meta.workers} workerów × do ${meta.chunksPerWorker} fragmentów
+            · tasowanie: ${meta.shuffle ? 'tak' : 'nie'}
+            · losowe modele: ${meta.randomModels ? 'tak' : 'nie'}
+        </div>`;
+}
+
+function getSwarmMode() {
+    return (localStorage.getItem('swarm_mode') || 'A').toUpperCase();
+}
+
+function updateSwarmModeUI() {
+    const mode = getSwarmMode();
+    document.querySelectorAll('.swarm-mode-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === mode);
+        btn.setAttribute('aria-pressed', btn.dataset.mode === mode ? 'true' : 'false');
+    });
+    const hint = document.getElementById('swarmModeHint');
+    const meta = SWARM_MODE_META[mode] || SWARM_MODE_META.A;
+    if (hint) hint.textContent = meta.description;
+    renderSwarmModeDetails(mode);
+    updateSwarmLimitForMode(mode);
+    updateSwarmPrivacyControls();
+    updateSwarmTopbarUI();
+    initSwarmTemplates();
+    const runBtn = document.getElementById('swarmRunBtn');
+    if (runBtn) runBtn.textContent = `Uruchom rój (${meta.short})`;
+}
+
+function setSwarmMode(mode) {
+    localStorage.setItem('swarm_mode', (mode || 'A').toUpperCase());
+    updateSwarmModeUI();
+}
+
+function updateSwarmTopbarUI() {
+    const wrapper = document.getElementById('swarmTopbarBadge');
+    const label = document.getElementById('swarmTopbarModeLabel');
+    if (!wrapper) return;
+    wrapper.style.display = 'flex';
+
+    const mode = getSwarmMode();
+    const meta = SWARM_MODE_META[mode] || SWARM_MODE_META.A;
+    const clsMap = { A: 'mode-a', B: 'mode-b', C: 'mode-c' };
+    if (label) {
+        const supported = getCurrentLlmProvider() === 'openrouter' || getCurrentLlmProvider() === 'groq';
+        label.className = `swarm-mode-pill ${supported ? (clsMap[mode] || 'mode-a') : 'mode-hidden'}`;
+        label.innerHTML = supported
+            ? `<span class="swarm-dot"></span><span class="swarm-text">${escapeHtml(meta.short || meta.label || 'Rój')}</span>`
+            : '<span class="swarm-text">Rój tylko dla OpenRouter/Groq</span>';
+        label.title = meta.description;
+    }
+}
+
+function renderSwarmWorker(worker) {
+    const idx = (worker.worker_index ?? 0) + 1;
+    const model = escapeHtml(worker.model || '—');
+    const chunks = worker.chunks ?? 0;
+    const summary = escapeHtml(worker.summary || worker.error || 'Brak odpowiedzi');
+    return `
+        <div class="swarm-worker">
+            <h6>Worker ${idx} · ${model} · ${chunks} fragmentów</h6>
+            <pre>${summary}</pre>
+        </div>`;
+}
+
+function runSwarm() {
+    const queryEl = document.getElementById('swarmQuery');
+    const limitEl = document.getElementById('swarmLimit');
+    const result = document.getElementById('swarmResult');
+    const status = document.getElementById('swarmStatus');
+    const bar = document.getElementById('swarmProgressBar');
+    const btn = document.getElementById('swarmRunBtn');
+    const query = (queryEl?.value || '').trim();
+    const limit = parseInt(limitEl?.value || '15', 10) || 15;
+    const mode = getSwarmMode();
+
+    if (!query) {
+        alert('Wpisz pytanie do roju.');
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+    if (bar) bar.style.width = '0%';
+    if (status) status.textContent = 'Startuję rój workerów...';
+    if (result) result.innerHTML = '<div class="text-center text-muted small py-3">Przetwarzanie...</div>';
+
+    const state = { workers: [], finalAnswer: '', modeLabel: '', usedModel: '', synthProvider: '', sources: 0, totalWorkers: 0, doneWorkers: 0, privacy: '' };
+
+    const render = () => {
+        if (!result) return;
+        let html = '';
+        if (state.modeLabel) {
+            html += `<div class="alert alert-info py-2 mb-3 small">
+                <strong>${escapeHtml(state.modeLabel)}</strong>
+                ${state.privacy ? `<div class="mt-1">${state.privacy}</div>` : ''}
+                ${state.usedModel ? `<div class="mt-1">Synteza: <code>${escapeHtml(state.usedModel)}</code>${state.synthProvider ? ` (${escapeHtml(state.synthProvider)})` : ''}</div>` : ''}
+                ${state.sources ? `<div class="mt-1">Źródła: ${state.sources}</div>` : ''}
+            </div>`;
+        }
+        if (state.finalAnswer) {
+            html += `<div class="ai-box" style="border-left-color:#4f46e5;">
+                <h5 style="color:#4f46e5;">Finalny wynik</h5>
+                <div style="font-size:0.95rem;line-height:1.65;white-space:pre-wrap;">${escapeHtml(state.finalAnswer).replace(/\n/g, '<br>')}</div>
+            </div>`;
+        }
+        if (state.workers.length) {
+            html += '<div class="mt-3"><div class="small text-muted mb-2">Wyniki workerów</div>';
+            html += state.workers
+                .filter(Boolean)
+                .sort((a, b) => (a.worker_index || 0) - (b.worker_index || 0))
+                .map(renderSwarmWorker)
+                .join('');
+            html += '</div>';
+        }
+        if (!html) {
+            html = '<div class="text-muted small">Brak wyników.</div>';
+        }
+        result.innerHTML = html;
+    };
+
+    streamSSEPost('/agents/swarm', {
+        query,
+        limit,
+        swarm_mode: mode,
+        ...getLlmRequestPayload(),
+        ...getSwarmPrivacyPayload(),
+    }, {
+        start: (d) => {
+            state.modeLabel = d.mode_label || SWARM_MODE_META[mode]?.label || mode;
+            state.totalWorkers = d.workers || 0;
+            state.doneWorkers = 0;
+            const priv = [];
+            if (d.mask_pii) priv.push('🛡️ maskowanie PII');
+            if (d.strict_incognito) priv.push('🏠 synteza lokalna (Ollama)');
+            const piiTxt = formatSwarmPiiStats(d.pii_redactions);
+            if (piiTxt) priv.push(`redakcje: ${piiTxt}`);
+            state.privacy = priv.join(' · ');
+            const desc = d.description || SWARM_MODE_META[mode]?.description || 'Start...';
+            const extra = (d.shuffle_chunks !== undefined)
+                ? ` · tasowanie: ${d.shuffle_chunks ? 'tak' : 'nie'} · losowe modele: ${d.random_models ? 'tak' : 'nie'}`
+                : '';
+            if (status) status.textContent = `[Map] ${desc}${extra}`;
+            if (bar) bar.style.width = '8%';
+            render();
+        },
+        progress: (d) => {
+            if (status && d.message) status.textContent = d.message;
+        },
+        worker: (d) => {
+            state.workers[d.worker_index ?? state.workers.length] = d;
+            state.doneWorkers += 1;
+            if (bar && state.totalWorkers) {
+                const pct = 8 + Math.round((state.doneWorkers / state.totalWorkers) * 72);
+                bar.style.width = Math.min(80, pct) + '%';
+            }
+            render();
+            const wn = (d.worker_index ?? 0) + 1;
+            const model = d.model || '?';
+            const chunks = d.chunks ?? '?';
+            if (status) {
+                status.textContent = d.error
+                    ? `[Worker ${wn}/${d.workers || '?'}] ❌ ${d.error}`
+                    : `[Worker ${wn}/${d.workers || '?'}] ✅ ${model} · ${chunks} frag.`;
+            }
+        },
+        reduce: (d) => {
+            if (bar) bar.style.width = '88%';
+            if (status && d.message) status.textContent = `[Synteza] ${d.message}`;
+        },
+        done: (d) => {
+            state.modeLabel = d.mode_label || state.modeLabel || SWARM_MODE_META[mode]?.label || mode;
+            state.usedModel = d.used_model || '';
+            state.synthProvider = d.synth_provider || d.provider || '';
+            state.sources = d.sources || 0;
+            state.finalAnswer = d.answer || '';
+            if (Array.isArray(d.workers)) state.workers = d.workers;
+            const priv = [];
+            if (d.mask_pii) priv.push('🛡️ maskowanie PII');
+            if (d.strict_incognito) priv.push('🏠 synteza lokalna');
+            const piiTxt = formatSwarmPiiStats(d.pii_redactions);
+            if (piiTxt) priv.push(`redakcje: ${piiTxt}`);
+            state.privacy = priv.join(' · ');
+            if (bar) bar.style.width = '100%';
+            if (status) status.textContent = 'Zakończono.';
+            render();
+            if (btn) btn.disabled = false;
+        },
+        error: (d) => {
+            if (bar) bar.style.width = '0%';
+            if (status) status.textContent = d.error || 'Błąd roju.';
+            if (result) result.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error || 'Błąd roju')}</div>`;
+            if (btn) btn.disabled = false;
+        }
+    }).then(() => {
+        if (btn) btn.disabled = false;
+    }).catch(err => {
+        if (btn) btn.disabled = false;
+        if (status) status.textContent = 'Błąd połączenia.';
+        if (result) result.innerHTML = `<div class="alert alert-danger">${escapeHtml(String(err.message || err))}</div>`;
+    });
 }
 
 function onQdrantModeChange() {
@@ -4172,6 +4679,8 @@ function onLlmProviderChange() {
     localStorage.setItem('llm_provider', sel.value);
     syncLlmModelPickerVisibility();
     updateTopbarLlmBadge();
+    updateSwarmTopbarUI();
+    updateSwarmPrivacyControls();
 
     const badge = sel.parentElement;
     badge.style.transition = 'all 0.2s';
@@ -4332,7 +4841,14 @@ function getCurrentOpenRouterModel() {
     return localStorage.getItem('openrouter_model') || null;
 }
 
-// ---- Obsługa błędów rate limit OpenRouter z ładnym UI + szybki switch ----
+// ---- Obsługa błędów rate limit / Groq / OpenRouter ----
+function isLlmStreamError(text) {
+    if (typeof text !== 'string') return false;
+    return text.startsWith('[RATE_LIMIT]') || text.startsWith('[Błąd')
+        || text.startsWith('[FALLBACK]') || text.includes('429')
+        || text.includes('Too Many');
+}
+
 function handleRateLimitError(errorText, container, loader, btn, stopBtn, lastQuery, lastMode) {
     loader.classList.add('d-none');
     if (stopBtn) stopBtn.style.display = 'none';
@@ -4345,7 +4861,7 @@ function handleRateLimitError(errorText, container, loader, btn, stopBtn, lastQu
     container.innerHTML = `
         <div class="alert ${alertClass}">
             <strong>${icon} Limit OpenRouter</strong><br>
-            ${errorText.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim() || 'Zbyt wiele zapytań w krótkim czasie.'}
+            ${escapeHtml(errorText.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim()) || 'Zbyt wiele zapytań w krótkim czasie.'}
             <div class="mt-2 d-flex gap-2 flex-wrap">
                 <button onclick="quickSwitchToOllama()" class="btn btn-primary btn-sm">
                     🔄 Przełącz na Ollama (lokalny)
@@ -4531,9 +5047,9 @@ function scanNoise() {
             d.noise.map(n => `
                 <label class="d-flex align-items-center gap-2 py-1 border-bottom" style="cursor:pointer;">
                     <input type="checkbox" class="noise-check" value="${n.file.replace(/"/g,'&quot;')}" checked>
-                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${n.file}">${n.file}</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(n.file)}">${escapeHtml(n.file)}</span>
                     <span class="badge bg-secondary">${n.chunks} ch.</span>
-                    <span class="text-muted" style="font-size:0.72rem;flex-shrink:0;">${n.reason}</span>
+                    <span class="text-muted" style="font-size:0.72rem;flex-shrink:0;">${escapeHtml(n.reason)}</span>
                 </label>`
             ).join('');
     })
@@ -4834,12 +5350,12 @@ function renderSqlTableList(tables) {
     document.getElementById('sqlTableList').innerHTML = filtered.map(t => `
         <div class="d-flex align-items-center justify-content-between py-1 border-bottom">
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">
-                <span style="font-size:0.68rem;color:${t.type==='VIEW'?'#7c3aed':'#0d6efd'};font-weight:700;">${t.type==='VIEW'?'V':'T'}</span>
-                <span class="ms-1">${t.name}</span>
+                <span style="font-size:0.68rem;color:${t.type==='VIEW'?'#7c3aed':'#0d6efd'};font-weight:700;">${escapeHtml(t.type==='VIEW'?'V':'T')}</span>
+                <span class="ms-1">${escapeHtml(t.name)}</span>
             </span>
             <div class="d-flex gap-1 flex-shrink-0 ms-1">
-                <button class="doc-row-btn" onclick="sqlLoadSchema('${t.name}')">Schemat</button>
-                <button class="doc-row-btn" style="color:#16a34a;" onclick="sqlQuickAsk('${t.name}')">Pytaj</button>
+                <button class="doc-row-btn" data-table="${escapeHtml(t.name)}" onclick="sqlLoadSchema(this.dataset.table)">Schemat</button>
+                <button class="doc-row-btn" style="color:#16a34a;" data-table="${escapeHtml(t.name)}" onclick="sqlQuickAsk(this.dataset.table)">Pytaj</button>
             </div>
         </div>`).join('');
 }
@@ -4860,8 +5376,8 @@ function sqlLoadSchema(tableName) {
         sqlSchema = (sqlSchema.replace(placeholder, '') + block).trim() + '\n';
         document.getElementById('sqlResult').innerHTML = `
             <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-family:monospace;font-size:0.8rem;">
-                <strong>${tableName}</strong> — ${d.row_count.toLocaleString('pl')} wierszy<br>
-                ${d.columns.map(c=>`<span style="color:#0d6efd;">${c.name}</span> <span style="color:#6c757d;">${c.type}${c.max_len?'('+c.max_len+')':''}</span>`).join(' &nbsp;|&nbsp; ')}
+                <strong>${escapeHtml(tableName)}</strong> — ${d.row_count.toLocaleString('pl')} wierszy<br>
+                ${d.columns.map(c=>`<span style="color:#0d6efd;">${escapeHtml(c.name)}</span> <span style="color:#6c757d;">${escapeHtml(c.type)}${c.max_len?'('+escapeHtml(String(c.max_len))+')':''}</span>`).join(' &nbsp;|&nbsp; ')}
             </div>
             <div class="small text-success mt-1">✅ Schemat załadowany — LLM zna teraz strukturę tej tabeli</div>`;
     });
@@ -5004,7 +5520,7 @@ function sqlAsk() {
             ${d.rows && d.rows.length ? renderSqlTable(d.columns, d.rows) : '<div class="alert alert-warning small">Brak wyników.</div>'}`;
         if (d.chart) mountSqlChart(chartId, d.chart);
     })
-    .catch(e => { loader.classList.add('d-none'); btn.disabled=false; result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+    .catch(e => { loader.classList.add('d-none'); btn.disabled=false; result.innerHTML=`<div class="alert alert-danger">${escapeHtml(String(e?.message || e || 'Nieznany błąd'))}</div>`; });
 }
 
 function sqlConfirmWrite(sql) {
@@ -5023,21 +5539,21 @@ function sqlConfirmWrite(sql) {
         }
         result.innerHTML = `
             <div class="alert alert-success">
-                ✅ ${d.message}
+                ✅ ${escapeHtml(d.message)}
             </div>
-            <pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${d.sql}</pre>`;
+            <pre style="font-size:0.78rem;background:#f8f9fa;padding:8px;border-radius:4px;">${escapeHtml(d.sql || '')}</pre>`;
     })
-    .catch(e => { result.innerHTML=`<div class="alert alert-danger">${e}</div>`; });
+    .catch(e => { result.innerHTML=`<div class="alert alert-danger">${escapeHtml(String(e?.message || e || 'Nieznany błąd'))}</div>`; });
 }
 
 function renderSqlTable(cols, rows) {
     return `<div style="overflow-x:auto;max-height:350px;overflow-y:auto;">
         <table class="table table-sm table-hover table-bordered mb-0" style="font-size:0.78rem;">
             <thead style="position:sticky;top:0;background:#f8f9fa;">
-                <tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>
+                <tr>${cols.map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr>
             </thead>
             <tbody>
-                ${rows.map(r=>`<tr>${cols.map(c=>`<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(r[c]||'').replace(/"/g,'&quot;')}">${r[c]||''}</td>`).join('')}</tr>`).join('')}
+                ${rows.map(r=>`<tr>${cols.map(c=>`<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(r[c] || ''))}">${escapeHtml(String(r[c] || ''))}</td>`).join('')}</tr>`).join('')}
             </tbody>
         </table>
     </div>`;
@@ -5094,19 +5610,21 @@ function sqlVectorize() {
                     const ev = JSON.parse(dl.slice(6));
                     if (ev.start !== undefined) {
                         // Obsługa startu wektoryzacji pojedynczej tabeli
-                        log.textContent = `Przygotowanie do wektoryzacji tabeli ${ev.table} (${ev.total} wierszy)...`;
+                        log.textContent = `Przygotowanie do wektoryzacji tabeli ${String(ev.table || 'unknown')} (${ev.total} wierszy)...`;
                         bar.style.width = '0%';
                     } else if (ev.progress !== undefined) {
                         bar.style.width = ev.pct + '%';
                         log.textContent = `Zwektoryzowano ${ev.done} / ${ev.total} wierszy (${ev.pct}%)`;
                     } else if (ev.done === true) {
                         bar.style.width = '100%'; bar.classList.remove('progress-bar-animated');
-                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${escapeHtml(ev.msg)}</strong>`;
                         if (stopBtn) stopBtn.style.display = 'none';
                         isHeavyVectorizing = false;
                         updateStats(); allDocs = [];
                     } else if (ev.error) {
-                        log.innerHTML += `<br><span style="color:red;">❌ ${escapeHtml(ev.error)}</span>`;
+                        const color = ev.blocked ? '#f59e0b' : 'red';
+                        const prefix = ev.blocked ? '⏳ Zablokowano' : '❌';
+                        log.innerHTML += `<br><span style="color:${color};">${prefix} ${escapeHtml(ev.error)}</span>`;
                         if (stopBtn) stopBtn.style.display = 'none';
                         isHeavyVectorizing = false;
                     }
@@ -5177,7 +5695,7 @@ function sqlVectorizeAll() {
                     const ev = JSON.parse(dl.slice(6));
                     if (ev.start !== undefined) {
                         totalTables = ev.total_tables;
-                        log.innerHTML = `<strong>Tabele do zwektoryzowania:</strong> ${ev.tables.join(', ')}<br>`;
+                        log.innerHTML = `<strong>Tabele do zwektoryzowania:</strong> ${escapeHtml((ev.tables || []).join(', '))}<br>`;
                     } else if (ev.table_start !== undefined) {
                         const t = ev.table || 'unknown';
                         status.textContent = `Tabela ${ev.table_idx + 1}/${ev.total_tables}: ${t}`;
@@ -5189,14 +5707,14 @@ function sqlVectorizeAll() {
                     } else if (ev.table_done !== undefined) {
                         tablesDone = ev.table_idx + 1;
                         const t = ev.table || 'unknown';
-                        log.innerHTML += `✅ ${t} (${ev.rows || 0} wierszy)<br>`;
+                        log.innerHTML += `✅ ${escapeHtml(t)} (${ev.rows || 0} wierszy)<br>`;
                     } else if (ev.table_error !== undefined) {
                         const t = ev.table || 'unknown';
                         log.innerHTML += `❌ ${escapeHtml(t)}: ${escapeHtml(ev.error)}<br>`;
                     } else if (ev.done === true) {
                         bar.style.width = '100%';
                         bar.classList.remove('progress-bar-animated');
-                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${ev.msg}</strong>`;
+                        log.innerHTML += `<br><strong style="color:#16a34a;">✅ ${escapeHtml(ev.msg)}</strong>`;
                         btn.disabled = false;
                         if (allStopBtn) allStopBtn.style.display = 'none';
                         status.textContent = '';
@@ -5204,7 +5722,9 @@ function sqlVectorizeAll() {
                         isHeavyVectorizing = false;
                         updateStats(); allDocs = [];
                     } else if (ev.error !== undefined) {
-                        log.innerHTML += `<br><span style="color:red;">❌ Błąd: ${ev.error}</span>`;
+                        const color = ev.blocked ? '#f59e0b' : 'red';
+                        const prefix = ev.blocked ? '⏳ Zablokowano' : '❌';
+                        log.innerHTML += `<br><span style="color:${color};">${prefix} ${escapeHtml(ev.error)}</span>`;
                         btn.disabled = false;
                         if (allStopBtn) allStopBtn.style.display = 'none';
                         isHeavyVectorizing = false;
@@ -5221,11 +5741,38 @@ function sqlVectorizeAll() {
 }
 
 // --- Health check & status dots ---
+function dashPill(variant, label) {
+    const v = variant || 'neutral';
+    const text = label != null ? String(label) : '';
+    return `<span class="dash-pill dash-pill--${v}"><span class="dash-dot"></span><span>${escapeHtml(text)}</span></span>`;
+}
+
+function dashPillFill(el, variant, label) {
+    if (!el) return;
+    const v = variant || 'neutral';
+    el.className = 'dash-pill dash-pill--compact dash-pill--' + v;
+    el.innerHTML = `<span class="dash-dot"></span><span>${escapeHtml(label != null ? String(label) : '')}</span>`;
+}
+
+function fleetScorePill(score) {
+    if (score == null || score === '') return '—';
+    const n = Number(score);
+    if (Number.isNaN(n)) return '—';
+    const variant = n >= 75 ? 'score-high' : n >= 45 ? 'score-mid' : 'score-low';
+    return dashPill(variant, `${n}/100`);
+}
+
 function setStatusDot(id, state) {
     const el = document.getElementById(id);
     if (!el) return;
-    el.className = 'status-dot ' + ({ok:'dot-ok', error:'dot-err', no_key:'dot-warn'}[state] || 'dot-pending');
-    el.title = {ok:'Połączono', error:'Brak połączenia', no_key:'Brak klucza API'}[state] || state;
+    const map = { ok: 'ok', error: 'err', no_key: 'warn' };
+    const dotCls = { ok: 'dot-ok', error: 'dot-err', no_key: 'dot-warn' };
+    const variant = map[state] || 'neutral';
+    const dotState = dotCls[state] || 'dot-pending';
+    el.className = 'dash-dot ' + dotState;
+    el.title = { ok: 'Połączono', error: 'Brak połączenia', no_key: 'Brak klucza API' }[state] || state;
+    const wrap = el.closest('.dash-pill');
+    if (wrap) wrap.className = 'dash-pill dash-pill--compact dash-pill--' + variant;
 }
 
 // checkHealth zachowana dla kompatybilności (np. konsola) — deleguje do ujednoliconego updateHealthStatus
@@ -5610,7 +6157,7 @@ function checkForUpdates() {
             const remote = d.remote_version || '?';
 
             if (d.update_available) {
-                statusEl.innerHTML = `<span style="color:#b45309;">Nowa wersja dostępna!</span><br>Lokalna: <strong>${local}</strong> → Zdalna: <strong>${remote}</strong>`;
+                statusEl.innerHTML = `<span style="color:#b45309;">Nowa wersja dostępna!</span><br>Lokalna: <strong>${escapeHtml(local)}</strong> → Zdalna: <strong>${escapeHtml(remote)}</strong>`;
 
                 // Pokaż changelog jeśli jest
                 if (d.release && d.release.body) {
@@ -5625,7 +6172,7 @@ function checkForUpdates() {
 
                 btnUpdate.style.display = 'inline-block';
             } else {
-                statusEl.innerHTML = `Jesteś na najnowszej wersji (<strong>${local}</strong>)`;
+                statusEl.innerHTML = `Jesteś na najnowszej wersji (<strong>${escapeHtml(local)}</strong>)`;
             }
         })
         .catch(() => {
@@ -5800,6 +6347,135 @@ if (typeof window !== 'undefined') {
         // Startujemy sprawdzanie dopiero po pełnym załadowaniu UI
         setTimeout(startAutoUpdateChecks, 5000);
     });
+}
+
+// --- Flota LLM ---
+let _fleetLastData = null;
+
+function fleetStatusDot(ok, noKey) {
+    if (!ok && noKey) return dashPill('warn', 'Brak klucza');
+    return ok ? dashPill('ok', 'Dostępny') : dashPill('err', 'Niedostępny');
+}
+
+function fleetFormatLatency(ms) {
+    if (ms == null || ms === '') return '—';
+    const n = Number(ms);
+    if (Number.isNaN(n)) return '—';
+    return n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFixed(1)} s`;
+}
+
+function fleetRenderTable(d) {
+    const body = document.getElementById('fleetTableBody');
+    if (!body) return;
+    const providers = d.providers || [];
+    if (!providers.length) {
+        body.innerHTML = '<tr><td colspan="9" class="text-muted text-center py-4">Brak danych</td></tr>';
+        return;
+    }
+    body.innerHTML = providers.map((p, i) => {
+        const agents = (p.agents || []).map(a => escapeHtml(a)).join(', ');
+        const free = (p.free_models || []).slice(0, 3).map(m => escapeHtml(m)).join('<br>');
+        const stats = p.stats || {};
+        const pool = p.pool || {};
+        const statLine = `wywołania: ${stats.calls_ok || 0}/${stats.calls_total || 0}` +
+            (pool.total ? ` · pula: ${pool.available || 0}/${pool.total}` : '');
+        const limits = escapeHtml(p.limits_hint || '') + '<br><span class="text-muted">' + escapeHtml(p.context_hint || '') + '</span>';
+        return `<tr>
+            <td>${i + 1}</td>
+            <td><strong>${escapeHtml(p.label || p.id)}</strong><br><span class="text-muted font-monospace" style="font-size:0.7rem;">${escapeHtml(p.id)}</span></td>
+            <td>${fleetStatusDot(p.ok, !p.key_configured && p.id !== 'ollama')}</td>
+            <td>${fleetScorePill(p.score)}</td>
+            <td>${fleetFormatLatency(p.latency_ms)}</td>
+            <td class="font-monospace" style="font-size:0.72rem;max-width:180px;word-break:break-all;">${escapeHtml(p.default_model || '')}${free ? '<br><span class="text-muted">free:</span><br>' + free : ''}</td>
+            <td style="max-width:220px;">${limits}</td>
+            <td style="font-size:0.75rem;">${agents}</td>
+            <td style="font-size:0.75rem;">${escapeHtml(statLine)}${stats.last_error ? '<br><span class="text-danger">' + escapeHtml(String(stats.last_error).slice(0, 80)) + '</span>' : ''}</td>
+        </tr>`;
+    }).join('');
+}
+
+function fleetLoad(opts) {
+    const autoProbe = opts && opts.autoProbe;
+    const task = (document.getElementById('fleetTaskSelect') || {}).value || 'general';
+    const status = document.getElementById('fleetStatus');
+    if (status) status.textContent = 'Ładowanie statusu floty…';
+    fetchJson(`/api/llm/fleet?task=${encodeURIComponent(task)}`)
+        .then(d => {
+            if (!d.success) throw new Error(d.error || 'Błąd floty');
+            _fleetLastData = d;
+            const autoEl = document.getElementById('fleetAutoRoute');
+            if (autoEl) autoEl.checked = !!d.auto_route;
+            const badge = document.getElementById('fleetRecommendBadge');
+            const applyBtn = document.getElementById('fleetApplyBtn');
+            const rec = d.recommended_provider || '';
+            const labels = { openrouter: 'OpenRouter', groq: 'Groq', ollama: 'Ollama' };
+            if (badge) {
+                dashPillFill(badge, 'info', `Rekomendacja (${task}): ${labels[rec] || rec}`);
+            }
+            if (applyBtn) applyBtn.style.display = rec ? 'inline-block' : 'none';
+            fleetRenderTable(d);
+            const hint = d.task_hint || {};
+            const stale = !(d.providers || []).some(p => p.stats && p.stats.last_probe_at);
+            if (status) {
+                status.textContent = (hint.note || '') + (d.active_provider ? ` · Aktywny: ${labels[d.active_provider] || d.active_provider}` : '') +
+                    (stale ? ' · Brak świeżej sondy — kliknij „Sonduj wszystkich”.' : '');
+            }
+            if (autoProbe && stale) fleetProbeAll();
+        })
+        .catch(e => {
+            if (status) status.textContent = 'Błąd: ' + (e.message || e);
+            const body = document.getElementById('fleetTableBody');
+            if (body) body.innerHTML = '<tr><td colspan="9" class="text-danger text-center py-4">Nie udało się załadować floty</td></tr>';
+        });
+}
+
+function fleetProbeAll() {
+    const btn = document.getElementById('fleetProbeBtn');
+    const status = document.getElementById('fleetStatus');
+    const task = (document.getElementById('fleetTaskSelect') || {}).value || 'general';
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Sondowanie wszystkich dostawców (może potrwać 15–30 s)…';
+    fetchJson('/api/llm/fleet/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task }),
+    })
+        .then(d => {
+            if (!d.success) throw new Error(d.error || 'Błąd sondy');
+            _fleetLastData = d;
+            fleetRenderTable(d);
+            if (status) status.textContent = 'Sondowanie zakończone. Ranking zaktualizowany.';
+        })
+        .catch(e => {
+            if (status) status.textContent = 'Sondowanie nie powiodło się: ' + (e.message || e);
+        })
+        .finally(() => { if (btn) btn.disabled = false; });
+}
+
+function fleetSetAutoRoute(enabled) {
+    fetchJson('/api/llm/fleet/auto-route', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !!enabled }),
+    })
+        .then(d => {
+            if (!d.success) throw new Error(d.error || 'Błąd');
+            fleetLoad();
+        })
+        .catch(e => alert('Auto-routing: ' + (e.message || e)));
+}
+
+function fleetApplyRecommended() {
+    const rec = (_fleetLastData && _fleetLastData.recommended_provider) || '';
+    if (!rec) return;
+    const sel = document.getElementById('llmProviderSelect');
+    if (sel) {
+        sel.value = rec;
+        onLlmProviderChange();
+    }
+    const cfgSel = document.getElementById('cfgProvider');
+    if (cfgSel) cfgSel.value = rec;
+    alert('Ustawiono dostawcę: ' + rec + ' (zapisz w konfiguracji LLM w zakładce Bazy, jeśli chcesz trwałą zmianę).');
 }
 
 // --- LLM Config panel ---
@@ -6053,9 +6729,9 @@ function loadReports() {
     READY_REPORTS.forEach(r => {
         const col = document.createElement('div');
         col.className = 'col-md-6 col-lg-4';
-        col.innerHTML = `<div class="card h-100 shadow-sm" style="cursor:pointer" onclick="runReadyReport('${r.id}')">
+        col.innerHTML = `<div class="card h-100 shadow-sm" style="cursor:pointer" data-report-id="${escapeHtml(r.id)}" onclick="runReadyReport(this.dataset.reportId)">
             <div class="card-body"><span style="font-size:1.4rem">${r.icon}</span>
-            <h6 class="mt-2 mb-1">${r.title}</h6><p class="small text-muted mb-0">${r.desc}</p></div></div>`;
+            <h6 class="mt-2 mb-1">${escapeHtml(r.title)}</h6><p class="small text-muted mb-0">${escapeHtml(r.desc)}</p></div></div>`;
         container.appendChild(col);
     });
 }

@@ -14,7 +14,7 @@ Sesja rozwojowa: wielodostawcowość LLM, UI, bezpieczeństwo i stabilność.
 ### Dodano
 
 - **Rój agentów** — wieloetapowa analiza z koordynacją ról LLM (Generator / Krytyk / synteza); wsparcie modeli agentowych (np. Groq Compound) w panelu providerów.
-- **Flota LLM** — obsługa wielu dostawców (Ollama, OpenRouter, Groq) z jednej abstrakcji `call_llm()` / `stream_llm_tokens()`.
+- **Flota LLM** — zakładka w UI z rankingiem dostawców (score, latencja, limity, agenty); API `GET /api/llm/fleet`, `POST /api/llm/fleet/probe`, `POST /api/llm/fleet/auto-route`; cache sondy (szybkie odświeżanie bez pełnego Groq chat ping); statystyki wywołań w `.llm_fleet_stats.json`.
 - **Pool kluczy i serwerów z rotacją** (`EndpointPool`) — round-robin + cooldown przy 429, błędach auth i problemach połączenia:
   - `GROQ_API_KEYS` / `groq_keys[]`
   - `OPENROUTER_API_KEYS` / `openrouter_keys[]`
@@ -30,7 +30,7 @@ Sesja rozwojowa: wielodostawcowość LLM, UI, bezpieczeństwo i stabilność.
 
 - **Redesign UI** — spójny layout, czytelniejsze karty wyników i stany ładowania.
 - **Topbar** — wersja aplikacji, liczba wektorów, status systemu, aktywna kolekcja.
-- **Zakładki** — uporządkowana nawigacja (Wyszukaj, Dokumenty, AI, Porównaj, Sieć, Raporty, SQL, Kolekcje, Import).
+- **Zakładki** — uporządkowana nawigacja (Wyszukaj, Dokumenty, AI, Porównaj, Sieć, Raporty, SQL, **Flota LLM**, Kolekcje, Import).
 - **CSS design system** — paleta `#1a1f36` / `#6366f1`, badge’e filtrów, karty `.search-card` / `.result-card`, status dots diagnostyki.
 - Domyślny provider LLM: **OpenRouter** (embeddingi nadal przez Ollama `nomic-embed-text`).
 - Konfiguracja LLM z UI zapisuje się do `.llm_config.json` (natychmiastowy efekt bez restartu).

@@ -17,7 +17,7 @@ Legenda: ✅ zrobione · 🟡 częściowo · ⬜ do zrobienia
 | **1** | Produkcyjny WSGI + stabilność uruchomienia | 🟡 | Waitress, `wsgi.py`, `ai_analiza-user.service`, `restart-app.sh --user` — **test na maszynie docelowej** + ewentualne poprawki |
 | **2** | Abstrakcja LLM (chat/synteza/weryfikacja) | 🟡 | `call_llm()` / `stream_llm_tokens()` + Groq + **pool kluczy** (`EndpointPool`); zostało ~1–4 bezpośrednie `_call_ollama` poza fallbackiem (np. `/suggestions`) — **embeddingi zawsze przez Ollama, bez zmian** |
 | **3** | `/tasks` + blokada ciężkich operacji | ⬜ | Kolejka / mutex wektoryzacji; endpoint statusu długich zadań |
-| **4** | UX providerów (OpenRouter/Groq) | 🟡 | Dropdown modeli, sugestie per zakładka, panel config — **domknąć luki UX**, nie budować od zera |
+| **4** | UX providerów (OpenRouter/Groq) | 🟡 | Flota LLM ✅; zostało: ulubione modele, badge topbar — **domknąć luki UX** |
 | **5** | Timeline + eksport grafu | 🟡 / ⬜ | `/timeline` istnieje; **hardening + UX**; eksport PNG grafu do raportu — po stabilności (1–3) |
 | **6** | Podgląd dokumentów w wynikach | 🟡 | `GET /api/get_context`, snippet + lazy-load — **doprecyzowanie / hardening**, nie greenfield |
 | **7** | Wydzielenie modułu `llm_client` | ⬜ | Dopiero po ustabilizowaniu providerów i UI (Faza 4) |
@@ -33,7 +33,7 @@ Legenda: ✅ zrobione · 🟡 częściowo · ⬜ do zrobienia
 
 ### Świeżo w repo (po v2026.12)
 
-- **Flota LLM** — Groq, pool kluczy/serwerów z rotacją, statystyki w `/health`
+- **Flota LLM** — zakładka + ranking/sonda/auto-route; pule kluczy w `/health`
 - **CHANGELOG.md** — podsumowanie sesji
 - **Patch lokalnego Qdrant** — `_is_local_qdrant_url()` (bez warningów api_key / check_compatibility)
 - **`scripts/run-tests.sh`** — smoke integracyjny
@@ -94,6 +94,7 @@ Legenda: ✅ zrobione · 🟡 częściowo · ⬜ do zrobienia
 **2.1 Selektor modeli w UI** 🟡 częściowo zrobione
 - [x] Dropdown OpenRouter + Groq, sugestie modeli per zakładka, toast „Zastosuj”
 - [x] Panel config LLM, zapis do `.llm_config.json`
+- [x] Zakładka **Flota LLM** — ranking dostawców (sonda, score, auto-routing); API `/api/llm/fleet*`
 - [ ] Ulubione / własne modele (persist)
 - [ ] Badge aktywnego modelu w topbarze (spójnie we wszystkich zakładkach)
 - **Uwaga:** nie „zrobić od zera” — **domknąć luki UX**
@@ -307,6 +308,95 @@ Te zmiany znacząco podnoszą poziom „produkcyjności” lokalnego środowiska
 - [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
 
 *Ostatnia aktualizacja macierzy: **czerwiec 2026** (review planu + Flota LLM)*
+
+---
+
+## Bank pomysłów — wizja produktu
+
+### Pomysł #30 · Lokalny dyrygent + roj darmowych LLM (fragmentacja dokumentu)
+
+**Pytanie:** Czy da się zrobić agenta lokalnego, który bierze zadanie (np. przepłaty w dokumentach, szukanie powiązań, ocena rozdziału pracy), **dzieli dokument na fragmenty**, wysyła każdy fragment do **innego darmowego modelu online**, a na końcu **zbiera wyniki** — tak żeby **żaden model w chmurze nie widział całego dokumentu**?
+
+**Odpowiedź: tak — i częściowo już to działa w aplikacji.**
+
+#### Idea w skrócie
+
+| Rola | Gdzie działa | Co widzi | Co robi |
+|------|--------------|----------|---------|
+| **Dyrygent (lokalny)** | Flask na Twoim PC / WSL | Cały indeks Qdrant, metadane, pełne chunki | Wyszukuje fragmenty (RAG), tasuje i dzieli, uruchamia workery równolegle, składa syntezę |
+| **Worker 1…N (online)** | Groq / OpenRouter / Ollama | Tylko 3–6 chunków (~1200 znaków każdy) | Ekstrahuje fakty, osoby, daty, kwoty, luki |
+| **Synteza (lokalnie sterowana)** | Ten sam dyrygent | **Nie** pełny dokument — tylko streszczenia workerów | Łączy wnioski, rozwiązuje sprzeczności, zwraca raport |
+
+```mermaid
+flowchart TB
+    subgraph local ["Twoja maszyna (dyrygent)"]
+        Q[Pytanie użytkownika]
+        RAG[Qdrant RAG — wybór fragmentów]
+        SPLIT[Podział na grupy + opcjonalne tasowanie]
+        SYN[Synteza końcowa]
+        OUT[Raport / odpowiedź]
+        Q --> RAG --> SPLIT
+        SYN --> OUT
+    end
+
+    subgraph cloud ["Chmura — każdy worker widzi tylko swój wycinek"]
+        W1[Worker 1 · model A]
+        W2[Worker 2 · model B]
+        W3[Worker N · model …]
+    end
+
+    SPLIT --> W1 & W2 & W3
+    W1 & W2 & W3 --> SYN
+```
+
+#### Co już jest w kodzie (czerwiec 2026)
+
+- **Endpoint:** `POST /agents/swarm` (SSE)
+- **UI:** zakładka **Rój agentów** — tryby **A · Incognito / B · Szybkość / C · Jakość**
+- **Tryb A (Incognito)** — najbliżej wizji użytkownika:
+  - tasuje fragmenty przed podziałem (`shuffle_chunks: true`)
+  - losuje modele między workerami (`random_models: true`)
+  - każdy worker dostaje prompt: *„Dostajesz tylko wycinek dokumentów”*
+- **Map-reduce:** N workerów równolegle (`ThreadPoolExecutor`) → jedna synteza końcowa
+- **Źródła:** fragmenty z Qdrant (tryb detektyw — min. dywersyfikacja po plikach)
+- **Provider:** OpenRouter / Groq / Ollama + pool kluczy (`EndpointPool`)
+
+#### Przykładowe zadania (szablony pod rozszerzenie)
+
+| Zadanie | Pytanie do roju | Co wyciągają workery | Co robi synteza |
+|---------|-----------------|----------------------|-----------------|
+| **Przepłaty / faktury** | „Wskaż podejrzane przepłaty, duplikaty kwot, rozbieżności NIP–kwota” | Kwoty, daty, kontrahenci z fragmentów | Lista incydentów + priorytet |
+| **Powiązania osób–firm** | „Kto występuje razem z kim i w jakim kontekście?” | Osoby, role, daty | Graf logiczny / tabela hubów |
+| **Ocena rozdziału pracy** | „Oceń spójność metodologii, brakujące cytowania, luki argumentacji” | Tezy, definicje, odwołania z sekcji | Werdykt + lista uwag merytorycznych |
+| **Audyt umowy** | „Wypisz klauzule wysokiego ryzyka i niespójności między załącznikami” | Paragrafy, kwoty, terminy | Checklist ryzyk |
+
+#### Granice prywatności (uczciwie)
+
+- **Plus:** Żaden pojedynczy request do Groq/OpenRouter **nie zawiera całego dokumentu** — tylko wycinek + pytanie.
+- **Minus:** Synteza widzi **streszczenia wszystkich workerów** (może zawierać łącznie dużo treści). Przy bardzo wrażliwych sprawach: synteza na **Ollama lokalnie**, workery w chmurze.
+- **Minus:** Dostawca chmury nadal widzi **fragment**, który wysyłasz — to nie jest szyfrowanie E2E; to **minimalizacja ekspozycji**, nie zerowa wiedza.
+
+#### Co można dodać (roadmap pod #30)
+
+| Etap | Opis | Priorytet |
+|------|------|-----------|
+| **30.1** | Szablony zadań w UI (przepłaty / praca dyplomowa / umowy) — predefiniowane prompty + tryb A | Wysoki |
+| **30.2** | **Redakcja przed wysyłką** — maskowanie PESEL/NIP/rachunków w chunku wysyłanym do chmury | Wysoki |
+| **30.3** | Synteza **tylko lokalnie** (Ollama), workery w chmurze — przełącznik „strict incognito” | Średni |
+| **30.4** | Worker zwraca **JSON strukturalny** (daty, kwoty, encje) → łatwiejsze łączenie i timeline | Średni |
+| **30.5** | **Krytyk** na końcu — drugi lokalny pass weryfikuje syntezę vs oryginalne chunki (bez ponownego wysyłania całości) | Średni |
+| **30.6** | Eksport raportu roju do DOCX (jak w wyszukiwaniu) | Niski |
+| **30.7** | Rotacja providerów **per worker** (worker 1 → Groq, worker 2 → OpenRouter free) — jeszcze trudniejsze skorelowanie | Niski |
+
+#### Jak uruchomić dziś
+
+1. Zaimportuj dokumenty do Qdrant (import folderu).
+2. Otwórz zakładkę **Rój agentów**.
+3. Wybierz **A · Incognito**.
+4. Wpisz pytanie (np. *„Wskaż przepłaty i rozbieżności kwot między fakturami”*).
+5. Uruchom — obserwuj postęp workerów i finalną syntezę.
+
+**Status pomysłu:** 🟡 **Rdzeń zaimplementowany** (`/agents/swarm`); do pełnej wizji brakuje szablonów zadań, redakcji PII i trybu „synteza tylko lokalnie”.
 
 ---
 

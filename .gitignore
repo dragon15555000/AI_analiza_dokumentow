@@ -85,5 +85,6 @@ qdrant_data/
 # === Misc ===
 .sql_config.json
 .llm_config.json
+.llm_fleet_stats.json
 .active_collection
 *.pid
