@@ -70,8 +70,8 @@ def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str 
     if first_token not in allowed_first_words:
         return False, f"Niedozwolone polecenie: {first_token}"
 
-    if sql_upper.count(";") > 1:
-        return False, "Wykryto wiele instrukcji SQL (potencjalne SQL Injection)"
+    if sql_upper.count(";") > 0:
+        return False, "Wykryto średnik w zapytaniu SQL (potencjalne SQL Injection)"
 
     for dangerous in DANGEROUS_SQL_KEYWORDS:
         if dangerous in sql_upper:
@@ -715,6 +715,9 @@ SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split
 
 APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
+# Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
+# który nadpisuje X-Forwarded-For — NIGDY nie włączaj gdy app jest dostępna z zewnątrz bez proxy
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
 
 # Wersja aplikacji — automatycznie odczytywana z git tagów w trybie deweloperskim
 # (git describe --tags --dirty). W releasach produkcyjnych wraca do stałej.
@@ -1240,16 +1243,19 @@ def _require_api_key():
 
 
 def _is_local_request() -> bool:
-    """Sprawdza czy żądanie pochodzi z localhost (bezpieczne dla tras konfiguracyjnych)."""
+    """Sprawdza czy żądanie pochodzi z localhost.
+    Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true w .env
+    (używaj wyłącznie za zaufanym reverse proxy).
+    """
     remote = request.remote_addr or ""
     if remote in ("127.0.0.1", "::1", "localhost"):
         return True
-    # W kontenerach / reverse proxy często X-Forwarded-For lub X-Real-IP
-    forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first in ("127.0.0.1", "::1", "localhost"):
-            return True
+    if TRUST_PROXY:
+        forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first in ("127.0.0.1", "::1", "localhost"):
+                return True
     return False
 
 
@@ -3400,7 +3406,7 @@ def hybrid_stream():
                     provider=llm_provider,
                     model=openrouter_model
                 ):
-                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         logger.warning(f"LLM stream error (hybrid): {token[:120]}")
                         yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
                         return
@@ -3470,7 +3476,7 @@ def search_stream():
                     provider=llm_provider,
                     model=openrouter_model
                 ):
-                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         # Czysty błąd zamiast zaśmiecania odpowiedzi
                         logger.warning(f"LLM stream error (search): {token[:120]}")
                         yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
@@ -3585,6 +3591,147 @@ def analyze():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/compare', methods=['POST'])
+def compare_documents():
+    """Porównanie dwóch dokumentów przez LLM — pobiera chunki obu plików z Qdrant."""
+    data = request.get_json() or {}
+    file_a = (data.get('file_a') or '').strip()
+    file_b = (data.get('file_b') or '').strip()
+    focus  = (data.get('focus') or 'general').strip()
+    if not file_a or not file_b:
+        return jsonify({"success": False, "error": "Wymagane file_a i file_b"})
+    if file_a == file_b:
+        return jsonify({"success": False, "error": "Wybierz dwa różne pliki"})
+
+    try:
+        client = get_qdrant_client()
+
+        def _fetch_chunks(fname: str) -> list[str]:
+            qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
+            records, _ = client.scroll(
+                collection_name=ACTIVE_COLLECTION,
+                scroll_filter=qfilter,
+                limit=30,
+                with_payload=["text"],
+                with_vectors=False,
+            )
+            return [r.payload.get("text", "") for r in records if r.payload.get("text")]
+
+        chunks_a = _fetch_chunks(file_a)
+        chunks_b = _fetch_chunks(file_b)
+
+        if not chunks_a:
+            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_a}"})
+        if not chunks_b:
+            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_b}"})
+
+        MAX_CHARS = 8000
+        text_a = "\n\n".join(chunks_a)[:MAX_CHARS]
+        text_b = "\n\n".join(chunks_b)[:MAX_CHARS]
+
+        focus_labels = {
+            'general':    'ogólne porównanie treści i struktury',
+            'dates':      'daty, terminy i harmonogram',
+            'parties':    'strony, sygnatury i upoważnienia',
+            'financial':  'kwoty, wartości i warunki finansowe',
+            'legal':      'zobowiązania prawne i klauzule umowne',
+            'technical':  'wymagania techniczne i specyfikacje',
+        }
+        focus_desc = focus_labels.get(focus, focus_labels['general'])
+
+        system = (
+            "Jesteś ekspertem ds. analizy dokumentów. Porównaj dwa dokumenty skupiając się na: "
+            f"{focus_desc}. "
+            "Wskaż kluczowe podobieństwa, różnice i rozbieżności. "
+            "Odpowiadaj po polsku, używaj punktów i tabel gdzie to pomocne."
+        )
+        prompt = (
+            f"=== DOKUMENT A: {file_a} ===\n{text_a}\n\n"
+            f"=== DOKUMENT B: {file_b} ===\n{text_b}\n\n"
+            f"Przeprowadź szczegółowe porównanie tych dwóch dokumentów "
+            f"z uwzględnieniem: {focus_desc}."
+        )
+
+        result = call_llm(prompt=prompt, system=system, stream=False)
+        return jsonify({
+            "success": True,
+            "file_a": file_a,
+            "file_b": file_b,
+            "chunks_a": len(chunks_a),
+            "chunks_b": len(chunks_b),
+            "comparison": result,
+        })
+    except Exception as e:
+        logger.exception("compare_documents error")
+        return jsonify({"success": False, "error": str(e)[:300]})
+
+
+@app.route('/api/collection/profile', methods=['GET'])
+def collection_profile():
+    """Profiluje kolekcję wg typów plików i sugeruje tryb wyszukiwania."""
+    try:
+        client = get_qdrant_client()
+        records, _ = client.scroll(
+            collection_name=ACTIVE_COLLECTION,
+            limit=500,
+            with_payload=["file"],
+            with_vectors=False,
+        )
+        if not records:
+            return jsonify({"success": True, "profile": "empty", "suggestion_text": "", "suggestion_mode": "normal"})
+
+        from collections import Counter
+        ext_counts: Counter = Counter()
+        for r in records:
+            fname = r.payload.get("file", "")
+            if fname:
+                ext = Path(fname).suffix.lower().lstrip(".")
+                if ext:
+                    ext_counts[ext] += 1
+
+        total = sum(ext_counts.values()) or 1
+        top_ext, top_count = ext_counts.most_common(1)[0] if ext_counts else ("", 0)
+        top_ratio = top_count / total
+
+        # Determine profile
+        financial_exts = {"xlsx", "xls", "csv", "ods"}
+        legal_exts     = {"pdf", "docx", "doc", "odt"}
+        code_exts      = {"py", "js", "ts", "java", "cs", "cpp", "go", "rb"}
+
+        if ext_counts.keys() & financial_exts and top_ratio > 0.5 and top_ext in financial_exts:
+            profile = "financial"
+            suggestion_mode = "normal"
+            suggestion_text = f"Kolekcja zawiera głównie pliki finansowe ({top_ext.upper()}). Rozważ tryb Detektyw do głębokiej analizy."
+            suggestion_mode = "detective"
+        elif ext_counts.keys() & legal_exts and top_ratio > 0.4 and top_ext in legal_exts:
+            profile = "legal"
+            suggestion_mode = "detective"
+            suggestion_text = f"Kolekcja zawiera głównie dokumenty prawne ({top_ext.upper()}). Zalecany tryb: Detektyw."
+        elif ext_counts.keys() & code_exts:
+            profile = "technical"
+            suggestion_mode = "normal"
+            suggestion_text = "Kolekcja zawiera kod źródłowy. Tryb normalny jest odpowiedni."
+        elif top_ratio > 0.7:
+            profile = "homogeneous"
+            suggestion_mode = "normal"
+            suggestion_text = f"Jednorodna kolekcja ({top_ext.upper()}). Tryb normalny jest odpowiedni."
+        else:
+            profile = "mixed"
+            suggestion_mode = "detective"
+            suggestion_text = "Różnorodna kolekcja dokumentów. Tryb Detektyw da lepsze wyniki."
+
+        return jsonify({
+            "success": True,
+            "profile": profile,
+            "suggestion_mode": suggestion_mode,
+            "suggestion_text": suggestion_text,
+            "ext_counts": dict(ext_counts.most_common(5)),
+        })
+    except Exception as e:
+        logger.warning(f"collection_profile error: {e}")
+        return jsonify({"success": False, "error": str(e)[:200]})
 
 
 @app.route('/suggestions', methods=['GET'])
@@ -5392,23 +5539,31 @@ def sql_write():
         if not confirmed:
             impact_info = ""
             if first_word in ("UPDATE", "DELETE"):
-                try:
-                    conn_check = _get_sql_conn(cfg)
-                    cur_check = conn_check.cursor()
-                    if first_word == "UPDATE":
-                        where_part = re.search(r"\bWHERE\b(.+?)(?:$)", sql_query, re.IGNORECASE | re.DOTALL)
-                        table_part = re.search(r"UPDATE\s+\[?(\w+)\]?", sql_query, re.IGNORECASE)
-                        if where_part and table_part:
-                            count_sql = f"SELECT COUNT(*) FROM [{table_part.group(1)}] WHERE {where_part.group(1)}"
-                            cur_check.execute(count_sql)
-                            impact_info = f"Zmieni {cur_check.fetchone()[0]} wierszy"
-                    elif first_word == "DELETE":
-                        count_sql = sql_query.replace("DELETE", "SELECT COUNT(*)", 1)
-                        cur_check.execute(count_sql)
-                        impact_info = f"Usunie {cur_check.fetchone()[0]} wierszy"
-                    conn_check.close()
-                except Exception:
-                    impact_info = "Nie udało się oszacować wpływu"
+                # Sprawdź bezpieczeństwo zapytania PRZED jakimkolwiek wykonaniem
+                is_safe_pre, _ = _is_sql_safe(sql_query, ("UPDATE", "DELETE"))
+                if is_safe_pre:
+                    try:
+                        conn_check = _get_sql_conn(cfg)
+                        cur_check = conn_check.cursor()
+                        if first_word == "UPDATE":
+                            where_part = re.search(r"\bWHERE\b(.+?)$", sql_query, re.IGNORECASE | re.DOTALL)
+                            table_match = re.search(r"UPDATE\s+\[?(\w+)\]?", sql_query, re.IGNORECASE)
+                            if where_part and table_match:
+                                table_name = table_match.group(1)
+                                # Tylko alphanum/underscore — nie dopuszczamy iniekcji w nazwie tabeli
+                                if re.match(r"^\w+$", table_name):
+                                    count_sql = f"SELECT COUNT(*) FROM [{table_name}] WHERE {where_part.group(1)}"
+                                    cur_check.execute(count_sql)
+                                    impact_info = f"Zmieni {cur_check.fetchone()[0]} wierszy"
+                        elif first_word == "DELETE":
+                            from_match = re.search(r"\bFROM\b(.+)$", sql_query, re.IGNORECASE | re.DOTALL)
+                            if from_match:
+                                count_sql = f"SELECT COUNT(*) FROM {from_match.group(1)}"
+                                cur_check.execute(count_sql)
+                                impact_info = f"Usunie {cur_check.fetchone()[0]} wierszy"
+                        conn_check.close()
+                    except Exception:
+                        impact_info = "Nie udało się oszacować wpływu"
 
             return jsonify({
                 "success": True,
@@ -5680,7 +5835,7 @@ def health():
         if light:
             llm_ok = True
             llm_detail = "light"
-        elif APP_API_KEY or os.environ.get("OPENROUTER_API_KEY"):
+        elif OPENROUTER_API_KEY:
             llm_ok = or_h.get("ok", False)
             llm_detail = or_h.get("error") or "OpenRouter"
         else:
@@ -5838,13 +5993,17 @@ def api_update_restart():
 
 
 def _localhost_only() -> bool:
-    """True gdy żądanie pochodzi z localhost (self-update / service API)."""
+    """True gdy żądanie pochodzi z localhost (self-update / service API).
+    Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true.
+    """
     addr = (request.remote_addr or "").strip()
     if addr in ("127.0.0.1", "::1", "localhost"):
         return True
-    # Waitress za reverse proxy / WSL — sprawdź X-Forwarded-For tylko jeśli pierwszy hop to localhost
-    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return fwd in ("127.0.0.1", "::1", "localhost")
+    if TRUST_PROXY:
+        fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if fwd in ("127.0.0.1", "::1", "localhost"):
+            return True
+    return False
 
 
 def _systemd_service_state() -> str:
@@ -5912,8 +6071,9 @@ def service_restart():
                     ["systemctl", "restart", "ai_analiza"],
                 ):
                     try:
-                        subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                        return
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                        if result.returncode == 0:
+                            return
                     except Exception:
                         continue
             os._exit(0)

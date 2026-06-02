@@ -2319,7 +2319,7 @@ function openContextPreview(pointId, file, query) {
             if (m.size_human) meta.push('Rozmiar: ' + m.size_human);
             if (d.truncated) meta.push('(skrócono do 12k znaków)');
             document.getElementById('contextPreviewMeta').textContent = meta.join(' · ');
-            document.getElementById('contextPreviewBody').innerHTML = d.text || '(pusty fragment)';
+            document.getElementById('contextPreviewBody').textContent = d.text || '(pusty fragment)';
             const openBtn = document.getElementById('contextPreviewOpenBtn');
             if (d.full_path) {
                 openBtn.style.display = '';
@@ -2351,7 +2351,7 @@ function loadResultContext(idx) {
 
     fetchJson('/api/get_context?' + params.toString())
         .then(d => {
-            body.innerHTML = d.text || '(brak treści)';
+            body.textContent = d.text || '(brak treści)';
             body.dataset.loaded = '1';
         })
         .catch(err => {
@@ -2371,7 +2371,7 @@ function renderMarkdownTable(text) {
         const tag = !inTable ? 'th' : 'td';
         if (!inTable) { html += '<thead><tr>'; inTable = true; }
         else html += '<tr>';
-        html += cells.map(c => `<${tag} style="white-space:nowrap;">${c.trim()}</${tag}>`).join('');
+        html += cells.map(c => `<${tag} style="white-space:nowrap;">${escapeHtml(c.trim())}</${tag}>`).join('');
         html += tag === 'th' ? '</tr></thead><tbody>' : '</tr>';
     }
     if (inTable) html += '</tbody>';
@@ -2916,11 +2916,11 @@ function executeImport() {
                 lbl.textContent = `${d.i} / ${d.total}: ${d.file.length > 40 ? d.file.slice(0,37)+'...' : d.file}`;
                 pct.textContent = p + '%';
                 const color = d.new > 0 ? '#68d391' : '#a0aec0';
-                log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${d.file} — ${d.new} nowych / ${d.chunks} chunków</div>`;
+                log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${escapeHtml(d.file)} — ${d.new} nowych / ${d.chunks} chunków</div>`;
                 log.scrollTop = log.scrollHeight;
             },
             'skip': (d) => {
-                log.innerHTML += `<div style="color:#fc8181;">[${d.i}/${d.total}] POMINIĘTO: ${d.file} (${d.reason})</div>`;
+                log.innerHTML += `<div style="color:#fc8181;">[${d.i}/${d.total}] POMINIĘTO: ${escapeHtml(d.file)} (${escapeHtml(d.reason)})</div>`;
                 log.scrollTop = log.scrollHeight;
             },
             'done': (d) => {
@@ -4991,9 +4991,8 @@ function loadCollectionProfile() {
         .then(r => r.json())
         .then(d => {
             if (!d.success || d.profile === 'empty' || !d.suggestion_text) return;
-            // Don't show if user already picked a non-default mode
-            if (document.getElementById('searchMode').value !== 'normal' &&
-                document.getElementById('searchMode').value !== d.suggestion_mode) return;
+            // Only show banner when user hasn't changed from default mode
+            if (document.getElementById('searchMode').value !== 'normal') return;
             _contextSuggestedMode = d.suggestion_mode;
             document.getElementById('contextBannerIcon').textContent = _contextIcons[d.profile] || '📋';
             document.getElementById('contextBannerText').textContent = d.suggestion_text;
