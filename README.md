@@ -384,7 +384,7 @@ git fetch origin && git checkout master && git pull origin master
 **Z poziomu aplikacji (localhost):** ikona ⚙️ → Diagnostyka → **Aktualizacje** → Sprawdź → Pobierz → Restart  
 Endpointy: `GET /api/update/status`, `POST /api/update/pull`, `POST /api/update/restart`
 
-**Tagi wydania:** `v2026.13` (Flota LLM + rój agentów), wcześniejsze — w [Releases](https://github.com/dragon15555000/AI_analiza_dokumentow/releases).
+**Tagi wydania:** `v2026.14` (Flota + rój — wydanie stabilizacyjne), `v2026.13`, wcześniejsze — w [Releases](https://github.com/dragon15555000/AI_analiza_dokumentow/releases).
 
 ### Diagnostyka
 

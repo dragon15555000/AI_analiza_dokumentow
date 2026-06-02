@@ -13,6 +13,26 @@ Wersjonowanie zgodne z tagami git (`v2026.xx`).
 
 ---
 
+## [v2026.14] — 2026-06-02
+
+Wydanie stabilizacyjne po v2026.13 — mitigacje regresji Floty i roju LLM.
+
+### Dodano
+
+- Testy smoke roju w `scripts/run-tests.sh` (`/api/swarm/modes`, lekki SSE `/agents/swarm`, `/api/llm/fleet` bez pełnej sondy).
+
+### Zmieniono
+
+- **Flota LLM** — `llm_provider: auto` + `fleet_task` per zakładka; pill „Auto → …” w topbarze; `llm_provider_used` w SSE wyszukiwania; bez auto-sondy przy każdym otwarciu zakładki (szybsze odświeżanie).
+- **Rój LLM** — max **3** równoległe workery w chmurze; tryb A: 4 workery; zapasowa synteza w chmurze gdy strict incognito + padnięta Ollama (`synth_cloud_fallback`).
+
+### Naprawiono
+
+- Statystyki floty — poprawny zapis `last_error` przy nieudanych sondach.
+- `/health` i `/api/llm/fleet` — `fleet_effective_provider` vs `configured_provider`.
+
+---
+
 ## [v2026.13] — 2026-06-02
 
 Sesja rozwojowa: wielodostawcowość LLM, Flota LLM, rój agentów, UI dashboard.
