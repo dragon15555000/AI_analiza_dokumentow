@@ -171,7 +171,12 @@
     </div>
     <button onclick="openDiagnostics()" title="Diagnostyka / Zarządzanie usługą"
             style="background:none;border:1px solid #4a5568;color:#a0aec0;border-radius:6px;padding:2px 10px;font-size:0.8rem;cursor:pointer;">⚙️</button>
-    <div class="badge-stat">Model: <span>768 · Nomic</span></div>
+    <div class="badge-stat" title="Aktywny model czatu (OpenRouter / Groq / Ollama)">
+        Chat: <span id="statLlmChat">...</span>
+    </div>
+    <div class="badge-stat" title="Embeddingi — zawsze Ollama nomic-embed-text">
+        Emb: <span>nomic</span>
+    </div>
     <div class="badge-stat">Baza: <span id="statActiveCol">dokumenty</span></div>
     <div class="badge-stat" title="Tokeny zużyte w tej sesji">
         🔤 <span id="sessionTokenCount">0</span>
@@ -1413,6 +1418,10 @@ function updateHealthStatus() {
                         : 'OCR niedostępny';
                 }
             }
+
+            if (typeof updateTopbarLlmBadge === 'function') {
+                updateTopbarLlmBadge(d);
+            }
         })
         .catch(() => {
             const statusEl = document.getElementById('statStatus');
@@ -1462,9 +1471,9 @@ function loadDocs() {
 }
 
 function extBadge(fname) {
-    const ext = fname.split('.').pop().toLowerCase();
+    const ext = String(fname || '').split('.').pop().toLowerCase();
     const cls = {'pdf':'ext-pdf','docx':'ext-docx','doc':'ext-docx','xlsx':'ext-xlsx','xls':'ext-xlsx','json':'ext-json','md':'ext-md','txt':'ext-txt','csv':'ext-csv'}[ext] || 'ext-txt';
-    return `<span class="ext-badge ${cls}">${ext}</span>`;
+    return `<span class="ext-badge ${cls}">${escapeHtml(ext)}</span>`;
 }
 
 function renderDocTable(docs) {
@@ -1477,13 +1486,15 @@ function renderDocTable(docs) {
         return;
     }
     tbody.innerHTML = docs.map((d, i) => {
-        const safe = d.file.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const fileName = String(d.file || '');
+        const safe = fileName.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const fileHtml = escapeHtml(fileName);
         return `<tr id="docrow-${i}">
             <td style="text-align:center;">
                 <input type="checkbox" class="doc-check" value="${safe}" onchange="onDocCheck()">
             </td>
             <td class="text-muted">${i+1}</td>
-            <td style="max-width:0;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${d.file}">${d.file}</div></td>
+            <td style="max-width:0;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${fileHtml}">${fileHtml}</div></td>
             <td>${extBadge(d.file)}</td>
             <td>
                 <div style="font-size:0.78rem;font-weight:700;">${d.chunks}</div>
@@ -2216,15 +2227,16 @@ function compareDocuments() {
     .then(d => {
         btn.disabled = false; st.classList.add('d-none');
         if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`; return; }
+        const comparisonHtml = escapeHtml(d.comparison || '').replace(/\n/g,'<br>');
         res.innerHTML = `
             <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
                 <div class="d-flex gap-3 small">
-                    <span>📄 <strong>${d.file_a}</strong> (${d.chunks_a} chunków)</span>
+                    <span>📄 <strong>${escapeHtml(d.file_a)}</strong> (${d.chunks_a} chunków)</span>
                     <span style="color:#4f46e5;">⚖️</span>
-                    <span>📄 <strong>${d.file_b}</strong> (${d.chunks_b} chunków)</span>
+                    <span>📄 <strong>${escapeHtml(d.file_b)}</strong> (${d.chunks_b} chunków)</span>
                 </div>
             </div>
-            <div style="font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">${d.comparison.replace(/\n/g,'<br>')}</div>
+            <div style="font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">${comparisonHtml}</div>
             <div class="mt-3 d-flex gap-2">
                 <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
             </div>`;
@@ -2411,13 +2423,13 @@ function renderMarkdownTable(text) {
     let html = '<div style="overflow-x:auto;"><table class="table table-sm table-bordered" style="font-size:0.82rem;">';
     let inTable = false;
     for (const line of lines) {
-        if (!line.includes('|')) { html += `<p>${line}</p>`; continue; }
+        if (!line.includes('|')) { html += `<p>${escapeHtml(line)}</p>`; continue; }
         const cells = line.split('|').filter((_, i, a) => i > 0 && i < a.length - 1);
         if (line.match(/^\s*\|[-| ]+\|\s*$/)) continue; // separator
         const tag = !inTable ? 'th' : 'td';
         if (!inTable) { html += '<thead><tr>'; inTable = true; }
         else html += '<tr>';
-        html += cells.map(c => `<${tag} style="white-space:nowrap;">${c.trim()}</${tag}>`).join('');
+        html += cells.map(c => `<${tag} style="white-space:nowrap;">${escapeHtml(c.trim())}</${tag}>`).join('');
         html += tag === 'th' ? '</tr></thead><tbody>' : '</tr>';
     }
     if (inTable) html += '</tbody>';
@@ -2918,6 +2930,14 @@ async function streamSSEPost(url, body, eventHandlers = {}, signal = null) {
 }
 
 // ---- IMPORT SSE (fetch + ReadableStream - wspiera X-API-Key) ----
+function appendImportLogLine(log, color, text) {
+    const row = document.createElement('div');
+    row.style.color = color;
+    row.textContent = text;
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+}
+
 function executeImport() {
     const folderPath = document.getElementById('importPathInput').value.trim();
     if (!folderPath) return;
@@ -2954,7 +2974,7 @@ function executeImport() {
         sseController = await streamSSE(url, {
             'start': (d) => {
                 lbl.textContent = `Przetwarzanie 0 / ${d.total} plików`;
-                log.innerHTML += `<div style="color:#63b3ed;">Znaleziono ${d.total} plików do importu...</div>`;
+                appendImportLogLine(log, '#63b3ed', `Znaleziono ${d.total} plików do importu...`);
             },
             'file': (d) => {
                 const p = Math.round(d.i / d.total * 100);
@@ -2962,12 +2982,10 @@ function executeImport() {
                 lbl.textContent = `${d.i} / ${d.total}: ${d.file.length > 40 ? d.file.slice(0,37)+'...' : d.file}`;
                 pct.textContent = p + '%';
                 const color = d.new > 0 ? '#68d391' : '#a0aec0';
-                log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${d.file} — ${d.new} nowych / ${d.chunks} chunków</div>`;
-                log.scrollTop = log.scrollHeight;
+                appendImportLogLine(log, color, `[${d.i}/${d.total}] ${d.file} — ${d.new} nowych / ${d.chunks} chunków`);
             },
             'skip': (d) => {
-                log.innerHTML += `<div style="color:#fc8181;">[${d.i}/${d.total}] POMINIĘTO: ${d.file} (${d.reason})</div>`;
-                log.scrollTop = log.scrollHeight;
+                appendImportLogLine(log, '#fc8181', `[${d.i}/${d.total}] POMINIĘTO: ${d.file} (${d.reason})`);
             },
             'done': (d) => {
                 if (sseController) sseController.close();
@@ -2978,14 +2996,17 @@ function executeImport() {
                 bar.classList.remove('progress-bar-animated');
                 lbl.textContent = 'Zakończono';
                 pct.textContent = '100%';
-                log.innerHTML += `<div style="color:#f6e05e;font-weight:bold;margin-top:6px;">✅ ${d.msg}</div>`;
+                appendImportLogLine(log, '#f6e05e', `✅ ${d.msg}`);
                 done.classList.remove('d-none');
-                done.innerHTML = `✅ ${d.msg}`;
+                done.textContent = `✅ ${d.msg}`;
                 updateStats();
                 allDocs = [];
             },
             'error': (d) => {
-                log.innerHTML += `<div style="color:#fc8181;">❌ ${d.msg || 'Błąd strumienia'}</div>`;
+                const msg = d.msg || d.error || 'Błąd strumienia';
+                const color = d.blocked ? '#f59e0b' : '#fc8181';
+                const prefix = d.blocked ? '⏳ Zablokowano' : '❌';
+                appendImportLogLine(log, color, `${prefix}: ${msg}`);
                 if (sseController) sseController.close();
                 if (stopBtn) stopBtn.style.display = 'none';
                 btn.disabled = false;
@@ -2996,7 +3017,7 @@ function executeImport() {
 
     // Start the stream
     startStream().catch(err => {
-        log.innerHTML += `<div style="color:#fc8181;">❌ Nie udało się rozpocząć importu: ${err.message}</div>`;
+        appendImportLogLine(log, '#fc8181', `❌ Nie udało się rozpocząć importu: ${err.message}`);
         btn.disabled = false;
         isHeavyVectorizing = false;
         if (stopBtn) stopBtn.style.display = 'none';
@@ -3009,7 +3030,7 @@ function executeImport() {
         btn.disabled = false;
         isHeavyVectorizing = false;
         lbl.textContent = 'Anulowano przez użytkownika';
-        log.innerHTML += `<div style="color:#f59e0b;">⏹ Operacja anulowana.</div>`;
+        appendImportLogLine(log, '#f59e0b', '⏹ Operacja anulowana.');
     };
     if (stopBtn) {
         stopBtn.onclick = stopHandler;
@@ -4094,6 +4115,19 @@ function getCurrentLlmProvider() {
     return localStorage.getItem('llm_provider') || 'openrouter';
 }
 
+function updateTopbarLlmBadge(healthData) {
+    const el = document.getElementById('statLlmChat');
+    if (!el) return;
+    const prov = getCurrentLlmProvider();
+    const labels = { openrouter: 'OR', groq: 'Groq', ollama: 'Ollama' };
+    let model = '';
+    if (prov === 'openrouter') model = getCurrentOpenRouterModel();
+    else if (prov === 'groq') model = getCurrentGroqModel();
+    else model = (healthData && healthData.llm_model) || 'llama3';
+    const short = model ? (model.includes('/') ? model.split('/').pop() : model) : '?';
+    el.textContent = `${labels[prov] || prov} · ${short}`;
+}
+
 function onQdrantModeChange() {
     const mode = document.getElementById('qdrantModeSelect').value;
     const sel = document.getElementById('qdrantModeSelect');
@@ -4137,6 +4171,7 @@ function onLlmProviderChange() {
     if (!sel) return;
     localStorage.setItem('llm_provider', sel.value);
     syncLlmModelPickerVisibility();
+    updateTopbarLlmBadge();
 
     const badge = sel.parentElement;
     badge.style.transition = 'all 0.2s';
@@ -4163,6 +4198,7 @@ function onOpenRouterModelChange() {
     const input = document.getElementById('openrouterModelInput');
     if (!input) return;
     localStorage.setItem('openrouter_model', input.value.trim());
+    updateTopbarLlmBadge();
 }
 
 function onOpenRouterModelSelectChange() {
@@ -4183,12 +4219,14 @@ function onOpenRouterModelSelectChange() {
         localStorage.removeItem('openrouter_model');
     }
     syncLlmModelPickerVisibility();
+    updateTopbarLlmBadge();
 }
 
 function onGroqModelChange() {
     const input = document.getElementById('groqModelInput');
     if (!input) return;
     localStorage.setItem('groq_model', input.value.trim());
+    updateTopbarLlmBadge();
 }
 
 function onGroqModelSelectChange() {
@@ -4208,6 +4246,7 @@ function onGroqModelSelectChange() {
         localStorage.removeItem('groq_model');
     }
     syncLlmModelPickerVisibility();
+    updateTopbarLlmBadge();
 }
 
 function restoreLlmProvider() {
@@ -4265,6 +4304,7 @@ function restoreLlmProvider() {
         }
     }
     syncLlmModelPickerVisibility();
+    updateTopbarLlmBadge();
 }
 
 function getCurrentGroqModel() {
@@ -5204,9 +5244,8 @@ function loadCollectionProfile() {
         .then(r => r.json())
         .then(d => {
             if (!d.success || d.profile === 'empty' || !d.suggestion_text) return;
-            // Don't show if user already picked a non-default mode
-            if (document.getElementById('searchMode').value !== 'normal' &&
-                document.getElementById('searchMode').value !== d.suggestion_mode) return;
+            // Don't show if user already picked any mode manually.
+            if (document.getElementById('searchMode').value !== 'normal') return;
             _contextSuggestedMode = d.suggestion_mode;
             document.getElementById('contextBannerIcon').textContent = _contextIcons[d.profile] || '📋';
             document.getElementById('contextBannerText').textContent = d.suggestion_text;

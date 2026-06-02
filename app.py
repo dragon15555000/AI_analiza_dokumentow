@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import html
 import urllib.request
 import re
 import os
@@ -70,8 +71,8 @@ def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str 
     if first_token not in allowed_first_words:
         return False, f"Niedozwolone polecenie: {first_token}"
 
-    if sql_upper.count(";") > 1:
-        return False, "Wykryto wiele instrukcji SQL (potencjalne SQL Injection)"
+    if ";" in sql_query:
+        return False, "Wykryto średnik w SQL (potencjalne SQL Injection)"
 
     for dangerous in DANGEROUS_SQL_KEYWORDS:
         if dangerous in sql_upper:
@@ -658,6 +659,10 @@ def _llm_response_text(result) -> str:
     return str(result).strip()
 
 
+def _escape_html_text(text: str) -> str:
+    return html.escape(text or "", quote=False)
+
+
 def _clean_llm_sql(raw: str) -> str:
     sql = re.sub(r"^```\w*\n?", "", raw or "", flags=re.MULTILINE)
     sql = re.sub(r"```$", "", sql.strip()).strip()
@@ -707,7 +712,8 @@ try:
     OPENROUTER_MAX_RETRIES = max(1, int(os.environ.get("OPENROUTER_MAX_RETRIES", "3")))
 except ValueError:
     logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
-    OPENROUTER_MAX_RETRIES = 3
+
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
 
 # Groq (OpenAI-compatible API — szybkie testy)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -1250,12 +1256,13 @@ def _is_local_request() -> bool:
     remote = request.remote_addr or ""
     if remote in ("127.0.0.1", "::1", "localhost"):
         return True
-    # W kontenerach / reverse proxy często X-Forwarded-For lub X-Real-IP
-    forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first in ("127.0.0.1", "::1", "localhost"):
-            return True
+    if TRUST_PROXY:
+        # Trust forwarded headers only when explicitly enabled.
+        forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first in ("127.0.0.1", "::1", "localhost"):
+                return True
     return False
 
 
@@ -2336,15 +2343,35 @@ def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, mo
 _qdrant_client = None
 _qdrant_lock = threading.Lock()
 
+
+def _is_local_qdrant_url(url: str | None = None) -> bool:
+    """Lokalny Qdrant (HTTP dev) — bez api_key i bez check_compatibility (mniej warningów w logach)."""
+    raw = (url or QDRANT_URL or "").strip().rstrip("/")
+    if not raw:
+        return False
+    if raw == QDRANT_LOCAL_URL.strip().rstrip("/"):
+        return True
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(raw)
+        if parsed.scheme != "http":
+            return False
+        return (parsed.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
+    except Exception:
+        return False
+
+
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     with _qdrant_lock:
         if _qdrant_client is None:
             from httpx import Limits
+            is_local = _is_local_qdrant_url()
             _qdrant_client = QdrantClient(
                 url=QDRANT_URL,
-                api_key=QDRANT_KEY,
+                api_key=None if is_local else QDRANT_KEY,
                 timeout=30.0,
+                check_compatibility=not is_local,
                 limits=Limits(
                     max_keepalive_connections=5,
                     max_connections=20,
@@ -2723,7 +2750,7 @@ def generate_answer(
         if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov in ("openrouter", "groq"):
             logger.warning(f"generate_answer: {prov} 429 → fallback do Ollama")
             try:
-                result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+                result = call_llm(prompt, system, stream=False, provider="ollama", model=LLM_MODEL)
                 if isinstance(result, dict):
                     return result.get("response", str(result))
                 return str(result)
@@ -3582,6 +3609,93 @@ def api_drives():
         return jsonify({"success": False, "error": str(e)})
 
 
+# ============================================================
+# CIĘŻKIE OPERACJE — mutex + /tasks
+# ============================================================
+
+_heavy_tasks_lock = threading.Lock()
+_active_heavy_task: dict | None = None
+_heavy_task_history: list[dict] = []
+_HEAVY_TASK_HISTORY_MAX = 8
+
+
+def _heavy_task_snapshot() -> dict:
+    with _heavy_tasks_lock:
+        active = dict(_active_heavy_task) if _active_heavy_task else None
+        history = [dict(t) for t in _heavy_task_history]
+    return {"active": active, "history": history}
+
+
+def _heavy_task_try_start(kind: str, label: str = "") -> tuple[bool, str | None, str | None]:
+    """Zwraca (ok, task_id, komunikat_blokady)."""
+    global _active_heavy_task
+    task_id = hashlib.md5(f"{kind}:{time.time()}:{label}".encode()).hexdigest()[:12]
+    with _heavy_tasks_lock:
+        if _active_heavy_task and not _active_heavy_task.get("done"):
+            busy = _active_heavy_task
+            msg = (
+                f"Inna operacja w toku: {busy.get('kind')} "
+                f"({busy.get('label') or busy.get('id')}). Poczekaj na zakończenie."
+            )
+            return False, None, msg
+        _active_heavy_task = {
+            "id": task_id,
+            "kind": kind,
+            "label": (label or kind)[:200],
+            "started_at": int(time.time()),
+            "updated_at": int(time.time()),
+            "progress": 0,
+            "total": 0,
+            "message": "start",
+            "done": False,
+            "error": None,
+        }
+    return True, task_id, None
+
+
+def _heavy_task_update(task_id: str | None, **fields):
+    if not task_id:
+        return
+    with _heavy_tasks_lock:
+        if not _active_heavy_task or _active_heavy_task.get("id") != task_id:
+            return
+        _active_heavy_task.update(fields)
+        _active_heavy_task["updated_at"] = int(time.time())
+
+
+def _heavy_task_finish(task_id: str | None, *, error: str | None = None):
+    global _active_heavy_task
+    if not task_id:
+        return
+    with _heavy_tasks_lock:
+        if not _active_heavy_task or _active_heavy_task.get("id") != task_id:
+            return
+        _active_heavy_task["done"] = True
+        _active_heavy_task["error"] = error
+        _active_heavy_task["updated_at"] = int(time.time())
+        finished = dict(_active_heavy_task)
+        _heavy_task_history.insert(0, finished)
+        del _heavy_task_history[_HEAVY_TASK_HISTORY_MAX:]
+        _active_heavy_task = None
+
+
+def _default_chat_model(provider: str | None = None) -> str:
+    prov = get_llm_provider(provider)
+    if prov == "groq":
+        return GROQ_MODEL
+    if prov == "openrouter":
+        return OPENROUTER_MODEL
+    return LLM_MODEL
+
+
+@app.route('/tasks', methods=['GET'])
+def tasks_status():
+    """Status bieżącej ciężkiej operacji (import / wektoryzacja SQL)."""
+    snap = _heavy_task_snapshot()
+    busy = snap["active"] is not None and not snap["active"].get("done")
+    return jsonify({"success": True, "busy": busy, **snap})
+
+
 @app.route('/import/stream')
 def import_stream():
     folder = request.args.get('folder', '').strip()
@@ -3608,98 +3722,109 @@ def import_stream():
             yield sse("done", {"count": 0, "chunks": 0, "skipped": 0, "msg": "Brak kompatybilnych plików."})
             return
 
-        yield sse("start", {"total": len(files)})
+        ok, task_id, block_msg = _heavy_task_try_start("import", str(folder_path))
+        if not ok:
+            yield sse("error", {"msg": block_msg, "blocked": True})
+            return
 
-        qdrant = get_qdrant_client()
-        imported = 0
-        skipped = 0
-        total_chunks = 0
-        new_chunks = 0
+        task_error = None
+        try:
+            yield sse("start", {"total": len(files), "task_id": task_id})
 
-        for i, f_path in enumerate(files):
-            try:
-                text = extract_text(f_path)
-                if not text or len(text.strip()) < 10:
-                    skipped += 1
-                    yield sse("skip", {"file": f_path.name, "reason": "pusty", "i": i+1, "total": len(files)})
-                    continue
+            qdrant = get_qdrant_client()
+            imported = 0
+            skipped = 0
+            total_chunks = 0
+            new_chunks = 0
 
-                chunks = make_chunks(text)
-                file_new = 0
-
-                # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
-                file_meta = extract_file_metadata(f_path)
-
-                # Deduplikacja — sprawdź które chunki już są w bazie
-                chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
-                existing_ids = set()
-                for batch_start in range(0, len(chunk_ids), 100):
-                    batch = chunk_ids[batch_start:batch_start+100]
-                    found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
-                                           with_payload=False, with_vectors=False)
-                    existing_ids.update(p.id for p in found)
-
-                new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
-                                   if cid not in existing_ids]
-                total_chunks += len(chunks)
-
-                # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
-                BATCH = 6
-                embed_failed = False
-                for b in range(0, len(new_chunks_data), BATCH):
-                    batch_items = new_chunks_data[b:b+BATCH]
-                    batch_texts  = [item[1] for item in batch_items]
-                    batch_ids    = [item[0] for item in batch_items]
-                    try:
-                        vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
-                    except EmbeddingError as e:
+            for i, f_path in enumerate(files):
+                _heavy_task_update(task_id, progress=i + 1, total=len(files), message=f_path.name)
+                try:
+                    text = extract_text(f_path)
+                    if not text or len(text.strip()) < 10:
                         skipped += 1
-                        embed_failed = True
-                        yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
-                        break
+                        yield sse("skip", {"file": f_path.name, "reason": "pusty", "i": i+1, "total": len(files)})
+                        continue
 
-                    points  = [
-                        PointStruct(
-                            id=cid,
-                            vector=vec,
-                            payload={
-                                "file": f_path.name,
-                                "text": txt,
-                                "full_path": str(f_path),
-                                "metadata": file_meta
-                            }
-                        )
-                        for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
-                        if vec and any(v != 0.0 for v in vec)
-                    ]
-                    if points:
-                        qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
-                    new_chunks += len(points)
-                    file_new  += len(points)
+                    chunks = make_chunks(text)
+                    file_new = 0
 
-                if embed_failed:
-                    continue
+                    file_meta = extract_file_metadata(f_path)
 
-                imported += 1
-                yield sse("file", {
-                    "file": f_path.name,
-                    "chunks": len(chunks),
-                    "new": file_new,
-                    "i": i+1,
-                    "total": len(files)
-                })
-                time.sleep(0.02)
-            except Exception as e:
-                skipped += 1
-                yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                    chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
+                    existing_ids = set()
+                    for batch_start in range(0, len(chunk_ids), 100):
+                        batch = chunk_ids[batch_start:batch_start+100]
+                        found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
+                                               with_payload=False, with_vectors=False)
+                        existing_ids.update(p.id for p in found)
 
-        yield sse("done", {
-            "count": imported,
-            "chunks": total_chunks,
-            "new_chunks": new_chunks,
-            "skipped": skipped,
-            "msg": f"Przetworzono {imported} plików · {new_chunks} nowych chunków · {total_chunks - new_chunks} duplikatów pominiętych"
-        })
+                    new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
+                                       if cid not in existing_ids]
+                    total_chunks += len(chunks)
+
+                    BATCH = 6
+                    embed_failed = False
+                    for b in range(0, len(new_chunks_data), BATCH):
+                        batch_items = new_chunks_data[b:b+BATCH]
+                        batch_texts  = [item[1] for item in batch_items]
+                        batch_ids    = [item[0] for item in batch_items]
+                        try:
+                            vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                        except EmbeddingError as e:
+                            skipped += 1
+                            embed_failed = True
+                            yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                            break
+
+                        points  = [
+                            PointStruct(
+                                id=cid,
+                                vector=vec,
+                                payload={
+                                    "file": f_path.name,
+                                    "text": txt,
+                                    "full_path": str(f_path),
+                                    "metadata": file_meta
+                                }
+                            )
+                            for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
+                            if vec and any(v != 0.0 for v in vec)
+                        ]
+                        if points:
+                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                        new_chunks += len(points)
+                        file_new  += len(points)
+
+                    if embed_failed:
+                        continue
+
+                    imported += 1
+                    yield sse("file", {
+                        "file": f_path.name,
+                        "chunks": len(chunks),
+                        "new": file_new,
+                        "i": i+1,
+                        "total": len(files)
+                    })
+                    time.sleep(0.02)
+                except Exception as e:
+                    skipped += 1
+                    yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+
+            yield sse("done", {
+                "count": imported,
+                "chunks": total_chunks,
+                "new_chunks": new_chunks,
+                "skipped": skipped,
+                "msg": f"Przetworzono {imported} plików · {new_chunks} nowych chunków · {total_chunks - new_chunks} duplikatów pominiętych"
+            })
+        except Exception as e:
+            task_error = str(e)
+            logger.exception("import_stream error")
+            yield sse("error", {"msg": task_error})
+        finally:
+            _heavy_task_finish(task_id, error=task_error)
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -3894,7 +4019,7 @@ def hybrid_stream():
                     provider=llm_provider,
                     model=openrouter_model
                 ):
-                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         logger.warning(f"LLM stream error (hybrid): {token[:120]}")
                         yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
                         return
@@ -3964,7 +4089,7 @@ def search_stream():
                     provider=llm_provider,
                     model=openrouter_model
                 ):
-                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         # Czysty błąd zamiast zaśmiecania odpowiedzi
                         logger.warning(f"LLM stream error (search): {token[:120]}")
                         yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
@@ -4119,8 +4244,12 @@ def get_suggestions():
             f"DOKUMENTY:\n{context}"
         )
         system_msg = "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań."
-        result = _call_ollama(prompt, system_msg, stream=False, model=LLM_MODEL)
-        raw = result.get("response", "") if isinstance(result, dict) else ""
+        prov = DEFAULT_LLM_PROVIDER
+        result = call_llm(
+            prompt, system_msg, stream=False,
+            provider=prov, model=_default_chat_model(prov), max_tokens=800,
+        )
+        raw = result.get("response", "") if isinstance(result, dict) else str(result)
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]
         suggestions = [l for l in lines if len(l) > 10][:8]
@@ -4290,6 +4419,8 @@ def get_context():
                 text = p.get("text", "")
                 if query:
                     text = highlight_backend(text, query)
+                else:
+                    text = _escape_html_text(text)
                 full_path = p.get("full_path", "")
                 return jsonify({
                     "success": True,
@@ -4318,7 +4449,7 @@ def get_context():
                     )
                     if res.points:
                         p = res.points[0].payload or {}
-                        text = highlight_backend(p.get("text", ""), query)
+                        text = highlight_backend(p.get("text", ""), query) if query else _escape_html_text(p.get("text", ""))
                         full_path = p.get("full_path", "")
                         return jsonify({
                             "success": True,
@@ -4346,6 +4477,8 @@ def get_context():
             if records:
                 p = records[0].payload or {}
                 text = highlight_backend(p.get("text", ""), query) if query else p.get("text", "")
+                if not query:
+                    text = _escape_html_text(text)
                 full_path = p.get("full_path", "")
                 return jsonify({
                     "success": True,
@@ -4363,6 +4496,8 @@ def get_context():
                 excerpt = extract_text(path)[:12000]
                 if query:
                     excerpt = highlight_backend(excerpt, query)
+                else:
+                    excerpt = _escape_html_text(excerpt)
                 return jsonify({
                     "success": True,
                     "file": file_name,
@@ -4378,6 +4513,236 @@ def get_context():
     except Exception as e:
         logger.exception("get_context")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _load_file_chunks_for_compare(client, file_name: str, limit: int = 6) -> list[dict]:
+    """Pobiera kilka chunków danego pliku z Qdrant do porównania LLM."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    file_name = (file_name or "").strip()
+    if not file_name:
+        return []
+
+    try:
+        records, _ = client.scroll(
+            collection_name=ACTIVE_COLLECTION,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="file", match=MatchValue(value=file_name))]
+            ),
+            limit=limit,
+            with_payload=["file", "text", "full_path", "metadata"],
+            with_vectors=False,
+        )
+    except Exception:
+        return []
+
+    chunks: list[dict] = []
+    for idx, record in enumerate(records or []):
+        payload = record.payload or {}
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            continue
+        chunks.append({
+            "index": idx + 1,
+            "point_id": str(record.id),
+            "file": payload.get("file", file_name),
+            "text": text,
+            "full_path": payload.get("full_path", ""),
+            "metadata": payload.get("metadata"),
+        })
+    return chunks
+
+
+def _infer_collection_profile() -> dict:
+    """Prosta heurystyka profilu kolekcji na podstawie próbek chunków."""
+    try:
+        client = get_qdrant_client()
+        records: list = []
+        offset = None
+        while len(records) < 400:
+            batch, offset = client.scroll(
+                collection_name=ACTIVE_COLLECTION,
+                limit=100,
+                offset=offset,
+                with_payload=["file", "text"],
+                with_vectors=False,
+            )
+            records.extend(batch or [])
+            if offset is None:
+                break
+        records = records[:400]
+    except Exception as e:
+        return {
+            "success": False,
+            "profile": "empty",
+            "suggestion_mode": "normal",
+            "suggestion_text": "Nie udało się odczytać kolekcji.",
+            "error": str(e)[:200],
+        }
+
+    if not records:
+        return {
+            "success": True,
+            "profile": "empty",
+            "suggestion_mode": "normal",
+            "suggestion_text": "",
+            "points_sampled": 0,
+        }
+
+    total = len(records)
+    numeric_hits = 0
+    legal_hits = 0
+    prose_hits = 0
+    ext_counts: dict[str, int] = defaultdict(int)
+    sample_files: list[str] = []
+
+    legal_markers = (
+        "ustawa", "rozporządzenie", "kodeks", "art.", "§", "paragraf",
+        "zarządzenie", "uchwała", "wyrok", "sygn.", "dziennik ustaw",
+    )
+
+    for record in records:
+        payload = record.payload or {}
+        file_name = str(payload.get("file") or "").strip()
+        text = str(payload.get("text") or "")
+
+        if file_name:
+            ext = Path(file_name).suffix.lower()
+            ext_counts[ext] += 1
+            if len(sample_files) < 6 and file_name not in sample_files:
+                sample_files.append(file_name)
+
+        lower = text.lower()
+        if any(marker in lower for marker in legal_markers):
+            legal_hits += 1
+
+        digit_count = sum(ch.isdigit() for ch in text)
+        if (
+            file_name.lower().endswith((".xlsx", ".xls", ".csv", ".ods", ".tsv"))
+            or digit_count >= max(8, len(text) // 10)
+            or re.search(r"\b\d{1,3}(?:[ .]\d{3})*(?:[,.]\d+)?\b", text)
+            or re.search(r"[%$€zł]", text, re.IGNORECASE)
+        ):
+            numeric_hits += 1
+
+        if len(text) > 160 and re.search(r"\b[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{3,}\b", text):
+            prose_hits += 1
+
+    if legal_hits >= max(3, total // 4) and legal_hits >= numeric_hits:
+        profile = "legal"
+        suggestion_mode = "legal"
+        suggestion_text = "Kolekcja wygląda na prawną lub regulacyjną. Domyślnie zacznij od trybu Prawny."
+    elif numeric_hits >= max(3, total // 3):
+        profile = "numerical"
+        suggestion_mode = "extract"
+        suggestion_text = "Kolekcja wygląda na tabelaryczną / liczbową. Domyślnie lepsza będzie Ekstrakcja danych."
+    elif legal_hits and numeric_hits:
+        profile = "mixed"
+        suggestion_mode = "detective"
+        suggestion_text = "Kolekcja miesza dane liczbowe i tekstowe. Domyślnie zacznij od trybu Detektyw."
+    elif prose_hits >= max(3, total // 3):
+        profile = "textual"
+        suggestion_mode = "normal"
+        suggestion_text = "Kolekcja wygląda na opisową. Domyślnie zacznij od trybu Standardowego."
+    else:
+        profile = "mixed"
+        suggestion_mode = "detective"
+        suggestion_text = "Kolekcja ma mieszany charakter. Domyślnie zacznij od trybu Detektyw."
+
+    return {
+        "success": True,
+        "profile": profile,
+        "suggestion_mode": suggestion_mode,
+        "suggestion_text": suggestion_text,
+        "points_sampled": total,
+        "sample_files": sample_files,
+        "ext_counts": dict(ext_counts),
+        "numeric_hits": numeric_hits,
+        "legal_hits": legal_hits,
+        "prose_hits": prose_hits,
+    }
+
+
+@app.route('/api/collection/profile', methods=['GET'])
+def collection_profile():
+    return jsonify(_infer_collection_profile())
+
+
+@app.route('/compare', methods=['POST'])
+def compare_documents():
+    """Porównuje dwa dokumenty przez LLM na podstawie ich chunków z Qdrant."""
+    data = request.get_json() or {}
+    file_a = (data.get("file_a") or "").strip()
+    file_b = (data.get("file_b") or "").strip()
+    focus = (data.get("focus") or "").strip()
+    llm_provider = data.get("llm_provider")
+    model = _model_from_request(data, llm_provider)
+
+    if not file_a or not file_b:
+        return jsonify({"success": False, "error": "Wybierz dwa pliki do porównania"}), 400
+    if file_a == file_b:
+        return jsonify({"success": False, "error": "Wybierz dwa różne pliki"}), 400
+
+    try:
+        client = get_qdrant_client()
+        chunks_a = _load_file_chunks_for_compare(client, file_a, limit=6)
+        chunks_b = _load_file_chunks_for_compare(client, file_b, limit=6)
+        if not chunks_a:
+            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_a}"}), 404
+        if not chunks_b:
+            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_b}"}), 404
+
+        def _ctx(chunks: list[dict]) -> str:
+            parts = []
+            for chunk in chunks:
+                parts.append(
+                    f"[Chunk {chunk['index']}]\n"
+                    f"{_sanitize_for_prompt(chunk['text'], 1200)}"
+                )
+            return "\n\n".join(parts)
+
+        prompt = (
+            f"Dokument A: {file_a}\n"
+            f"{_ctx(chunks_a)}\n\n"
+            f"Dokument B: {file_b}\n"
+            f"{_ctx(chunks_b)}\n\n"
+        )
+        if focus:
+            prompt += f"Skup się szczególnie na: {focus}\n\n"
+        prompt += (
+            "Porównaj dokumenty po polsku. Wypisz najważniejsze różnice i podobieństwa, "
+            "szczególnie: strony, kwoty, daty, obowiązki, terminy, załączniki, sprzeczności i braki. "
+            "Nie wymyślaj faktów. Jeśli czegoś nie ma w tekście, napisz, że brak danych."
+        )
+
+        system = (
+            "Jesteś analitykiem porównawczym dokumentów. "
+            "Odpowiadasz po polsku, konkretnie i bez markdownowych ozdobników. "
+            "Jeśli są rozbieżności, wypisz je punktami."
+        )
+
+        result = call_llm(
+            prompt=prompt,
+            system=system,
+            stream=False,
+            provider=llm_provider,
+            model=model,
+            max_tokens=1800,
+            temperature=0.2,
+        )
+        comparison = _llm_response_text(result)
+        return jsonify({
+            "success": True,
+            "file_a": file_a,
+            "file_b": file_b,
+            "chunks_a": len(chunks_a),
+            "chunks_b": len(chunks_b),
+            "focus": focus,
+            "comparison": comparison,
+        })
+    except Exception as e:
+        logger.exception("compare_documents")
+        return jsonify({"success": False, "error": str(e)[:300]}), 500
 
 @app.route('/export/metadata_report', methods=['POST'])
 def export_metadata_report_docx():
@@ -5954,10 +6319,18 @@ def sql_vectorize():
         def sse(event, payload):
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        task_id = None
+        task_error = None
         try:
             _require_sql_backend(cfg)
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
+
+            ok, task_id, block_msg = _heavy_task_try_start("sql_vectorize", table)
+            if not ok:
+                yield sse("error", {"error": block_msg, "blocked": True})
+                return
+
             conn = _get_sql_conn(cfg, readonly=True)
             data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
@@ -5970,7 +6343,7 @@ def sql_vectorize():
                 return
 
             total = _sql_table_count(conn, table, dialect)
-            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols})
+            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols, "task_id": task_id})
 
             qdrant = get_qdrant_client()
             done = 0
@@ -5998,6 +6371,7 @@ def sql_vectorize():
                 done += len(rows_buf)
                 rows_buf = []
                 pct = round(done / total * 100) if total else 0
+                _heavy_task_update(task_id, progress=done, total=total, message=table)
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
             if rows_buf:
@@ -6016,14 +6390,18 @@ def sql_vectorize():
                     qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
                 done += len(rows_buf)
                 pct = round(done / total * 100) if total else 0
+                _heavy_task_update(task_id, progress=done, total=total, message=table)
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
             conn.close()
             _docs_cache["data"] = None
             yield sse("done", {"done": True, "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
         except Exception as e:
+            task_error = str(e)
             logger.exception("sql_vectorize error")
-            yield sse("error", {"error": str(e)})
+            yield sse("error", {"error": task_error})
+        finally:
+            _heavy_task_finish(task_id, error=task_error)
 
     return Response(
         stream_with_context(generate()),
@@ -6042,20 +6420,29 @@ def sql_vectorize_all():
         def sse(event, payload):
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        task_id = None
+        task_error = None
         try:
             _require_sql_backend(cfg)
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
+
+            ok, task_id, block_msg = _heavy_task_try_start("sql_vectorize_all", "all_tables")
+            if not ok:
+                yield sse("error", {"error": block_msg, "blocked": True})
+                return
+
             conn = _get_sql_conn(cfg, readonly=True)
             data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
             tables = [t["name"] for t in _sql_list_tables(conn, dialect)]
-            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables})
+            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables, "task_id": task_id})
 
             qdrant = get_qdrant_client()
             total_rows = 0
 
             for table_idx, table in enumerate(tables):
+                _heavy_task_update(task_id, progress=table_idx + 1, total=len(tables), message=table)
                 try:
                     yield sse("table_start", {
                         "table_start": True,
@@ -6144,8 +6531,11 @@ def sql_vectorize_all():
                 "msg": f"Zwektoryzowano {total_rows} wierszy z {len(tables)} tabel",
             })
         except Exception as e:
+            task_error = str(e)
             logger.exception("sql_vectorize_all error")
-            yield sse("error", {"error": str(e)})
+            yield sse("error", {"error": task_error})
+        finally:
+            _heavy_task_finish(task_id, error=task_error)
 
     return Response(
         stream_with_context(generate()),
@@ -6362,9 +6752,11 @@ def _localhost_only() -> bool:
     addr = (request.remote_addr or "").strip()
     if addr in ("127.0.0.1", "::1", "localhost"):
         return True
-    # Waitress za reverse proxy / WSL — sprawdź X-Forwarded-For tylko jeśli pierwszy hop to localhost
-    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return fwd in ("127.0.0.1", "::1", "localhost")
+    if TRUST_PROXY:
+        # Trust forwarded headers only when explicitly enabled.
+        fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        return fwd in ("127.0.0.1", "::1", "localhost")
+    return False
 
 
 def _systemd_service_state() -> str:
@@ -6432,8 +6824,9 @@ def service_restart():
                     ["systemctl", "restart", "ai_analiza"],
                 ):
                     try:
-                        subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                        return
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                        if result.returncode == 0:
+                            return
                     except Exception:
                         continue
             os._exit(0)

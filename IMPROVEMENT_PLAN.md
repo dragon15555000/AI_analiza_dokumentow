@@ -2,8 +2,43 @@
 
 > **Roadmapa na GitHub:** [Issue #2 — Plan rozwoju 2026](https://github.com/dragon15555000/AI_analiza_dokumentow/issues/2) (tabela faz + sprinty).  
 > Kopia treści issue: [`docs/ROADMAP_ISSUE_2.md`](docs/ROADMAP_ISSUE_2.md).
+> **Historia zmian użytkownika:** [`CHANGELOG.md`](CHANGELOG.md).
 
-Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po dodaniu integracji z OpenRouter.
+Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu — przy wielodostawcowości LLM (Ollama / OpenRouter / Groq).
+
+---
+
+## Plan skrócony — stan czerwiec 2026
+
+Legenda: ✅ zrobione · 🟡 częściowo · ⬜ do zrobienia
+
+| Priorytet | Temat | Status | Co zostaje |
+|-----------|--------|--------|------------|
+| **1** | Produkcyjny WSGI + stabilność uruchomienia | 🟡 | Waitress, `wsgi.py`, `ai_analiza-user.service`, `restart-app.sh --user` — **test na maszynie docelowej** + ewentualne poprawki |
+| **2** | Abstrakcja LLM (chat/synteza/weryfikacja) | 🟡 | `call_llm()` / `stream_llm_tokens()` + Groq + **pool kluczy** (`EndpointPool`); zostało ~1–4 bezpośrednie `_call_ollama` poza fallbackiem (np. `/suggestions`) — **embeddingi zawsze przez Ollama, bez zmian** |
+| **3** | `/tasks` + blokada ciężkich operacji | ⬜ | Kolejka / mutex wektoryzacji; endpoint statusu długich zadań |
+| **4** | UX providerów (OpenRouter/Groq) | 🟡 | Dropdown modeli, sugestie per zakładka, panel config — **domknąć luki UX**, nie budować od zera |
+| **5** | Timeline + eksport grafu | 🟡 / ⬜ | `/timeline` istnieje; **hardening + UX**; eksport PNG grafu do raportu — po stabilności (1–3) |
+| **6** | Podgląd dokumentów w wynikach | 🟡 | `GET /api/get_context`, snippet + lazy-load — **doprecyzowanie / hardening**, nie greenfield |
+| **7** | Wydzielenie modułu `llm_client` | ⬜ | Dopiero po ustabilizowaniu providerów i UI (Faza 4) |
+| **8** | Cloud embeddingi (Jina / OpenRouter) | ⬜ | Opcjonalne; domyślnie nadal `nomic-embed-text` via Ollama |
+
+### Kolejność prac (rekomendacja)
+
+1. Dokończyć **WSGI** i stabilność uruchomienia (test prod-like).
+2. Uporządkować **LLM abstraction** — tylko tor chat/synteza/weryfikacja; **nie** ruszać `get_embedding()` / importu.
+3. **`/tasks`** + blokada równoległych ciężkich wektoryzacji.
+4. Domknąć **UX OpenRouter/Groq** tam, gdzie są luki (ulubione modele, badge aktywnego modelu).
+5. Dopiero potem: **timeline**, **eksport grafu PNG**, clustering sieci.
+
+### Świeżo w repo (po v2026.12)
+
+- **Flota LLM** — Groq, pool kluczy/serwerów z rotacją, statystyki w `/health`
+- **CHANGELOG.md** — podsumowanie sesji
+- **Patch lokalnego Qdrant** — `_is_local_qdrant_url()` (bez warningów api_key / check_compatibility)
+- **`scripts/run-tests.sh`** — smoke integracyjny
+
+---
 
 ## Zrealizowane w v2026.12 (01 czerwca 2026)
 
@@ -27,89 +62,92 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 
 ---
 
-## Priorytety
+## Priorytety (szczegóły)
 
 ### Faza 1 – Stabilność i podstawy (najwyższy priorytet)
 
-**1.1 Produkcyjny serwer WSGI** ✅ W TRAKCIE
+**1.1 Produkcyjny serwer WSGI** 🟡 praktycznie domknięte
 - [x] Dodano waitress do requirements.txt
 - [x] Stworzono wsgi.py
-- [x] Przygotowano ai_analiza.service
+- [x] Przygotowano ai_analiza.service + ai_analiza-user.service
 - [x] Dodano instrukcję w README.md
-- [x] Stworzono skrypt migrate_to_waitress.sh
-- [ ] Przetestować na maszynie docelowej + ewentualne poprawki
+- [x] Stworzono skrypt migrate_to_waitress.sh + restart-app.sh --user
+- [ ] **Przetestować na maszynie docelowej** + ewentualne poprawki
 - **Wpływ**: Bardzo duży (kończy ERR_CONNECTION_RESET)
-- **Wysiłek**: Mały
+- **Wysiłek**: Mały (głównie walidacja)
 
-**1.2 Dokończyć migrację do abstrakcji LLM**
-- Usunąć wszystkie bezpośrednie wywołania Ollama w `app.py` (pozostało ~12 miejsc)
-- Używać wyłącznie `call_llm()` i `stream_llm_tokens()`
-- Dotyczy szczególnie: `verify_answer`, hybrydowego streamu, kilku helperów
-- **Wpływ**: Wysoki (łatwiejsze utrzymanie + OpenRouter wszędzie)
+**1.2 Dokończyć migrację do abstrakcji LLM** 🟡
+- **Zasada:** embeddingi i import wektorów **zawsze** przez Ollama (`get_embedding`, `get_embeddings_batch`) — te ścieżki **nie** migrują na chmurę.
+- **Cel:** usunąć bezpośrednie `_call_ollama` tylko z toru **chat / synteza / weryfikacja / sugestie**; fallback Ollama przy 429 w `call_llm` zostaje.
+- [x] `call_llm()`, `stream_llm_tokens()`, OpenRouter + Groq, pool kluczy
+- [ ] Zamienić pozostałe obejścia (np. `/suggestions` → `call_llm` z providerem z UI)
+- **Wpływ**: Wysoki (łatwiejsze utrzymanie wielodostawcowości)
 
-**1.3 Lepsze zarządzanie ciężkimi operacjami**
-- Wektoryzacja "wszystko" powinna działać w tle (np. przez kolejkę lub osobny wątek)
-- Dodać endpoint `/tasks` do sprawdzania statusu długich operacji
-- Zablokować możliwość jednoczesnego uruchamiania wielu ciężkich wektoryzacji
-- **Wpływ**: Wysoki (aplikacja przestaje "umierać" przy wektoryzacji)
+**1.3 Lepsze zarządzanie ciężkimi operacjami** ⬜
+- Wektoryzacja „wszystko” w tle (kolejka lub osobny wątek)
+- Endpoint **`/tasks`** — status długich operacji
+- Mutex: blokada równoległych ciężkich wektoryzacji
+- **Wpływ**: Wysoki (aplikacja przestaje „dławić się” przy wektoryzacji)
 
-### Faza 2 – Lepsze doświadczenie z OpenRouter (bieżący temat)
+### Faza 2 – Providerzy LLM w UI (domknięcie UX)
 
-**2.1 Zaawansowany selektor modeli w UI**
-- Zamiast jednego pola tekstowego – lista rozwijana z popularnymi darmowymi/tanimi modelami
-- Możliwość dodawania własnych modeli do "ulubionych"
-- Pokazywanie aktualnie używanego modelu w nagłówku + badge
-- **Wpływ**: Wysoki (użytkownik nie musi pamiętać nazw modeli)
+**2.1 Selektor modeli w UI** 🟡 częściowo zrobione
+- [x] Dropdown OpenRouter + Groq, sugestie modeli per zakładka, toast „Zastosuj”
+- [x] Panel config LLM, zapis do `.llm_config.json`
+- [ ] Ulubione / własne modele (persist)
+- [ ] Badge aktywnego modelu w topbarze (spójnie we wszystkich zakładkach)
+- **Uwaga:** nie „zrobić od zera” — **domknąć luki UX**
 
-**2.2 Obsługa osobnego modelu embeddingów**
-- Dodać `OPENROUTER_EMBED_MODEL` (np. darmowy NVIDIA Nemotron Embed VL)
-- Umożliwić niezależne przełączanie embeddingów i chatu
-- **Wpływ**: Średni/wysoki (możliwość używania multimodalnych embeddingów za darmo)
+**2.2 Obsługa osobnego modelu embeddingów** ⬜
+- Opcjonalnie `OPENROUTER_EMBED_MODEL` / Jina — **poza domyślnym flow**
+- Domyślnie: Ollama `nomic-embed-text` (bez zmian)
+- **Wpływ**: Średni (multimodal / cloud embed — opcjonalnie)
 
-**2.3 Podstawowe liczenie kosztów / tokenów**
-- Zwracać przybliżoną liczbę tokenów z OpenRouter (jeśli API podaje)
-- Prosty licznik w UI: "Użyto ~X tokenów w tej sesji"
-- **Wpływ**: Średni (użytkownik widzi ile "kosztuje" korzystanie)
-
-### Faza 3 – Funkcje dla śledczych (wysoka wartość)
-
-**3.1 Oś czasu / Timeline**
-- Nowa zakładka lub sekcja "Chronologia"
-- Automatyczne wyciąganie dat z dokumentów + powiązanie z encjami
-- Wizualizacja na osi czasu (używając dat z sieci powiązań)
-
-**3.2 Eksport grafu**
-- Przycisk "Eksportuj aktualny graf jako PNG"
-- Opcja dodania grafu do raportu DOCX
-- **Wpływ**: Wysoki dla raportowania
-
-**3.3 Lepsze filtrowanie w Sieci powiązań**
-- Filtrowanie po zakresie dat
-- Filtrowanie po sile powiązania (już częściowo jest)
-- Grupowanie automatyczne (clustering) węzłów
-- **Wpływ**: Wysoki
-
-**3.4 Podgląd dokumentów w wynikach** ✅ (czerwiec 2026)
-- Modal podglądu z lazy-loadingiem (`GET /api/get_context` — chunk z Qdrant po `point_id`)
-- Krótki `snippet` w liście wyników zamiast pełnego tekstu; pełny fragment ładowany on-demand
-- Przycisk „Podgląd” w wynikach wyszukiwania i zakładce Dokumenty; rozwijanie wiersza też lazy-loaduje
-- Filtry przeglądarki: typ pliku (ext) + zakres dat modyfikacji w `/documents` i `/browse`
-
-### Faza 4 – Jakość kodu i utrzymanie
-
-**4.1 Wydzielenie klienta LLM**
-- Stworzyć `llm/` lub `services/llm_client.py`
-- Przenieść całą logikę Ollama + OpenRouter do osobnego modułu
-- **Wpływ**: Średni (łatwiejszy development)
-
-**4.2 Lepsze logowanie i błędy**
-- Spójne logowanie wszystkich wywołań LLM (z providerem i modelem)
-- Lepsze komunikaty błędów dla użytkownika
+**2.3 Liczenie kosztów / tokenów** 🟡
+- [x] Liczniki tokenów przy streamingu (częściowo)
+- [ ] Sesyjny licznik + dane z API chmury gdy dostępne
 - **Wpływ**: Średni
 
-**4.3 Konfiguracja**
-- Lepsze zarządzanie ustawieniami (może pydantic-settings lub po prostu czystszy `.env`)
-- Walidacja kluczy przy starcie
+### Faza 3 – Funkcje dla śledczych (po stabilności 1–3)
+
+**3.1 Oś czasu / Timeline** 🟡 backend istnieje
+- [x] Endpoint `POST /timeline`, zakładka w UI (SSE)
+- [ ] Hardening ekstrakcji dat, lepsza wizualizacja D3, retry UX
+- **Wpływ**: Wysoki dla śledczych — **dobry kandydat po Fazie 1**
+
+**3.2 Eksport grafu** 🟡
+- [x] Eksport SVG/CSV z sieci powiązań
+- [ ] Eksport **PNG** jednym kliknięciem
+- [ ] Wstawianie grafu do raportu DOCX
+- **Wpływ**: Wysoki dla raportowania
+
+**3.3 Lepsze filtrowanie w Sieci powiązań** 🟡
+- [x] Siła powiązania 1–12, filtr samotnych węzłów
+- [ ] Filtrowanie po zakresie dat
+- [ ] Clustering węzłów
+- **Wpływ**: Wysoki
+
+**3.4 Podgląd dokumentów w wynikach** 🟡 hardening (nie greenfield)
+- [x] `GET /api/get_context`, snippet w wynikach, lazy-load, filtry ext/data w `/documents`
+- [ ] Spójność modalu we wszystkich zakładkach, edge cases (brak point_id, duże pliki)
+- [ ] Raport: pliki zaimportowane wyłącnie przez OCR
+- **Uwaga:** przeniesione z „nowa funkcja” → **doprecyzowanie**
+
+### Faza 4 – Jakość kodu (po stabilizacji providerów)
+
+**4.1 Wydzielenie klienta LLM** ⬜
+- Moduł `llm/` lub `services/llm_client.py` — **dopiero po Fazie 1–2**
+- Przenieść logikę Ollama (chat) + OpenRouter + Groq + pool
+- **Wpływ**: Średni (łatwiejszy development)
+
+**4.2 Lepsze logowanie i błędy** 🟡
+- Spójne logowanie wywołań LLM (provider + model)
+- Lepsze komunikaty dla użytkownika
+- **Wpływ**: Średni
+
+**4.3 Konfiguracja** 🟡
+- Walidacja kluczy przy starcie, pydantic-settings (opcjonalnie)
+- **Wpływ**: Niski/średni
 
 ### Faza 5 – Długoterminowe / Opcjonalne
 
@@ -121,26 +159,27 @@ Cel: Zwiększyć stabilność, użyteczność dla śledczych i jakość kodu po 
 
 ---
 
-## Szybkie zwycięstwa (można zrobić w 1-2 dni)
+## Szybkie zwycięstwa (następne 1–2 dni)
 
-1. ~~Dodać `waitress` i zaktualizować service~~ ✅ (zrobione)
-2. ~~Dodać listę popularnych darmowych modeli w UI (dropdown)~~ → częściowo zrealizowane przez **dynamiczne sugestie modeli + auto-switch** (v2026.08)
-3. Wyczyścić pozostałe bezpośrednie wywołania Ollama
-4. Dodać prosty licznik tokenów przy OpenRouter
-5. ~~Poprawić komunikaty błędów przy problemach z OpenRouter~~ → znacząco ulepszone w diagnostyce startowej + przycisk „Kopiuj diagnostykę” (v2026.08)
+1. Test Waitress na maszynie docelowej (checklist prod z README)
+2. `/suggestions` → `call_llm()` zamiast `_call_ollama` (reszta fallbacków zostaje)
+3. Patch Qdrant lokalny — commit `_is_local_qdrant_url()` (jeśli jeszcze nie na master)
+4. Prosty mutex na równoległą wektoryzację SQL (przed pełnym `/tasks`)
+5. Badge aktywnego modelu w topbarze
 
 ---
 
 ## Uwagi
 
-- Największy zwrot z inwestycji obecnie daje **Faza 1** (stabilność) — w dużej mierze zrealizowana.
-- Po stabilizacji i poprawie użyteczności (v2026.07 + v2026.08) warto rozważyć dalszy rozwój w kierunku **Fazy 3** (funkcje dla śledczych) oraz dopracowanie zaawansowanego zarządzania modelami (Faza 2).
-- OpenRouter + diagnostyka + doświadczenie na WSL to obecnie jedne z najmocniejszych stron narzędzia.
+- Największy zwrot daje dokończenie **Fazy 1** (WSGI + `/tasks` + LLM cleanup bez dotykania embeddingów).
+- **Embeddingi zawsze Ollama** — reguła projektu; cloud embed to osobna, opcjonalna ścieżka (2.2).
+- Po stabilności: **Timeline** i **eksport PNG grafu** — wysoka wartość śledcza.
+- OpenRouter + Groq + diagnostyka + WSL to mocne strony narzędzia.
 
 ---
 
 *Plan stworzony: maj 2026*  
-*Ostatnia duża aktualizacja: lipiec 2026 (po v2026.09 – self-update + systemd user service)*
+*Ostatnia aktualizacja planu skróconego: **czerwiec 2026** (po Flocie LLM, CHANGELOG, review priorytetów)*
 
 ---
 
@@ -263,11 +302,11 @@ Te zmiany znacząco podnoszą poziom „produkcyjności” lokalnego środowiska
 
 **Excel/PDF**
 - [x] Rozszerzona forensyka Excel (metadane, AVERAGE/SUM, błędy #REF!, ukryte arkusze, rekomendacje w UI) — 2026-06
-- [ ] Podgląd tekstu źródłowego przy kliknięciu wyniku (modal)
-- [ ] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
+- [x] Podgląd fragmentu (`/api/get_context`, lazy-load) — 2026-06; dalszy **hardening** → 3.4
+- [x] Filtr w przeglądarce dokumentów: typ pliku, data modyfikacji
 - [ ] Endpoint lub raport: lista plików zaimportowanych wyłącznie przez OCR
 
-*Ostatnia aktualizacja macierzy: lipiec 2026 (po v2026.09 – self-update + user service + Gotowe raporty śledcze)*
+*Ostatnia aktualizacja macierzy: **czerwiec 2026** (review planu + Flota LLM)*
 
 ---
 

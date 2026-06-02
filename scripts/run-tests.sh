@@ -175,7 +175,18 @@ try:
 except requests.RequestException as e:
     check("/health", False, str(e)[:100])
 
-# 3. Groq API (z .llm_config.json lub .env; ignoruj uszkodzone klucze)
+# 2b. Tasks (mutex ciężkich operacji)
+try:
+    t = requests.get(f"{BASE}/tasks", headers=headers(), timeout=10)
+    if t.status_code == 401:
+        check("/tasks", False, "401")
+    else:
+        td = t.json()
+        check("/tasks", td.get("success") is True, "busy=" + str(td.get("busy")))
+except requests.RequestException as e:
+    check("/tasks", False, str(e)[:80])
+
+# 3. Groq API
 groq_keys: list[str] = []
 llm_cfg = ROOT / ".llm_config.json"
 if llm_cfg.exists():
