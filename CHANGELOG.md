@@ -7,9 +7,15 @@ Wersjonowanie zgodne z tagami git (`v2026.xx`).
 
 ---
 
-## [Unreleased] — 2026-06-02
+## [Unreleased]
 
-Sesja rozwojowa: wielodostawcowość LLM, UI, bezpieczeństwo i stabilność.
+*(brak — patrz ostatni tag)*
+
+---
+
+## [v2026.13] — 2026-06-02
+
+Sesja rozwojowa: wielodostawcowość LLM, Flota LLM, rój agentów, UI dashboard.
 
 ### Dodano
 
@@ -34,6 +40,7 @@ Sesja rozwojowa: wielodostawcowość LLM, UI, bezpieczeństwo i stabilność.
 - **CSS design system** — paleta `#1a1f36` / `#6366f1`, badge’e filtrów, karty `.search-card` / `.result-card`, status dots diagnostyki.
 - Domyślny provider LLM: **OpenRouter** (embeddingi nadal przez Ollama `nomic-embed-text`).
 - Konfiguracja LLM z UI zapisuje się do `.llm_config.json` (natychmiastowy efekt bez restartu).
+- **Pill’e dashboardowe** (`.dash-pill`) — statusy z kolorową kropką zamiast emoji w topbarze, flocie i liczniku tokenów.
 
 ### Naprawiono (bezpieczeństwo)
 
