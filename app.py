@@ -2339,10 +2339,11 @@ def _safe_int_clamp(val, lo: int, hi: int, default: int = 1) -> int:
 
 
 def highlight_backend(text: str, query: str) -> str:
-    if not query: return text
-    words = [w.strip() for w in query.split() if len(w.strip()) > 2]
-    if not words: return text
     escaped = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    if not query:
+        return escaped
+    words = [w.strip() for w in query.split() if len(w.strip()) > 2]
+    if not words: return escaped
     for word in words:
         clean_word = re.sub(r'[.,\/#!$%\^&\*;:{}=\-_`~()]', '', word)
         root = clean_word[:-2] if len(clean_word) > 4 else clean_word
@@ -3609,6 +3610,7 @@ def compare_documents():
         client = get_qdrant_client()
 
         def _fetch_chunks(fname: str) -> list[str]:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
             qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
             records, _ = client.scroll(
                 collection_name=ACTIVE_COLLECTION,
@@ -3661,7 +3663,7 @@ def compare_documents():
             "file_b": file_b,
             "chunks_a": len(chunks_a),
             "chunks_b": len(chunks_b),
-            "comparison": result,
+            "comparison": _llm_response_text(result),
         })
     except Exception as e:
         logger.exception("compare_documents error")
@@ -3998,7 +4000,7 @@ def get_context():
             )
             if records:
                 p = records[0].payload or {}
-                text = highlight_backend(p.get("text", ""), query) if query else p.get("text", "")
+                text = highlight_backend(p.get("text", ""), query)
                 full_path = p.get("full_path", "")
                 return jsonify({
                     "success": True,

@@ -2319,7 +2319,7 @@ function openContextPreview(pointId, file, query) {
             if (m.size_human) meta.push('Rozmiar: ' + m.size_human);
             if (d.truncated) meta.push('(skrócono do 12k znaków)');
             document.getElementById('contextPreviewMeta').textContent = meta.join(' · ');
-            document.getElementById('contextPreviewBody').textContent = d.text || '(pusty fragment)';
+            document.getElementById('contextPreviewBody').innerHTML = d.text || '(pusty fragment)';
             const openBtn = document.getElementById('contextPreviewOpenBtn');
             if (d.full_path) {
                 openBtn.style.display = '';
@@ -2351,7 +2351,7 @@ function loadResultContext(idx) {
 
     fetchJson('/api/get_context?' + params.toString())
         .then(d => {
-            body.textContent = d.text || '(brak treści)';
+            body.innerHTML = d.text || '(brak treści)';
             body.dataset.loaded = '1';
         })
         .catch(err => {
