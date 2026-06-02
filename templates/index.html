@@ -433,6 +433,40 @@ table { margin: 0; }
   .topbar-ctrl-group { font-size: 0.68rem; padding: 2px 6px; }
   .topbar select { font-size: 0.68rem; }
 }
+
+/* ===== SWARM AGENT ===== */
+.swarm-mode-card {
+  display: block;
+  padding: 10px 12px;
+  border: 2px solid var(--c-border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color var(--t), background var(--t);
+  background: var(--c-surface);
+}
+.swarm-mode-card:hover { border-color: #a5b4fc; background: #fafbff; }
+.swarm-mode-card.active { border-color: var(--c-accent); background: var(--c-accent-bg); }
+.swarm-worker-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  transition: border-color var(--t);
+}
+.swarm-worker-card.running { border-color: #7dd3fc; background: #f0f9ff; }
+.swarm-worker-card.done    { border-color: #86efac; background: #f0fdf4; }
+.swarm-worker-card.error   { border-color: #fca5a5; background: #fef2f2; }
+.swarm-worker-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  font-size: 0.69rem;
+  font-weight: 700;
+}
+.swarm-badge-run  { background: #e0f2fe; color: #0369a1; }
+.swarm-badge-done { background: #dcfce7; color: #15803d; }
+.swarm-badge-err  { background: #fee2e2; color: #b91c1c; }
     </style>
 </head>
 <body>
@@ -523,6 +557,9 @@ table { margin: 0; }
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('import'); setTimeout(()=> { if (!window.quickDrivesLoaded) loadQuickDrives(); window.quickDrivesLoaded=true; }, 80); return false;">Import</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('swarm'); return false;">🤖 Rój agentów</a>
     </li>
 </ul></div>
 
@@ -1462,6 +1499,134 @@ table { margin: 0; }
 </div>
 </div>
 
+<!-- TAB: RÓJ AGENTÓW -->
+<div id="tabSwarm" class="main-wrap" style="display:none;">
+  <div class="row g-3">
+    <!-- Lewa kolumna: konfiguracja -->
+    <div class="col-lg-4">
+      <div class="search-card">
+        <h2>🤖 Rój agentów</h2>
+        <p class="small text-muted mb-3">Orkiestrator dzieli dokumenty między N niezależnych agentów LLM działających równolegle. Żaden nie widzi całości.</p>
+
+        <!-- Tryb -->
+        <div class="mb-3">
+          <div class="fw-bold small mb-2" style="color:var(--c-text);">Tryb pracy:</div>
+          <div class="d-flex flex-column gap-2" id="swarmModeGroup">
+            <label class="swarm-mode-card active" data-mode="quality">
+              <input type="radio" name="swarmMode" value="quality" checked style="display:none;">
+              <div class="d-flex align-items-start gap-2">
+                <span style="font-size:1.3rem;line-height:1;">🎯</span>
+                <div>
+                  <div class="fw-bold" style="font-size:0.88rem;">Jakość</div>
+                  <div class="small text-muted">Hierarchiczna synteza: workery → meta-analiza → finalny wynik z najlepszym modelem.</div>
+                </div>
+              </div>
+            </label>
+            <label class="swarm-mode-card" data-mode="speed">
+              <input type="radio" name="swarmMode" value="speed" style="display:none;">
+              <div class="d-flex align-items-start gap-2">
+                <span style="font-size:1.3rem;line-height:1;">⚡</span>
+                <div>
+                  <div class="fw-bold" style="font-size:0.88rem;">Szybkość</div>
+                  <div class="small text-muted">Maksymalny paralelizm z najszybszym modelem. Wyniki streamowane na bieżąco.</div>
+                </div>
+              </div>
+            </label>
+            <label class="swarm-mode-card" data-mode="privacy">
+              <input type="radio" name="swarmMode" value="privacy" style="display:none;">
+              <div class="d-flex align-items-start gap-2">
+                <span style="font-size:1.3rem;line-height:1;">🔒</span>
+                <div>
+                  <div class="fw-bold" style="font-size:0.88rem;">Incognito</div>
+                  <div class="small text-muted">Każdy worker dostaje losowy model i potasowane fragmenty. Żaden LLM nie widzi >20% dokumentu.</div>
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Zapytanie -->
+        <div class="mb-3">
+          <label class="form-label small fw-bold mb-1">Pytanie / zadanie dla roju:</label>
+          <textarea id="swarmQuery" class="form-control" rows="3"
+            placeholder="np. Znajdź wszystkie anomalie finansowe i podejrzane transakcje..."></textarea>
+        </div>
+
+        <!-- Filtr pliku -->
+        <div class="mb-3">
+          <label class="form-label small fw-bold mb-1">Filtr pliku (opcjonalnie):</label>
+          <input type="text" id="swarmFileFilter" class="form-control form-control-sm" placeholder="nazwa_pliku.pdf">
+        </div>
+
+        <button class="btn btn-primary w-100" onclick="runSwarm()" id="swarmBtn">
+          🚀 Uruchom rój
+        </button>
+        <button class="btn btn-danger w-100 mt-2 d-none" id="swarmStopBtn" onclick="stopSwarm()">⏹ Zatrzymaj</button>
+      </div>
+
+      <!-- Legenda modeli -->
+      <div class="search-card" style="font-size:0.8rem;">
+        <div class="fw-bold mb-2" style="color:var(--c-muted);">Dostępne modele (darmowe):</div>
+        <div id="swarmModelLegend" style="display:flex;flex-direction:column;gap:4px;">
+          <span>🌟 Llama 3.3 70B — najlepsza jakość</span>
+          <span>⚡ Gemini 2.0 Flash — najszybszy</span>
+          <span>🎯 Mistral 7B — niezawodny</span>
+          <span>🔷 Qwen 2.5 7B — solidny</span>
+          <span>🏃 Llama 3.1 8B — bardzo szybki</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prawa kolumna: dashboard + wyniki -->
+    <div class="col-lg-8">
+      <!-- Placeholder -->
+      <div id="swarmPlaceholder" class="search-card" style="min-height:200px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;color:var(--c-muted);">
+        <div style="font-size:3rem;">🤖</div>
+        <div>Wybierz tryb, wpisz pytanie i uruchom rój</div>
+      </div>
+
+      <!-- Dashboard workerów (pokazuje się w trakcie) -->
+      <div id="swarmDashboard" style="display:none;">
+        <div class="search-card mb-3" style="background:linear-gradient(135deg,#0f172a,#1e293b);color:#e2e8f0;padding:16px 20px;">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <div>
+              <span id="swarmModeLabel" style="font-size:1rem;font-weight:700;"></span>
+              <span class="ms-2 small" style="color:#94a3b8;" id="swarmModeDescLabel"></span>
+            </div>
+            <span id="swarmProgress" style="font-size:0.8rem;color:#7dd3fc;"></span>
+          </div>
+          <div class="progress" style="height:4px;background:rgba(255,255,255,0.1);">
+            <div id="swarmProgressBar" class="progress-bar" style="width:0%;background:#4f46e5;transition:width 0.4s;"></div>
+          </div>
+        </div>
+
+        <!-- Karty workerów -->
+        <div id="swarmWorkerCards" class="row g-2 mb-3"></div>
+
+        <!-- Synteza -->
+        <div id="swarmSynthesisCard" class="search-card d-none" style="background:#fafbff;border:1px solid #e0e7ff;">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="spinner-border spinner-border-sm text-primary d-none" id="swarmSynthesisSpinner"></div>
+            <span class="fw-bold" style="color:var(--c-accent);font-size:0.9rem;" id="swarmSynthesisLabel">🔀 Orkiestrator syntetyzuje wyniki…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Finalny wynik -->
+      <div id="swarmResult" style="display:none;">
+        <div class="ai-box">
+          <h5>🤖 Wynik roju agentów</h5>
+          <div id="swarmAnswer" style="white-space:pre-wrap;line-height:1.7;font-size:0.92rem;"></div>
+        </div>
+        <div class="d-flex gap-2 mt-2">
+          <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('swarmAnswer').textContent)">📋 Kopiuj</button>
+          <button class="btn btn-sm btn-outline-primary" onclick="runSwarm()">↺ Uruchom ponownie</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 window.API_KEY_REQUIRED = {{ 'true' if api_key_required else 'false' }};
 
@@ -1567,7 +1732,7 @@ function showTab(name) {
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
 
     // Poprawiona mapa indeksów zakładek (raporty są na pozycji 5)
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8, swarm:9};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
 
@@ -5980,6 +6145,168 @@ window.onload = function() {
         .then(d => showStartupChecklist(d))
         .catch(() => {});
 };
+
+// ===== SWARM AGENT =====
+let _swarmSSE = null;
+let _swarmWorkerCount = 0;
+let _swarmDone = 0;
+
+document.querySelectorAll('.swarm-mode-card').forEach(card => {
+    card.addEventListener('click', () => {
+        document.querySelectorAll('.swarm-mode-card').forEach(c => c.classList.remove('active'));
+        card.classList.add('active');
+        card.querySelector('input[type=radio]').checked = true;
+    });
+});
+
+function stopSwarm() {
+    if (_swarmSSE) { _swarmSSE.close(); _swarmSSE = null; }
+    document.getElementById('swarmBtn').disabled = false;
+    document.getElementById('swarmStopBtn').classList.add('d-none');
+}
+
+function runSwarm() {
+    const query = document.getElementById('swarmQuery').value.trim();
+    if (!query) { alert('Wpisz pytanie dla roju.'); return; }
+    const mode = document.querySelector('input[name="swarmMode"]:checked')?.value || 'quality';
+    const fileFilter = document.getElementById('swarmFileFilter').value.trim() || null;
+
+    // Reset UI
+    stopSwarm();
+    document.getElementById('swarmPlaceholder').style.display = 'none';
+    document.getElementById('swarmDashboard').style.display = 'block';
+    document.getElementById('swarmResult').style.display = 'none';
+    document.getElementById('swarmWorkerCards').innerHTML = '';
+    document.getElementById('swarmProgressBar').style.width = '0%';
+    document.getElementById('swarmProgress').textContent = '';
+    document.getElementById('swarmSynthesisCard').classList.add('d-none');
+    document.getElementById('swarmSynthesisSpinner').classList.add('d-none');
+    document.getElementById('swarmBtn').disabled = true;
+    document.getElementById('swarmStopBtn').classList.remove('d-none');
+    _swarmWorkerCount = 0; _swarmDone = 0;
+
+    const modeLabels = {quality:'🎯 Jakość', speed:'⚡ Szybkość', privacy:'🔒 Incognito'};
+    const modeDescs  = {
+        quality:'Hierarchiczna synteza przez Llama 3.3 70B',
+        speed:'Maksymalny paralelizm, Gemini Flash',
+        privacy:'Losowe modele, potasowane fragmenty'
+    };
+    document.getElementById('swarmModeLabel').textContent = modeLabels[mode] || mode;
+    document.getElementById('swarmModeDescLabel').textContent = modeDescs[mode] || '';
+
+    const body = JSON.stringify({query, swarm_mode: mode, file_filter: fileFilter});
+    const headers = {'Content-Type': 'application/json'};
+    if (window.API_KEY && window.API_KEY_REQUIRED) headers['X-API-Key'] = window.API_KEY;
+
+    // Use fetch + ReadableStream for POST SSE
+    fetch('/agents/swarm/stream', {method:'POST', headers, body})
+    .then(resp => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        function pump() {
+            return reader.read().then(({done, value}) => {
+                if (done) { stopSwarm(); return; }
+                buf += decoder.decode(value, {stream: true});
+                const lines = buf.split('\n');
+                buf = lines.pop();
+                lines.forEach(line => {
+                    if (!line.startsWith('data:')) return;
+                    try { _swarmHandleEvent(JSON.parse(line.slice(5).trim())); }
+                    catch(e) {}
+                });
+                return pump();
+            });
+        }
+        return pump();
+    })
+    .catch(e => {
+        _swarmShowError('Błąd połączenia: ' + e.message);
+        stopSwarm();
+    });
+}
+
+function _swarmHandleEvent(ev) {
+    const {event, data} = ev;
+    if (!data) return;
+    switch (event) {
+        case 'init':
+            _swarmWorkerCount = data.n_workers;
+            document.getElementById('swarmProgress').textContent =
+                `${data.total_chunks} fragmentów → ${data.n_workers} agentów`;
+            break;
+        case 'worker_start': {
+            const card = document.createElement('div');
+            card.className = 'col-sm-6 col-lg-4';
+            card.id = `swarm-worker-${data.worker_id}`;
+            card.innerHTML = `
+                <div class="swarm-worker-card running">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <span class="fw-bold" style="font-size:0.8rem;">Agent ${data.worker_id + 1}</span>
+                        <span class="swarm-worker-badge swarm-badge-run" id="swarm-badge-${data.worker_id}">⏳ działa</span>
+                    </div>
+                    <div class="text-muted" style="font-size:0.75rem;">${escapeHtml(data.model)}</div>
+                    <div class="text-muted" style="font-size:0.72rem;">${data.chunks} chunków</div>
+                    <div id="swarm-preview-${data.worker_id}" class="mt-1" style="font-size:0.75rem;color:#374151;display:none;"></div>
+                </div>`;
+            document.getElementById('swarmWorkerCards').appendChild(card);
+            break;
+        }
+        case 'worker_done': {
+            const wrapper = document.getElementById(`swarm-worker-${data.worker_id}`);
+            if (wrapper) {
+                const card = wrapper.querySelector('.swarm-worker-card');
+                card.classList.remove('running'); card.classList.add('done');
+            }
+            const badge = document.getElementById(`swarm-badge-${data.worker_id}`);
+            if (badge) { badge.className = 'swarm-worker-badge swarm-badge-done'; badge.textContent = '✓ gotowy'; }
+            const prev = document.getElementById(`swarm-preview-${data.worker_id}`);
+            if (prev) { prev.style.display = 'block'; prev.textContent = data.preview; }
+            _swarmDone++;
+            document.getElementById('swarmProgressBar').style.width =
+                Math.round((_swarmDone / _swarmWorkerCount) * 80) + '%';
+            break;
+        }
+        case 'worker_error': {
+            const badge = document.getElementById(`swarm-badge-${data.worker_id}`);
+            if (badge) { badge.className = 'swarm-worker-badge swarm-badge-err'; badge.textContent = '✗ błąd'; }
+            const wrapper = document.getElementById(`swarm-worker-${data.worker_id}`);
+            if (wrapper) {
+                const card = wrapper.querySelector('.swarm-worker-card');
+                card.classList.remove('running'); card.classList.add('error');
+            }
+            break;
+        }
+        case 'synthesis_start': {
+            const sc = document.getElementById('swarmSynthesisCard');
+            sc.classList.remove('d-none');
+            document.getElementById('swarmSynthesisSpinner').classList.remove('d-none');
+            document.getElementById('swarmProgressBar').style.width = '85%';
+            break;
+        }
+        case 'done': {
+            document.getElementById('swarmProgressBar').style.width = '100%';
+            document.getElementById('swarmSynthesisSpinner').classList.add('d-none');
+            document.getElementById('swarmSynthesisLabel').textContent = '✅ Synteza zakończona';
+            document.getElementById('swarmResult').style.display = 'block';
+            document.getElementById('swarmAnswer').textContent = data.answer || '';
+            stopSwarm();
+            break;
+        }
+        case 'error':
+            _swarmShowError(data.error || 'Nieznany błąd');
+            stopSwarm();
+            break;
+    }
+}
+
+function _swarmShowError(msg) {
+    document.getElementById('swarmDashboard').style.display = 'none';
+    document.getElementById('swarmPlaceholder').style.display = 'flex';
+    document.getElementById('swarmPlaceholder').innerHTML =
+        `<div style="color:#dc2626;text-align:center;"><div style="font-size:2rem;">⚠️</div><div class="mt-2">${escapeHtml(msg)}</div></div>`;
+}
 </script>
 
 <!-- Modal podglądu fragmentu dokumentu (lazy-load /api/get_context) -->

@@ -1877,6 +1877,50 @@ DOCS_CACHE_TTL = 300  # 5 minut
 _suggestions_cache = {"data": None, "ts": 0}
 SUGGESTIONS_TTL = 1800  # 30 minut
 
+# ---- Multi-agent Swarm ----
+FREE_MODELS_LIST = [
+    ("meta-llama/llama-3.3-70b-instruct:free",  "Llama 3.3 70B ★"),
+    ("google/gemini-2.0-flash-exp:free",         "Gemini 2.0 Flash"),
+    ("mistralai/mistral-7b-instruct:free",       "Mistral 7B"),
+    ("qwen/qwen-2.5-7b-instruct:free",           "Qwen 2.5 7B"),
+    ("meta-llama/llama-3.1-8b-instruct:free",    "Llama 3.1 8B"),
+]
+
+SWARM_MODES = {
+    "privacy": {
+        "label": "🔒 Incognito",
+        "desc": "Każdy worker dostaje losowy model i potasowane fragmenty. Żaden LLM nie widzi >20% dokumentu.",
+        "workers": 5,
+        "shuffle_chunks": True,
+        "use_random_models": True,
+        "max_chunks_per_worker": 4,
+        "synthesis_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "hierarchical": False,
+    },
+    "speed": {
+        "label": "⚡ Szybkość",
+        "desc": "Maksymalny paralelizm z najszybszym modelem. Wyniki streamowane na bieżąco.",
+        "workers": 4,
+        "shuffle_chunks": False,
+        "use_random_models": False,
+        "preferred_model": ("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash"),
+        "max_chunks_per_worker": 5,
+        "synthesis_model": "google/gemini-2.0-flash-exp:free",
+        "hierarchical": False,
+    },
+    "quality": {
+        "label": "🎯 Jakość",
+        "desc": "Hierarchiczna synteza: workery → meta-analiza → finalny wynik z najlepszym modelem.",
+        "workers": 3,
+        "shuffle_chunks": False,
+        "use_random_models": False,
+        "preferred_model": ("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B ★"),
+        "max_chunks_per_worker": 6,
+        "synthesis_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "hierarchical": True,
+    },
+}
+
 # ---- Cache embeddingów (SQLite) ----
 _CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
 
@@ -3734,6 +3778,200 @@ def collection_profile():
     except Exception as e:
         logger.warning(f"collection_profile error: {e}")
         return jsonify({"success": False, "error": str(e)[:200]})
+
+
+# ===== MULTI-AGENT SWARM =====
+
+def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
+    """Dzieli chunki na grupy workerów wg trybu."""
+    import random as _rnd
+    n_workers = cfg["workers"]
+    max_per = cfg["max_chunks_per_worker"]
+    data = list(chunks)
+    if cfg.get("shuffle_chunks"):
+        _rnd.shuffle(data)
+    data = data[:n_workers * max_per]
+    n = min(n_workers, len(data))
+    groups: list[list] = [[] for _ in range(n)]
+    for i, chunk in enumerate(data):
+        groups[i % n].append(chunk)
+    return [g for g in groups if g]
+
+
+def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
+    """Zwraca listę (model_id, model_name) dla każdego workera."""
+    import random as _rnd
+    if cfg.get("use_random_models"):
+        pool = list(FREE_MODELS_LIST)
+        _rnd.shuffle(pool)
+        return [pool[i % len(pool)] for i in range(n_workers)]
+    preferred = cfg.get("preferred_model", FREE_MODELS_LIST[0])
+    return [preferred] * n_workers
+
+
+@app.route('/agents/swarm/stream', methods=['POST'])
+def agents_swarm_stream():
+    """SSE: równoległa analiza dokumentów przez N niezależnych agentów LLM."""
+    _require_api_key()
+    data = request.get_json() or {}
+    query = (data.get('query') or '').strip()
+    swarm_mode = data.get('swarm_mode', 'quality')
+    file_filter = data.get('file_filter') or None
+
+    if not query:
+        def _err():
+            yield sse('error', {'error': 'Zapytanie jest puste'})
+        return Response(stream_with_context(_err()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+    cfg = SWARM_MODES.get(swarm_mode, SWARM_MODES['quality'])
+
+    def generate():
+        try:
+            yield sse('progress', {'msg': 'Pobieranie fragmentów z bazy wektorowej…', 'step': 1})
+
+            client = get_qdrant_client()
+            try:
+                raw_contexts, _ = _retrieve_search_contexts(client, query, 20, file_filter, 'detective')
+            except EmbeddingError as e:
+                yield sse('error', {'error': str(e)})
+                return
+
+            if not raw_contexts:
+                yield sse('error', {'error': 'Brak dokumentów w bazie dla tego zapytania.'})
+                return
+
+            groups = _split_chunks_for_swarm(raw_contexts, cfg)
+            n_workers = len(groups)
+            models = _assign_swarm_models(n_workers, cfg)
+
+            yield sse('init', {
+                'n_workers': n_workers,
+                'mode': swarm_mode,
+                'mode_label': cfg['label'],
+                'mode_desc': cfg['desc'],
+                'total_chunks': len(raw_contexts),
+            })
+
+            for i, ((model_id, model_name), group) in enumerate(zip(models, groups)):
+                yield sse('worker_start', {
+                    'worker_id': i,
+                    'model': model_name,
+                    'chunks': len(group),
+                    'files': list({c['file'] for c in group})[:3],
+                })
+
+            # Równoległe wywołania LLM przez ThreadPoolExecutor
+            import queue as _q
+            result_queue: _q.Queue = _q.Queue()
+
+            def _run_worker(worker_id: int, context_chunks: list, model_id: str, model_name: str):
+                try:
+                    ctx = "\n\n---\n\n".join(
+                        f"[{c['file']}]\n{c['text']}" for c in context_chunks
+                    )
+                    prompt = (
+                        f"Pytanie: {query}\n\n"
+                        f"Przeanalizuj poniższe fragmenty dokumentów i odpowiedz konkretnie.\n\n"
+                        f"{ctx}\n\n"
+                        f"Jeśli w tych fragmentach brakuje odpowiedzi — napisz krótko: "
+                        f"'Brak danych w tym fragmencie.'"
+                    )
+                    result = call_llm(
+                        prompt=prompt,
+                        system="Jesteś analitykiem dokumentów. Odpowiadaj po polsku, zwięźle i konkretnie.",
+                        stream=False,
+                        provider='openrouter',
+                        model=model_id,
+                    )
+                    text = _llm_response_text(result)
+                    result_queue.put(('done', worker_id, text, model_name, None))
+                except Exception as exc:
+                    result_queue.put(('error', worker_id, None, model_name, str(exc)[:200]))
+
+            threads = []
+            for i, ((model_id, model_name), group) in enumerate(zip(models, groups)):
+                t = threading.Thread(target=_run_worker, args=(i, group, model_id, model_name), daemon=True)
+                t.start()
+                threads.append(t)
+
+            partial: dict[int, str] = {}
+            completed = 0
+            while completed < n_workers:
+                try:
+                    kind, wid, text, model_name, err = result_queue.get(timeout=120)
+                except Exception:
+                    yield sse('error', {'error': 'Timeout — workery nie odpowiedziały w czasie 120 s.'})
+                    return
+                if kind == 'done':
+                    partial[wid] = text
+                    yield sse('worker_done', {
+                        'worker_id': wid,
+                        'model': model_name,
+                        'preview': text[:240] + ('…' if len(text) > 240 else ''),
+                    })
+                else:
+                    partial[wid] = ''
+                    yield sse('worker_error', {'worker_id': wid, 'model': model_name, 'error': err})
+                completed += 1
+
+            # Synteza
+            yield sse('synthesis_start', {'msg': 'Synteza wyników przez orkiestratora…'})
+
+            parts = "\n\n===\n\n".join(
+                f"Agent {i + 1} ({models[i][1]}):\n{partial.get(i, '[brak]')}"
+                for i in range(n_workers)
+            )
+            if cfg.get('hierarchical'):
+                synthesis_prompt = (
+                    f"Masz wyniki {n_workers} niezależnych agentów analizujących różne fragmenty dokumentów.\n\n"
+                    f"Pytanie użytkownika: {query}\n\n"
+                    f"Wyniki agentów:\n{parts}\n\n"
+                    f"Zadanie: pomiń powtórzenia, połącz kluczowe ustalenia ze wszystkich agentów, "
+                    f"wskaż ewentualne sprzeczności, i podaj finalną, wyczerpującą odpowiedź."
+                )
+            else:
+                synthesis_prompt = (
+                    f"Pytanie: {query}\n\n"
+                    f"Odpowiedzi cząstkowe agentów:\n{parts}\n\n"
+                    f"Podaj zwięzłą, kompletną odpowiedź łącząc wszystkie ustalenia."
+                )
+
+            synth_model = cfg['synthesis_model']
+            final = call_llm(
+                prompt=synthesis_prompt,
+                system="Jesteś ekspertem od syntezy informacji z dokumentów. Odpowiadaj po polsku.",
+                stream=False,
+                provider='openrouter',
+                model=synth_model,
+            )
+            final_text = _llm_response_text(final)
+
+            yield sse('done', {
+                'answer': final_text,
+                'n_workers': n_workers,
+                'mode': swarm_mode,
+                'mode_label': cfg['label'],
+            })
+
+        except Exception as e:
+            logger.exception("agents_swarm_stream error")
+            yield sse('error', {'error': str(e)[:300]})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@app.route('/agents/swarm/modes', methods=['GET'])
+def agents_swarm_modes():
+    """Zwraca definicje trybów swarm do UI."""
+    return jsonify({
+        "success": True,
+        "modes": {k: {"label": v["label"], "desc": v["desc"]} for k, v in SWARM_MODES.items()},
+    })
 
 
 @app.route('/suggestions', methods=['GET'])
