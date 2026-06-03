@@ -711,6 +711,16 @@ except ValueError:
 
 DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter (domyślnie dla LLM) | ollama (tylko dla importu/embeddings)
 
+# Google Gemini (bezpośrednie API — audyt dużych plików / logów)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
+try:
+    GEMINI_AUDIT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("GEMINI_AUDIT_MAX_BYTES", str(12 * 1024 * 1024))))
+except ValueError:
+    GEMINI_AUDIT_MAX_BYTES = 12 * 1024 * 1024
+
+GEMINI_AUDIT_EXTENSIONS = {".log", ".txt", ".json", ".out", ".err", ".md", ".csv", ".xml"}
+
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
 # ---- Swarm Reports (persystencja wyników roju) ----
@@ -1478,12 +1488,14 @@ def save_llm_config():
 # ============================================================
 
 def get_llm_provider(request_provider: str | None = None) -> str:
-    """Zwraca aktywny provider: 'ollama', 'openrouter', 'ollama:<id>' lub ID custom endpointu."""
+    """Zwraca aktywny provider: 'ollama', 'openrouter', 'gemini', 'ollama:<id>' lub ID custom endpointu."""
     if request_provider:
         p = request_provider.strip()
         pl = p.lower()
         if pl == "openrouter":
             return "openrouter"
+        if pl == "gemini":
+            return "gemini"
         if pl == "ollama" or pl.startswith("ollama:"):
             return "ollama"
         pool = _load_provider_pool()
@@ -1491,6 +1503,145 @@ def get_llm_provider(request_provider: str | None = None) -> str:
             if endpoint.get("id") == p and endpoint.get("active", True):
                 return p
     return DEFAULT_LLM_PROVIDER
+
+
+def _gemini_generate_url(model: str, stream: bool = False) -> str:
+    action = "streamGenerateContent" if stream else "generateContent"
+    suffix = "?alt=sse" if stream else ""
+    return (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{action}{suffix}"
+        f"?key={GEMINI_API_KEY}"
+    )
+
+
+def _check_gemini_health() -> dict:
+    """Lekkie sprawdzenie Gemini API (lista modeli)."""
+    if not GEMINI_API_KEY:
+        return {"ok": False, "error": "Brak GEMINI_API_KEY"}
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+        with urllib.request.urlopen(url, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            models = [m.get("name", "") for m in data.get("models", [])]
+            has_model = any(GEMINI_MODEL in m for m in models)
+            return {
+                "ok": True,
+                "models_available": len(models),
+                "has_configured_model": has_model,
+                "model": GEMINI_MODEL,
+                "error": None,
+            }
+    except Exception as e:
+        return {"ok": False, "model": GEMINI_MODEL, "error": str(e)[:120]}
+
+
+def _redact_sensitive_log_text(text: str) -> str:
+    """Redaguje oczywiste sekrety przed wysłaniem logów do chmury."""
+    if not text:
+        return ""
+    patterns = [
+        (r"(?i)(password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*\S+", r"\1=***REDACTED***"),
+        (r"(?i)Bearer\s+\S+", "Bearer ***REDACTED***"),
+    ]
+    for pattern, repl in patterns:
+        text = re.sub(pattern, repl, text)
+    return text
+
+
+def _resolve_audit_file_path(raw: str) -> Path | None:
+    """Rozwiązuje ścieżkę pliku audytu (Windows/WSL) w obrębie SEARCH_ROOTS."""
+    if not raw:
+        return None
+    try:
+        path = Path(_normalize_browse_path(raw)).expanduser().resolve()
+    except OSError:
+        return None
+    if not path.is_file() or not _path_is_allowed(path):
+        return None
+    if path.suffix.lower() not in GEMINI_AUDIT_EXTENSIONS:
+        return None
+    return path
+
+
+def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = None,
+                          max_tokens: int = 8192, temperature: float = 0.2):
+    """Generator tokenów z Google Gemini API (streamGenerateContent)."""
+    if not GEMINI_API_KEY:
+        yield "Błąd: Brak GEMINI_API_KEY w .env"
+        return
+    effective_model = model or GEMINI_MODEL
+    url = _gemini_generate_url(effective_model, stream=True)
+    payload: dict = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    }
+    if system:
+        payload["systemInstruction"] = {"parts": [{"text": system}]}
+    try:
+        with requests.post(url, json=payload, stream=True, timeout=600) as r:
+            if r.status_code >= 400:
+                err_body = (r.text or "")[:400]
+                yield f"[Błąd Gemini streaming: HTTP {r.status_code} — {err_body}]"
+                return
+            r.raise_for_status()
+            for line in r.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if not data_str or data_str == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data_str)
+                    for cand in chunk.get("candidates", []):
+                        for part in cand.get("content", {}).get("parts", []):
+                            token = part.get("text", "")
+                            if token:
+                                yield token
+                except Exception:
+                    continue
+    except Exception as e:
+        yield f"[Błąd Gemini streaming: {str(e)}]"
+
+
+def _call_gemini(prompt: str, system: str, stream: bool, model: str,
+                 max_tokens: int = 8192, temperature: float = 0.2):
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Brak GEMINI_API_KEY w .env")
+    effective_model = model or GEMINI_MODEL
+    if stream:
+        return requests.post(
+            _gemini_generate_url(effective_model, stream=True),
+            json={
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                **({"systemInstruction": {"parts": [{"text": system}]}} if system else {}),
+                "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+            },
+            stream=True,
+            timeout=600,
+        )
+    url = _gemini_generate_url(effective_model, stream=False)
+    payload: dict = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+    }
+    if system:
+        payload["systemInstruction"] = {"parts": [{"text": system}]}
+    r = requests.post(url, json=payload, timeout=300)
+    r.raise_for_status()
+    data = r.json()
+    text_parts = []
+    for cand in data.get("candidates", []):
+        for part in cand.get("content", {}).get("parts", []):
+            if part.get("text"):
+                text_parts.append(part["text"])
+    return {"response": "".join(text_parts), "raw": data}
 
 
 # ---- Rate limit helpers (OpenRouter) ----
@@ -1967,6 +2118,11 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
 
     prov = get_llm_provider(provider)
 
+    if prov == "gemini":
+        return _call_gemini(
+            prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature
+        )
+
     if prov == "openrouter":
         if not OPENROUTER_API_KEY:
             raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
@@ -2090,6 +2246,12 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
     prov = get_llm_provider(provider)
     effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
+
+    if prov == "gemini":
+        yield from _stream_gemini_tokens(
+            prompt, system, model or GEMINI_MODEL, max_tokens, temperature
+        )
+        return
 
     if prov == "openrouter":
         if not OPENROUTER_API_KEY:
@@ -4334,6 +4496,127 @@ def analyze():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+GEMINI_AUDIT_SYSTEM = (
+    "Jesteś elitarnym ekspertem ds. cyberbezpieczeństwa, DevOps i analizy systemowej. "
+    "Analizujesz logi, dumpy i duże pliki tekstowe. "
+    "Znajdź anomalie, błędy (ERROR, CRITICAL, FATAL) oraz potencjalne zagrożenia. "
+    "Przygotuj raport po polsku w Markdown: Podsumowanie, Znalezione błędy, Sugerowane akcje naprawcze. "
+    "Opieraj się wyłącznie na danych z pliku — nie zmyślaj."
+)
+
+
+@app.route('/audit/info', methods=['GET'])
+def audit_info():
+    """Status konfiguracji audytu Gemini."""
+    return jsonify({
+        "success": True,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "default_model": GEMINI_MODEL,
+        "max_bytes": GEMINI_AUDIT_MAX_BYTES,
+        "allowed_extensions": sorted(GEMINI_AUDIT_EXTENSIONS),
+    })
+
+
+@app.route('/audit/file/stream', methods=['POST'])
+def audit_file_stream():
+    """SSE: audyt dużego pliku tekstowego przez Gemini (cały plik w kontekście)."""
+    data = request.get_json() or {}
+    file_raw = (data.get("file") or data.get("path") or "").strip()
+    query = (data.get("query") or data.get("prompt") or "").strip()
+    model = (data.get("model") or GEMINI_MODEL).strip()
+    redact = data.get("redact_secrets", True)
+
+    if not GEMINI_API_KEY:
+        def _err_gen():
+            yield f"event: error\ndata: {json.dumps({'error': 'Brak GEMINI_API_KEY w .env — dodaj klucz z Google AI Studio.'}, ensure_ascii=False)}\n\n"
+        return Response(stream_with_context(_err_gen()), mimetype='text/event-stream',
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    if not file_raw:
+        def _err_gen():
+            yield f"event: error\ndata: {json.dumps({'error': 'Podaj ścieżkę pliku.'}, ensure_ascii=False)}\n\n"
+        return Response(stream_with_context(_err_gen()), mimetype='text/event-stream',
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    if not query:
+        def _err_gen():
+            yield f"event: error\ndata: {json.dumps({'error': 'Podaj pytanie / instrukcję analizy.'}, ensure_ascii=False)}\n\n"
+        return Response(stream_with_context(_err_gen()), mimetype='text/event-stream',
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    def generate():
+        def sse(event, payload):
+            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        try:
+            path = _resolve_audit_file_path(file_raw)
+            if not path:
+                yield sse("error", {
+                    "error": (
+                        "Plik niedostępny, poza SEARCH_ROOTS lub niedozwolone rozszerzenie "
+                        f"({', '.join(sorted(GEMINI_AUDIT_EXTENSIONS))})."
+                    ),
+                })
+                return
+
+            size = path.stat().st_size
+            if size > GEMINI_AUDIT_MAX_BYTES:
+                yield sse("error", {
+                    "error": (
+                        f"Plik za duży ({size:,} B). Limit: {GEMINI_AUDIT_MAX_BYTES:,} B "
+                        f"(GEMINI_AUDIT_MAX_BYTES)."
+                    ),
+                })
+                return
+
+            yield sse("progress", {
+                "message": f"Wczytywanie {path.name}…",
+                "bytes": size,
+                "file": str(path),
+            })
+
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            if redact:
+                content = _redact_sensitive_log_text(content)
+
+            yield sse("progress", {
+                "message": f"Analiza Gemini ({len(content):,} znaków)…",
+                "chars": len(content),
+                "model": model,
+            })
+
+            full_prompt = f"{query}\n\n--- ZAWARTOŚĆ PLIKU ({path.name}) ---\n{content}"
+            full_answer = ""
+
+            for token in _stream_gemini_tokens(
+                full_prompt,
+                system=GEMINI_AUDIT_SYSTEM,
+                model=model,
+                max_tokens=8192,
+                temperature=0.2,
+            ):
+                if isinstance(token, str) and token.startswith("[Błąd"):
+                    yield sse("error", {"error": token})
+                    return
+                full_answer += token
+                yield sse("token", {"token": token})
+
+            yield sse("done", {
+                "ai_answer": full_answer,
+                "file": str(path),
+                "file_name": path.name,
+                "model": model,
+                "chars_analyzed": len(content),
+                "bytes_analyzed": size,
+            })
+        except Exception as e:
+            logger.warning("audit_file_stream error: %s", e)
+            yield sse("error", {"error": str(e)[:300]})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route('/compare', methods=['POST'])
@@ -7328,6 +7611,8 @@ def health():
 
             # Inne przydatne dla UI
             "provider": DEFAULT_LLM_PROVIDER,
+            "gemini_configured": bool(GEMINI_API_KEY),
+            "gemini_model": GEMINI_MODEL,
             "app_api_key_set": bool(APP_API_KEY),
         })
     except Exception as e:

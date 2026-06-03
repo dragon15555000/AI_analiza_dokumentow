@@ -596,6 +596,9 @@ table { margin: 0; }
         <a class="nav-link" href="#" onclick="showTab('import'); setTimeout(()=> { if (!window.quickDrivesLoaded) loadQuickDrives(); window.quickDrivesLoaded=true; }, 80); return false;">Import</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('audit'); return false;">📋 Audyt logów</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('swarm'); return false;">🤖 Rój agentów</a>
     </li>
     <li class="nav-item">
@@ -1557,6 +1560,90 @@ table { margin: 0; }
 </div>
 </div>
 
+<!-- TAB: AUDYT LOGÓW (Gemini) -->
+<div id="tabAudit" class="main-wrap" style="display:none;">
+  <div class="row g-3">
+    <div class="col-lg-5">
+      <div class="search-card">
+        <h2>📋 Audyt logów — Gemini</h2>
+        <p class="small text-muted mb-3">
+          Analiza całego pliku tekstowego przez <strong>Google Gemini</strong> (do ~1M tokenów kontekstu).
+          Bez importu do Qdrant — idealne dla logów, dumpów i dużych plików .txt.
+        </p>
+        <div id="auditConfigBanner" class="alert alert-warning small py-2 d-none"></div>
+
+        <div class="mb-3">
+          <label class="form-label small fw-bold">Plik do analizy:</label>
+          <div class="input-group input-group-sm">
+            <input type="text" id="auditFilePath" class="form-control font-monospace"
+              placeholder="/mnt/g/.../system.log  lub  C:\Logs\app.log">
+            <button class="btn btn-outline-primary" type="button" onclick="pickFolderWindowsForAudit()" title="Wybierz plik w Windows">📂</button>
+          </div>
+          <div class="small text-muted mt-1">Dozwolone: .log .txt .json .csv .md .out .err (w obrębie SEARCH_ROOTS)</div>
+        </div>
+
+        <div class="mb-2">
+          <div class="d-flex align-items-center justify-content-between mb-1">
+            <span class="small fw-bold text-muted">Przeglądaj folder:</span>
+            <button class="btn btn-sm btn-link p-0" style="font-size:0.7rem;" onclick="auditBrowseDir(document.getElementById('auditBrowsePath').value)">↻</button>
+          </div>
+          <div class="input-group input-group-sm mb-2">
+            <input type="text" id="auditBrowsePath" class="form-control font-monospace" placeholder="ścieżka folderu"
+              onkeydown="if(event.key==='Enter') auditBrowseDir(this.value)">
+            <button class="btn btn-outline-secondary" onclick="auditBrowseDir(document.getElementById('auditBrowsePath').value)">Idź</button>
+          </div>
+          <div id="auditBrowseCrumb" class="small text-muted mb-1"></div>
+          <div id="auditBrowseList" style="max-height:32vh;overflow-y:auto;border:1px solid #e9ecef;border-radius:6px;"></div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label small fw-bold">Model Gemini:</label>
+          <select id="auditModelSelect" class="form-select form-select-sm">
+            <option value="gemini-1.5-flash">gemini-1.5-flash (zalecany — szybki, 1M ctx)</option>
+            <option value="gemini-1.5-flash-8b">gemini-1.5-flash-8b (lżejszy)</option>
+            <option value="gemini-1.5-pro">gemini-1.5-pro (dokładniejszy)</option>
+            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+          </select>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label small fw-bold">Pytanie / instrukcja analizy:</label>
+          <textarea id="auditQuery" class="form-control form-control-sm" rows="4"
+            placeholder="Np.: Przeanalizuj logi z godziny 14:00. Dlaczego baza danych przestała odpowiadać?"></textarea>
+        </div>
+
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="auditRedactSecrets" checked>
+          <label class="form-check-label small" for="auditRedactSecrets">Redaguj hasła/tokeny przed wysłaniem do Google</label>
+        </div>
+
+        <div class="d-flex gap-2">
+          <button class="btn btn-primary flex-grow-1" id="auditRunBtn" onclick="runAuditFile()">🔍 Uruchom audyt</button>
+          <button class="btn btn-outline-danger d-none" id="auditStopBtn" onclick="stopAuditFile()">⏹</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-7">
+      <div class="search-card" style="min-height:420px;">
+        <div class="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
+          <h2 style="margin:0;font-size:1.1rem;">Raport audytu</h2>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary d-none" id="auditCopyBtn" onclick="auditCopyReport()">📋 Kopiuj</button>
+            <button class="btn btn-sm btn-outline-success d-none" id="auditSaveBtn" onclick="auditSaveReport()">💾 Pobierz .md</button>
+          </div>
+        </div>
+        <div id="auditProgress" class="small text-muted mb-2 d-none"></div>
+        <div id="auditPlaceholder" class="text-muted text-center py-5">
+          <div style="font-size:2.5rem;">📋</div>
+          <div class="mt-2">Wybierz plik, wpisz pytanie i uruchom audyt</div>
+        </div>
+        <div id="auditResult" class="d-none" style="white-space:pre-wrap;line-height:1.65;font-size:0.9rem;font-family:ui-monospace,monospace;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- TAB: RÓJ AGENTÓW -->
 <div id="tabSwarm" class="main-wrap" style="display:none;">
   <div class="row g-3">
@@ -1905,7 +1992,7 @@ function _suggestModelForTab(name) {
 
 function showTab(name) {
     // Ukrywamy WSZYSTKIE zakładki (w tym raporty) — wcześniej brakowało tabReports
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabSwarm','tabFleet'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabAudit','tabSwarm','tabFleet'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
@@ -1914,7 +2001,7 @@ function showTab(name) {
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
 
     // Poprawiona mapa indeksów zakładek (raporty są na pozycji 5)
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, reports:5, sql:6, collections:7, import:8, swarm:9, fleet:10};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, timeline:5, reports:6, sql:7, collections:8, import:9, audit:10, swarm:11, fleet:12};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
 
@@ -1924,6 +2011,7 @@ function showTab(name) {
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
+    if (name === 'audit') auditTabInit();
     if (name === 'fleet') { fleetLoad(); providersLoad(); }
     if (name === 'reports') {
         setTimeout(() => {
@@ -7189,6 +7277,231 @@ function providerTest(id, btn) {
             const statusEl = document.getElementById(`provRowStatus_${id}`);
             if (statusEl) statusEl.textContent = msg;
         }).catch(() => { btn.textContent = orig; btn.disabled = false; });
+}
+
+// ============================================================
+// AUDYT LOGÓW — Google Gemini (bezpośrednie API)
+// ============================================================
+let auditAbortController = null;
+let auditLastReport = '';
+let auditLastMeta = null;
+
+function auditTabInit() {
+    fetch('/audit/info')
+        .then(r => r.json())
+        .then(d => {
+            const banner = document.getElementById('auditConfigBanner');
+            const runBtn = document.getElementById('auditRunBtn');
+            if (!d.success || !d.gemini_configured) {
+                banner.classList.remove('d-none');
+                banner.innerHTML = '⚠️ Brak <code>GEMINI_API_KEY</code> w .env. Dodaj klucz z '
+                    + '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> '
+                    + 'i zrestartuj aplikację (<code>./restart-app.sh --user</code>).';
+                if (runBtn) runBtn.disabled = true;
+            } else {
+                banner.classList.add('d-none');
+                if (runBtn) runBtn.disabled = false;
+                const sel = document.getElementById('auditModelSelect');
+                if (sel && d.default_model && [...sel.options].some(o => o.value === d.default_model)) {
+                    sel.value = d.default_model;
+                }
+            }
+        })
+        .catch(() => {});
+
+    const list = document.getElementById('auditBrowseList');
+    if (list && !list.dataset.loaded) {
+        const seed = document.getElementById('auditBrowsePath')?.value.trim()
+            || document.getElementById('browsePathInput')?.value.trim()
+            || '';
+        auditBrowseDir(seed);
+        list.dataset.loaded = '1';
+    }
+}
+
+async function pickFolderWindowsForAudit() {
+    try {
+        const initial = document.getElementById('auditBrowsePath').value.trim()
+            || document.getElementById('auditFilePath').value.trim();
+        const res = await fetch('/browse/pick', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initial }),
+        });
+        const d = await res.json();
+        if (!d.success) {
+            if (d.error && d.error !== 'Anulowano lub nie wybrano folderu') alert(d.error);
+            return;
+        }
+        document.getElementById('auditBrowsePath').value = d.win_path || d.path;
+        auditBrowseDir(d.path);
+    } catch (e) {
+        alert('Błąd dialogu Windows: ' + e);
+    }
+}
+
+function auditBrowseDir(path) {
+    path = normalizeBrowsePath(path);
+    const list = document.getElementById('auditBrowseList');
+    if (!list) return;
+    list.innerHTML = '<div class="p-2 text-muted small"><span class="spinner-border spinner-border-sm me-1"></span> Ładowanie…</div>';
+    const params = new URLSearchParams();
+    ['log', 'txt', 'json', 'csv', 'md', 'out', 'err', 'xml'].forEach(e => params.append('ext', e));
+    fetch('/browse?path=' + encodeURIComponent(path || '') + '&' + params.toString())
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) {
+                list.innerHTML = `<div class="p-2 alert alert-danger small mb-0">${escapeHtml(d.error || 'Błąd')}</div>`;
+                return;
+            }
+            renderAuditBrowseEntries(d);
+        })
+        .catch(err => {
+            list.innerHTML = `<div class="p-2 alert alert-danger small mb-0">${escapeHtml(String(err))}</div>`;
+        });
+}
+
+function renderAuditBrowseEntries(d) {
+    const pathInput = document.getElementById('auditBrowsePath');
+    if (pathInput) pathInput.value = displayPathForUser(d.current, d.win_path);
+
+    const parts = d.current.split('/').filter(Boolean);
+    let acc = '';
+    const segLinks = parts.map(seg => {
+        acc += '/' + seg;
+        const p = acc;
+        return `<a href="#" onclick="auditBrowseDir('${p.replace(/'/g, "\\'")}');return false">${escapeHtml(seg)}</a>`;
+    }).join(' / ');
+    const crumb = document.getElementById('auditBrowseCrumb');
+    if (crumb) {
+        crumb.innerHTML = d.parent
+            ? `<a href="#" onclick="auditBrowseDir('${d.parent.replace(/'/g, "\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; ${segLinks || escapeHtml(d.current)}`
+            : (segLinks || escapeHtml(d.current));
+    }
+
+    const list = document.getElementById('auditBrowseList');
+    if (!d.entries || !d.entries.length) {
+        list.innerHTML = '<div class="p-2 text-muted small">Brak plików tekstowych/logów w tym folderze.</div>';
+        return;
+    }
+
+    list.innerHTML = d.entries.map(e => {
+        if (e.type === 'dir') {
+            return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;"
+                onclick="auditBrowseDir('${e.path.replace(/'/g, "\\'")}')">
+                <span style="color:#f59e0b;">📁</span>
+                <span class="small flex-grow-1">${escapeHtml(e.name)}</span>
+            </div>`;
+        }
+        const meta = (e.modified || e.size_kb)
+            ? `<span class="small text-muted">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
+        return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;background:#f8fafc;"
+            onclick="selectAuditFile('${e.path.replace(/'/g, "\\'")}')">
+            <span>📄</span>
+            <span class="small flex-grow-1 text-truncate">${escapeHtml(e.name)}</span>
+            ${meta}
+            <span class="badge bg-primary" style="font-size:0.65rem;">Wybierz</span>
+        </div>`;
+    }).join('');
+}
+
+function selectAuditFile(wslPath, winPath) {
+    const input = document.getElementById('auditFilePath');
+    if (input) input.value = winPath || wslToWin(wslPath) || wslPath;
+}
+
+function runAuditFile() {
+    const filePath = document.getElementById('auditFilePath')?.value.trim();
+    const query = document.getElementById('auditQuery')?.value.trim();
+    const model = document.getElementById('auditModelSelect')?.value;
+    const redact = document.getElementById('auditRedactSecrets')?.checked !== false;
+
+    if (!filePath) { alert('Wybierz plik do analizy.'); return; }
+    if (!query) { alert('Wpisz pytanie lub instrukcję analizy.'); return; }
+
+    if (auditAbortController) auditAbortController.abort();
+    auditAbortController = new AbortController();
+
+    const runBtn = document.getElementById('auditRunBtn');
+    const stopBtn = document.getElementById('auditStopBtn');
+    const progress = document.getElementById('auditProgress');
+    const placeholder = document.getElementById('auditPlaceholder');
+    const result = document.getElementById('auditResult');
+    const copyBtn = document.getElementById('auditCopyBtn');
+    const saveBtn = document.getElementById('auditSaveBtn');
+
+    if (runBtn) runBtn.disabled = true;
+    if (stopBtn) stopBtn.classList.remove('d-none');
+    if (progress) { progress.classList.remove('d-none'); progress.textContent = 'Start…'; }
+    if (placeholder) placeholder.classList.add('d-none');
+    if (result) { result.classList.remove('d-none'); result.textContent = ''; }
+    if (copyBtn) copyBtn.classList.add('d-none');
+    if (saveBtn) saveBtn.classList.add('d-none');
+
+    auditLastReport = '';
+    auditLastMeta = null;
+    let aiText = '';
+
+    const finish = (errMsg) => {
+        if (runBtn) runBtn.disabled = false;
+        if (stopBtn) stopBtn.classList.add('d-none');
+        auditAbortController = null;
+        if (errMsg) {
+            if (progress) progress.textContent = '';
+            if (result) result.textContent = '❌ ' + errMsg;
+            if (copyBtn) copyBtn.classList.add('d-none');
+            if (saveBtn) saveBtn.classList.add('d-none');
+        }
+    };
+
+    streamSSEPost('/audit/file/stream', {
+        file: filePath,
+        query,
+        model,
+        redact_secrets: redact,
+    }, {
+        progress: (d) => {
+            if (progress) progress.textContent = d.message || 'Przetwarzanie…';
+        },
+        token: (d) => {
+            aiText += d.token || '';
+            if (result) result.textContent = aiText;
+        },
+        done: (d) => {
+            auditLastReport = d.ai_answer || aiText;
+            auditLastMeta = d;
+            if (progress) progress.textContent = `Gotowe — ${(d.chars_analyzed || 0).toLocaleString('pl')} znaków · ${d.model || model}`;
+            if (copyBtn) copyBtn.classList.remove('d-none');
+            if (saveBtn) saveBtn.classList.remove('d-none');
+            finish(null);
+        },
+        error: (d) => {
+            finish(d.error || d.msg || 'Błąd audytu');
+        },
+    }, auditAbortController.signal).catch(err => {
+        if (err.name !== 'AbortError') finish(String(err));
+        else finish('Anulowano.');
+    });
+}
+
+function stopAuditFile() {
+    if (auditAbortController) auditAbortController.abort();
+}
+
+function auditCopyReport() {
+    if (!auditLastReport) return;
+    navigator.clipboard.writeText(auditLastReport).catch(() => alert('Nie udało się skopiować.'));
+}
+
+function auditSaveReport() {
+    if (!auditLastReport) return;
+    const name = (auditLastMeta?.file_name || 'raport').replace(/\.[^.]+$/, '') + '_audyt.md';
+    const blob = new Blob([auditLastReport], { type: 'text/markdown;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
 }
 </script>
 
