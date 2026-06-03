@@ -758,6 +758,35 @@ def _pick_ollama_url() -> str:
     active = [e for e in pool.get("ollama_urls", []) if e.get("active") and e.get("url")]
     return active[0]["url"] if active else OLLAMA_URL
 
+# ---- Custom Endpoint Health & Stats ----
+_CUSTOM_STATS_FILE = Path(__file__).parent / ".llm_custom_endpoint_stats.json"
+_custom_stats_lock = threading.Lock()
+
+def _load_custom_endpoint_stats() -> dict:
+    """Wczytuje statystyki custom endpointów z pliku JSON."""
+    try:
+        if _CUSTOM_STATS_FILE.exists():
+            return json.loads(_CUSTOM_STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _save_custom_endpoint_stats(stats: dict) -> None:
+    """Zapisuje statystyki custom endpointów do pliku JSON."""
+    with _custom_stats_lock:
+        _CUSTOM_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _get_or_init_endpoint_stats(endpoint_id: str) -> dict:
+    """Zwraca lub inicjalizuje strukturę statystyk dla endpointu."""
+    stats = _load_custom_endpoint_stats()
+    if endpoint_id not in stats:
+        stats[endpoint_id] = {
+            "ping_ok": None, "ping_ms": None, "ping_ts": None,
+            "err_count": 0, "ok_count": 0, "avg_ms": None
+        }
+        _save_custom_endpoint_stats(stats)
+    return stats[endpoint_id]
+
 APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
 # Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
@@ -1683,7 +1712,23 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
     """
     Uniwersalna funkcja do wywoływania LLM.
     Zwraca dict dla non-stream lub Response dla stream.
+    provider moze byc: 'openrouter', 'ollama', lub custom endpoint ID.
     """
+    pool = _load_provider_pool()
+    custom_endpoint = None
+    if provider:
+        for endpoint in pool.get("custom_endpoints", []):
+            if endpoint.get("id") == provider:
+                custom_endpoint = endpoint
+                break
+
+    if custom_endpoint:
+        return _call_custom_endpoint(
+            custom_endpoint.get("url", ""),
+            custom_endpoint.get("key", ""),
+            prompt, system, stream, model or ""
+        )
+
     prov = get_llm_provider(provider)
 
     if prov == "openrouter":
@@ -1752,9 +1797,50 @@ def stream_llm_tokens(prompt: str, system: str = "",
                       provider: str | None = None, model: str | None = None,
                       max_tokens: int = 2000, temperature: float = 0.2):
     """
-    Generator zwracający kolejne tokeny tekstu z LLM (działa dla Ollama i OpenRouter).
+    Generator zwracający kolejne tokeny tekstu z LLM (Ollama, OpenRouter, custom endpoint).
     Używany w streamingowych endpointach.
+    provider moze byc: 'openrouter', 'ollama', lub custom endpoint ID.
     """
+    pool = _load_provider_pool()
+    custom_endpoint = None
+    if provider:
+        for endpoint in pool.get("custom_endpoints", []):
+            if endpoint.get("id") == provider:
+                custom_endpoint = endpoint
+                break
+
+    if custom_endpoint:
+        url = custom_endpoint.get("url", "").rstrip("/") + "/api/generate"
+        key = custom_endpoint.get("key", "")
+        headers = {}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        payload = {
+            "model": model or "default",
+            "prompt": prompt,
+            "system": system,
+            "stream": True,
+            "options": {"temperature": temperature}
+        }
+        try:
+            with requests.post(url, json=payload, headers=headers, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            yield f"[Blad custom endpoint: {str(e)}]"
+        return
+
     prov = get_llm_provider(provider)
     effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
 
@@ -1827,7 +1913,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
             yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
             logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
             # Przepuść przez ścieżkę Ollama
-            ollama_url = OLLAMA_URL + "/api/generate"
+            ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
             ollama_payload = {
                 "model": LLM_MODEL,
                 "prompt": prompt,
@@ -1863,7 +1949,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
     else:
         # Ollama streaming
-        url = OLLAMA_URL + "/api/generate"
+        url = _pick_ollama_url().rstrip("/") + "/api/generate"
         payload = {
             "model": effective_model,
             "prompt": prompt,
@@ -1891,7 +1977,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
 
 def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
-    url = OLLAMA_URL + "/api/generate"
+    url = _pick_ollama_url().rstrip("/") + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -1903,6 +1989,28 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | r
         return requests.post(url, json=payload, stream=True, timeout=300)
     else:
         r = requests.post(url, json=payload, timeout=180)
+        r.raise_for_status()
+        return r.json()
+
+
+def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: bool,
+                          model: str = "") -> dict | requests.Response:
+    """Calls custom endpoint (assumes Ollama-compatible /api/generate)."""
+    url_clean = url.rstrip("/") + "/api/generate"
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    payload = {
+        "model": model or "default",
+        "prompt": prompt,
+        "system": system,
+        "stream": stream,
+        "options": {"temperature": 0.2}
+    }
+    if stream:
+        return requests.post(url_clean, json=payload, headers=headers, stream=True, timeout=300)
+    else:
+        r = requests.post(url_clean, json=payload, headers=headers, timeout=180)
         r.raise_for_status()
         return r.json()
 
@@ -2286,6 +2394,34 @@ def _model_score(model_id: str) -> float:
     else:
         avail = 12.0  # nieznany — neutralny
     return round(quality + speed + avail, 1)
+
+
+def _custom_endpoint_score(endpoint_id: str) -> float:
+    """Ranking custom endpointu 0-100 na bazie dostepnosci i szybkosci."""
+    stats = _load_custom_endpoint_stats().get(endpoint_id, {})
+    if stats.get("ping_ok") is False:
+        return 0.0
+    if stats.get("ping_ok") is True:
+        ms = stats.get("avg_ms") or stats.get("ping_ms") or 8000
+        score = max(0.0, 70.0 - ms / 1000.0)
+    else:
+        score = 40.0
+    return round(score, 1)
+
+
+def _get_best_custom_endpoints(limit: int = 3) -> list[tuple]:
+    """Zwraca rankingowe custom endpointy (model_id, model_name) posortowane po score."""
+    pool = _load_provider_pool()
+    endpoints = []
+    for endpoint in pool.get("custom_endpoints", []):
+        if not endpoint.get("active"):
+            continue
+        eid = endpoint.get("id")
+        name = endpoint.get("name", endpoint.get("url"))
+        score = _custom_endpoint_score(eid)
+        endpoints.append((eid, name, score))
+    endpoints.sort(key=lambda x: x[2], reverse=True)
+    return [(eid, name) for eid, name, _ in endpoints[:limit]]
 
 
 def _embedding_query_for_mode(query_text: str, mode: str) -> str:
@@ -4024,13 +4160,20 @@ def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
 
 
 def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
-    """Zwraca listę (model_id, model_name) dla każdego workera."""
+    """Zwraca liste (model_id, model_name) dla kazdego workera.
+    Inteligentnie wybiera custom endpointy jesli sa dostepne i maja wysoki score."""
     import random as _rnd
+    pool = list(FREE_MODELS_LIST)
+
+    custom_endpoints = _get_best_custom_endpoints(limit=2)
+    if custom_endpoints:
+        pool.extend(custom_endpoints)
+
     if cfg.get("use_random_models"):
-        pool = list(FREE_MODELS_LIST)
         _rnd.shuffle(pool)
         return [pool[i % len(pool)] for i in range(n_workers)]
-    preferred = cfg.get("preferred_model", FREE_MODELS_LIST[0])
+
+    preferred = cfg.get("preferred_model", pool[0] if pool else FREE_MODELS_LIST[0])
     return [preferred] * n_workers
 
 
@@ -4212,19 +4355,51 @@ def agents_swarm_modes():
 
 @app.route('/api/models/registry', methods=['GET'])
 def models_registry_endpoint():
-    """Zwraca rejestr modeli + live statystyki."""
+    """Zwraca rejestr modeli + live statystyki + custom endpointy."""
     out = {}
     for mid, info in MODEL_REGISTRY.items():
         live = _model_live.get(mid, {})
         out[mid] = {**info, "live": live, "score": _model_score(mid)}
+
+    pool = _load_provider_pool()
+    all_custom_stats = _load_custom_endpoint_stats()
+    for endpoint in pool.get("custom_endpoints", []):
+        if not endpoint.get("active"):
+            continue
+        eid = endpoint.get("id")
+        stats = all_custom_stats.get(eid, {
+            "ping_ok": None, "ping_ms": None, "ping_ts": None,
+            "err_count": 0, "ok_count": 0, "avg_ms": None
+        })
+        out[eid] = {
+            "kind": "custom_endpoint",
+            "name": endpoint.get("name", endpoint.get("url")),
+            "short": endpoint.get("name", "Custom")[:20],
+            "provider": "Custom",
+            "icon": "🔌",
+            "context_k": 128,
+            "speed_tier": 2,
+            "quality_tier": 2,
+            "free": True,
+            "rate_rpm": 60,
+            "rate_day": 1000,
+            "tags": ["custom", "swarm"],
+            "url": endpoint.get("url"),
+            "live": stats,
+            "score": _custom_endpoint_score(eid)
+        }
+
     return jsonify({"success": True, "models": out})
 
 
 @app.route('/api/models/ping/all', methods=['POST'])
 def models_ping_all():
-    """SSE: pinguje wszystkie modele równolegle i streamuje wyniki."""
+    """SSE: pinguje wszystkie modele + custom endpointy równolegle i streamuje wyniki."""
     _require_api_key()
     TEST = "Odpowiedz jednym słowem: OK"
+    pool = _load_provider_pool()
+    custom_endpoints = [e for e in pool.get("custom_endpoints", []) if e.get("active")]
+    total_count = len(MODEL_REGISTRY) + len(custom_endpoints)
 
     def generate():
         import queue as _q
@@ -4235,9 +4410,9 @@ def models_ping_all():
             return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
 
         rq: _q.Queue = _q.Queue()
-        yield sse('start', {'count': len(MODEL_REGISTRY)})
+        yield sse('start', {'count': total_count})
 
-        def _ping(mid: str):
+        def _ping_model(mid: str):
             t0 = time.time()
             try:
                 res = call_llm(prompt=TEST, system="", stream=False,
@@ -4245,37 +4420,87 @@ def models_ping_all():
                 txt = _llm_response_text(res)
                 ms  = int((time.time() - t0) * 1000)
                 ok  = bool(txt and not txt.startswith('[') )
-                rq.put((mid, ok, ms, None))
+                rq.put(('model', mid, ok, ms, None))
             except Exception as exc:
-                rq.put((mid, False, int((time.time() - t0) * 1000), str(exc)[:120]))
+                rq.put(('model', mid, False, int((time.time() - t0) * 1000), str(exc)[:120]))
 
-        threads = [threading.Thread(target=_ping, args=(mid,), daemon=True)
+        def _ping_custom(endpoint_id: str, endpoint_url: str, endpoint_key: str):
+            t0 = time.time()
+            try:
+                headers = {}
+                if endpoint_key:
+                    headers["Authorization"] = f"Bearer {endpoint_key}"
+                url_clean = endpoint_url.rstrip("/")
+                req = urllib.request.Request(
+                    f"{url_clean}/api/tags",
+                    headers=headers if headers else None,
+                    method="GET"
+                )
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    ms = int((time.time() - t0) * 1000)
+                    ok = r.status == 200
+                    rq.put(('custom', endpoint_id, ok, ms, None))
+            except Exception as exc:
+                ms = int((time.time() - t0) * 1000)
+                rq.put(('custom', endpoint_id, False, ms, str(exc)[:120]))
+
+        threads = [threading.Thread(target=_ping_model, args=(mid,), daemon=True)
                    for mid in MODEL_REGISTRY]
+        threads.extend([
+            threading.Thread(target=_ping_custom, args=(e['id'], e['url'], e.get('key', '')), daemon=True)
+            for e in custom_endpoints
+        ])
         for t in threads: t.start()
 
         done = 0
-        while done < len(MODEL_REGISTRY):
+        while done < total_count:
             try:
-                mid, ok, ms, err = rq.get(timeout=90)
+                kind, eid, ok, ms, err = rq.get(timeout=90)
             except Exception:
                 yield sse('timeout', {}); break
-            live = _model_live[mid]
-            live['ping_ok'] = ok; live['ping_ms'] = ms
-            live['ping_ts'] = time.time()
-            if ok:
-                live['ok_count'] += 1
-                prev = live.get('avg_ms')
-                live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
-            else:
-                live['err_count'] += 1
-            score = _model_score(mid)
-            live_copy = dict(live)
-            yield sse('result', {
-                'model_id': mid,
-                'ok': ok, 'ms': ms, 'err': err,
-                'score': score,
-                'avg_ms': live_copy.get('avg_ms'),
-            })
+
+            if kind == 'model':
+                live = _model_live[eid]
+                live['ping_ok'] = ok; live['ping_ms'] = ms
+                live['ping_ts'] = time.time()
+                if ok:
+                    live['ok_count'] += 1
+                    prev = live.get('avg_ms')
+                    live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
+                else:
+                    live['err_count'] += 1
+                score = _model_score(eid)
+                live_copy = dict(live)
+                yield sse('result', {
+                    'kind': 'model',
+                    'model_id': eid,
+                    'ok': ok, 'ms': ms, 'err': err,
+                    'score': score,
+                    'avg_ms': live_copy.get('avg_ms'),
+                })
+            elif kind == 'custom':
+                all_stats = _load_custom_endpoint_stats()
+                stats = all_stats.get(eid, {
+                    "ping_ok": None, "ping_ms": None, "ping_ts": None,
+                    "err_count": 0, "ok_count": 0, "avg_ms": None
+                })
+                stats['ping_ok'] = ok
+                stats['ping_ms'] = ms
+                stats['ping_ts'] = time.time()
+                if ok:
+                    stats['ok_count'] += 1
+                    prev = stats.get('avg_ms')
+                    stats['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
+                else:
+                    stats['err_count'] += 1
+                all_stats[eid] = stats
+                _save_custom_endpoint_stats(all_stats)
+                yield sse('result', {
+                    'kind': 'custom',
+                    'endpoint_id': eid,
+                    'ok': ok, 'ms': ms, 'err': err,
+                    'avg_ms': stats.get('avg_ms'),
+                })
             done += 1
 
         yield sse('done', {'pinged': done})
@@ -4324,12 +4549,18 @@ def providers_list():
         entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
         if "key" in entry:
             del entry["key"]
-    # Dodaj domyślne (z .env) jako informację
+    pool_or = [e for e in pool.get("openrouter_keys", []) if e.get("active")]
+    pool_ol = [e for e in pool.get("ollama_urls", []) if e.get("active")]
+    # effective = wpisy w .providers.json albo fallback z .env (gdy pula UI pusta)
     safe["defaults"] = {
         "openrouter_key_set": bool(OPENROUTER_API_KEY),
         "ollama_url": OLLAMA_URL,
-        "active_keys": len([e for e in pool.get("openrouter_keys", []) if e.get("active")]),
-        "active_ollamas": len([e for e in pool.get("ollama_urls", []) if e.get("active")]),
+        "pool_active_keys": len(pool_or),
+        "pool_active_ollamas": len(pool_ol),
+        "active_keys": len(pool_or) if pool_or else (1 if OPENROUTER_API_KEY else 0),
+        "active_ollamas": len(pool_ol) if pool_ol else (1 if OLLAMA_URL else 0),
+        "using_env_fallback_or": not pool_or and bool(OPENROUTER_API_KEY),
+        "using_env_fallback_ollama": not pool_ol and bool(OLLAMA_URL),
     }
     return jsonify({"success": True, "pool": safe})
 

@@ -4678,26 +4678,44 @@ function handleRateLimitError(errorText, container, loader, btn, stopBtn, lastQu
     if (stopBtn) stopBtn.style.display = 'none';
     btn.disabled = false;
 
-    const isFallback = errorText.includes('[FALLBACK]');
+    const msg = typeof errorText === 'string' ? errorText : (errorText?.error || String(errorText || ''));
+    const isFallback = msg.includes('[FALLBACK]');
     const alertClass = isFallback ? 'alert-warning' : 'alert-danger';
     const icon = isFallback ? '⚠️' : '🚫';
+    const clean = escapeHtml(
+        msg.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim()
+        || 'Zbyt wiele zapytań w krótkim czasie.'
+    );
 
     container.innerHTML = `
         <div class="alert ${alertClass}">
             <strong>${icon} Limit OpenRouter</strong><br>
-            ${errorText.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim() || 'Zbyt wiele zapytań w krótkim czasie.'}
-            <div class="mt-2 d-flex gap-2 flex-wrap">
-                <button onclick="quickSwitchToOllama()" class="btn btn-primary btn-sm">
-                    🔄 Przełącz na Ollama (lokalny)
-                </button>
-                ${lastQuery ? `<button onclick="retryLastQuery(${JSON.stringify(lastQuery)}, ${JSON.stringify(lastMode || 'normal')})" class="btn btn-outline-secondary btn-sm">🔁 Spróbuj ponownie</button>` : ''}
-            </div>
+            ${clean}
+            <div class="mt-2 d-flex gap-2 flex-wrap" id="rateLimitActions"></div>
             <div class="small mt-2 text-muted">
                 Wskazówka: w <code>.env</code> ustaw <code>OPENROUTER_FALLBACK_TO_OLLAMA=true</code> żeby aplikacja automatycznie przełączała się na Ollama przy limicie.
             </div>
         </div>`;
 
-    // Opcjonalnie: automatycznie podświetl selektor providera
+    const actions = document.getElementById('rateLimitActions');
+    if (actions) {
+        const ollamaBtn = document.createElement('button');
+        ollamaBtn.type = 'button';
+        ollamaBtn.className = 'btn btn-primary btn-sm';
+        ollamaBtn.textContent = '🔄 Przełącz na Ollama (lokalny)';
+        ollamaBtn.addEventListener('click', quickSwitchToOllama);
+        actions.appendChild(ollamaBtn);
+
+        if (lastQuery) {
+            const retryBtn = document.createElement('button');
+            retryBtn.type = 'button';
+            retryBtn.className = 'btn btn-outline-secondary btn-sm ms-1';
+            retryBtn.textContent = '🔁 Spróbuj ponownie';
+            retryBtn.addEventListener('click', () => retryLastQuery(lastQuery, lastMode || 'normal'));
+            actions.appendChild(retryBtn);
+        }
+    }
+
     const providerSel = document.getElementById('llmProviderSelect');
     if (providerSel) {
         providerSel.style.boxShadow = '0 0 0 3px rgba(220, 53, 69, 0.4)';
@@ -4724,12 +4742,10 @@ function quickSwitchToOllama() {
 
 function retryLastQuery(query, mode) {
     const qInput = document.getElementById('queryInput');
-    const modeSel = document.getElementById('modeSelect');
+    const modeSel = document.getElementById('searchMode');
     if (qInput) qInput.value = query || '';
     if (modeSel && mode) modeSel.value = mode;
-    // Uruchom wyszukiwanie
-    const askBtn = document.getElementById('askBtn');
-    if (askBtn) askBtn.click();
+    executeSearch();
 }
 
 // ============================================================
@@ -6700,14 +6716,17 @@ function fleetPingAll() {
                             document.getElementById('fleetPingBar').style.width = pct + '%';
                             document.getElementById('fleetPingLabel').textContent =
                                 `${_fleetPingDone}/${_fleetPingTotal} — ${ev.data.ok ? '✓' : '✗'} ${(ev.data.ms/1000).toFixed(1)}s`;
-                            const safeId = ev.data.model_id.replace(/\//g,'_').replace(/:/g,'-');
+                            const mid = ev.data.model_id || ev.data.endpoint_id;
+                            const safeId = mid.replace(/\//g,'_').replace(/:/g,'-');
                             const dot = document.getElementById(`fleet-dot-${safeId}`);
                             const lbl = document.getElementById(`fleet-status-lbl-${safeId}`);
                             const ping = document.getElementById(`fleet-ping-${safeId}`);
                             const score = document.getElementById(`fleet-score-${safeId}`);
                             const card = document.querySelector(`#fleet-card-${safeId} .fleet-card`);
+                            const isCustom = ev.data.kind === 'custom';
+                            const slowThreshold = isCustom ? 5000 : 8000;
                             if (ev.data.ok) {
-                                const slow = ev.data.ms > 8000;
+                                const slow = ev.data.ms > slowThreshold;
                                 if (dot) { dot.className = `fleet-status-dot fleet-dot-${slow?'slow':'ok'}`; }
                                 if (lbl) lbl.textContent = slow ? '⚠ wolny' : '✓ online';
                                 if (card) { card.classList.remove('fleet-unk','fleet-err','fleet-slow','fleet-ok'); card.classList.add(slow?'fleet-slow':'fleet-ok'); }
@@ -6717,7 +6736,7 @@ function fleetPingAll() {
                                 if (card) { card.classList.remove('fleet-unk','fleet-ok','fleet-slow','fleet-err'); card.classList.add('fleet-err'); }
                             }
                             if (ping) ping.textContent = `⏱ ${ev.data.ms} ms`;
-                            if (score) score.textContent = ev.data.score;
+                            if (score) score.textContent = ev.data.score || (ev.data.avg_ms ? Math.round(70 - ev.data.avg_ms/1000) : '—');
                         } else if (ev.event === 'done') {
                             document.getElementById('fleetPingBtn').disabled = false;
                             document.getElementById('fleetPingProgress').style.display = 'none';
@@ -6745,12 +6764,17 @@ let _providersCurrentSection = 'openrouter';
 
 function providersShowSection(section) {
     _providersCurrentSection = section;
-    ['openrouter','ollama','custom'].forEach(s => {
-        const el = document.getElementById('providersSectionO' + (s === 'openrouter' ? 'penrouter' : s.charAt(0).toUpperCase() + s.slice(1)));
+    const sectionIds = {
+        openrouter: 'providersSectionOpenrouter',
+        ollama: 'providersSectionOllama',
+        custom: 'providersSectionCustom',
+    };
+    Object.entries(sectionIds).forEach(([s, id]) => {
+        const el = document.getElementById(id);
         if (el) el.style.display = s === section ? '' : 'none';
     });
-    document.querySelectorAll('#providersTabs .nav-link').forEach((a,i) => {
-        a.classList.toggle('active', ['openrouter','ollama','custom'][i] === section);
+    document.querySelectorAll('#providersTabs .nav-link').forEach((a, i) => {
+        a.classList.toggle('active', ['openrouter', 'ollama', 'custom'][i] === section);
     });
 }
 
@@ -6769,24 +6793,32 @@ function providersLoad() {
             const olStatus = def.ollama_url
                 ? `<span class="text-success">✓ ${escapeHtml(def.ollama_url)}</span>`
                 : `<span class="text-muted">brak</span>`;
+            const orHint = def.using_env_fallback_or && !def.pool_active_keys
+                ? ' <span class="text-muted">(rotacja z .env — dodaj klucze poniżej dla wielu kont)</span>' : '';
+            const olHint = def.using_env_fallback_ollama && !def.pool_active_ollamas
+                ? ' <span class="text-muted">(domyślny .env — dodaj serwery poniżej)</span>' : '';
             defDiv.innerHTML = `<b>Domyślne (.env):</b> OpenRouter: ${orStatus} &nbsp;|&nbsp; Ollama: ${olStatus}
-                &nbsp;|&nbsp; Aktywne klucze puli: <b>${def.active_keys}</b> &nbsp;|&nbsp; Aktywne Ollama: <b>${def.active_ollamas}</b>`;
+                &nbsp;|&nbsp; Aktywne źródła OR: <b>${def.active_keys ?? 0}</b>${orHint}
+                &nbsp;|&nbsp; Aktywne Ollama: <b>${def.active_ollamas ?? 0}</b>${olHint}`;
         }
+
+        const defaultOrRow = def.openrouter_key_set ? _providerDefaultRow('openrouter', def) : '';
+        const defaultOlRow = def.ollama_url ? _providerDefaultRow('ollama', def) : '';
 
         // Tabela OpenRouter
         const orBody = document.getElementById('providersBodyOpenrouter');
         if (orBody) {
             const rows = (pool.openrouter_keys || []);
-            orBody.innerHTML = rows.length ? rows.map(e => _providerRow(e, 'openrouter')).join('') :
-                '<tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych kluczy</td></tr>';
+            orBody.innerHTML = defaultOrRow + (rows.length ? rows.map(e => _providerRow(e, 'openrouter')).join('') :
+                (defaultOrRow ? '' : '<tr><td colspan="4" class="text-muted small text-center py-2">Brak kluczy — ustaw OPENROUTER_API_KEY w .env lub dodaj poniżej</td></tr>'));
         }
 
         // Tabela Ollama
         const olBody = document.getElementById('providersBodyOllama');
         if (olBody) {
             const rows = (pool.ollama_urls || []);
-            olBody.innerHTML = rows.length ? rows.map(e => _providerRow(e, 'ollama')).join('') :
-                '<tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych serwerów</td></tr>';
+            olBody.innerHTML = defaultOlRow + (rows.length ? rows.map(e => _providerRow(e, 'ollama')).join('') :
+                (defaultOlRow ? '' : '<tr><td colspan="4" class="text-muted small text-center py-2">Brak serwerów — ustaw OLLAMA_URL w .env lub dodaj poniżej</td></tr>'));
         }
 
         // Tabela Custom
@@ -6797,6 +6829,29 @@ function providersLoad() {
                 '<tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>';
         }
     }).catch(err => console.error('providersLoad error', err));
+}
+
+function _providerDefaultRow(type, def) {
+    if (type === 'openrouter') {
+        return `<tr class="table-light">
+            <td class="small"><em>.env (domyślny)</em></td>
+            <td class="small text-muted">OPENROUTER_API_KEY</td>
+            <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;"></span>
+                <span id="provRowStatus_default_openrouter" class="small ms-1">aktywny (fallback)</span></td>
+            <td class="text-end">
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" style="font-size:0.75rem;"
+                    onclick="providerTest('default_openrouter', this)">Test</button>
+            </td></tr>`;
+    }
+    return `<tr class="table-light">
+        <td class="small"><em>.env (domyślny)</em></td>
+        <td class="small text-muted" style="font-family:monospace;">${escapeHtml(def.ollama_url || '')}</td>
+        <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;"></span>
+            <span id="provRowStatus_default_ollama" class="small ms-1">aktywny (fallback)</span></td>
+        <td class="text-end">
+            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" style="font-size:0.75rem;"
+                onclick="providerTest('default_ollama', this)">Test</button>
+        </td></tr>`;
 }
 
 function _providerRow(e, type) {
