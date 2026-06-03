@@ -6391,7 +6391,7 @@ def _swarm_synthesis_prompt(query: str, worker_outputs: list[dict], mode_label: 
 
 def _swarm_call_with_fallback(prompt: str, system: str, provider: str | None, models: list[str],
                               max_tokens: int, temperature: float,
-                              task: str | None = None) -> tuple[str, str]:
+                              task: str | None = None) -> tuple[str, str, dict | None]:
     last_error = None
     for model in models or [None]:
         try:
@@ -6405,7 +6405,8 @@ def _swarm_call_with_fallback(prompt: str, system: str, provider: str | None, mo
                 temperature=temperature,
                 task=task,
             )
-            return (model or "", _llm_response_text(result))
+            usage = result.get("usage") if isinstance(result, dict) else None
+            return (model or "", _llm_response_text(result), usage)
         except Exception as e:
             last_error = e
             continue
@@ -6421,9 +6422,8 @@ def _swarm_run_synthesis(
     provider: str | None,
     *,
     strict_incognito: bool,
-) -> tuple[str, str, str | None, bool]:
-    """
-    Synteza roju. Przy strict_incognito najpierw Ollama; gdy padnie — zapasowo chmura
+) -> tuple[str, str, str | None, bool, dict | None]:
+    """Synteza roju. Przy strict_incognito najpierw Ollama; gdy padnie — zapasowo chmura
     (tylko streszczenia workerów, bez pełnych dokumentów).
     """
     synth_models, synth_max_tokens, synth_temp, synth_provider = _swarm_synthesis_settings(
@@ -6442,7 +6442,7 @@ def _swarm_run_synthesis(
         "Trzymaj się faktów i jasno zaznaczaj niepewności."
     )
     try:
-        used_model, final_answer = _swarm_call_with_fallback(
+        used_model, final_answer, usage = _swarm_call_with_fallback(
             synth_prompt,
             synth_system,
             synth_llm_provider,
@@ -6451,7 +6451,7 @@ def _swarm_run_synthesis(
             synth_temp,
             task="swarm",
         )
-        return used_model, final_answer, get_llm_provider(synth_llm_provider), False
+        return used_model, final_answer, get_llm_provider(synth_llm_provider), False, usage
     except Exception as e:
         if not strict_incognito:
             raise
@@ -6462,7 +6462,7 @@ def _swarm_run_synthesis(
             if cloud_prov == "ollama":
                 cloud_prov = "openrouter"
         cloud_models = _swarm_model_candidates(cloud_prov)[:3]
-        used_model, final_answer = _swarm_call_with_fallback(
+        used_model, final_answer, usage = _swarm_call_with_fallback(
             synth_prompt,
             synth_system,
             cloud_prov,
@@ -6471,7 +6471,7 @@ def _swarm_run_synthesis(
             synth_temp,
             task="swarm",
         )
-        return used_model, final_answer, get_llm_provider(cloud_prov), True
+        return used_model, final_answer, get_llm_provider(cloud_prov), True, usage
 
 
 @app.route('/api/swarm/modes', methods=['GET'])
@@ -6613,12 +6613,13 @@ def agents_swarm():
 
                 for idx, group, models, fut in futures:
                     try:
-                        used_model, summary = fut.result()
+                        used_model, summary, usage = fut.result()
                         worker_outputs.append({
                             "worker_index": idx,
                             "model": used_model or (models[0] if models else ""),
                             "summary": summary,
                             "chunks": len(group),
+                            "usage": usage,
                         })
                         yield sse("worker", {
                             "worker_index": idx,
@@ -6655,7 +6656,7 @@ def agents_swarm():
                 "strict_incognito": strict_incognito,
             })
 
-            used_model, final_answer, synth_prov_used, synth_cloud_fallback = _swarm_run_synthesis(
+            used_model, final_answer, synth_prov_used, synth_cloud_fallback, synth_usage = _swarm_run_synthesis(
                 query,
                 chat_context,
                 worker_outputs,
@@ -6681,6 +6682,7 @@ def agents_swarm():
                 "mask_pii": mask_pii,
                 "strict_incognito": strict_incognito,
                 "pii_redactions": pii_stats,
+                "usage": synth_usage,
             })
         except Exception as e:
             logger.exception("agents_swarm error")

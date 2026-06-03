@@ -277,6 +277,7 @@ except requests.RequestException as e:
 try:
     swarm_events: list[str] = []
     swarm_detail = ""
+    swarm_done = None
     with requests.post(
         f"{BASE}/agents/swarm",
         headers={**headers(), "Content-Type": "application/json"},
@@ -300,6 +301,11 @@ try:
                 current_event = raw[7:].strip()
             elif raw.startswith("data: ") and current_event:
                 swarm_events.append(current_event)
+                if current_event == "done":
+                    try:
+                        swarm_done = json.loads(raw[6:])
+                    except Exception:
+                        swarm_done = None
                 if current_event in ("start", "error"):
                     try:
                         swarm_detail = json.loads(raw[6:]).get("error", "start ok")[:80]
@@ -314,6 +320,15 @@ try:
             check("  swarm SSE start/error", ok_ev, "Brak dokumentów (OK bez LLM)")
         else:
             check("  swarm SSE start/error", ok_ev, safe_detail(swarm_detail))
+        if isinstance(swarm_done, dict):
+            usage = swarm_done.get("usage")
+            check(
+                "  swarm SSE done.usage",
+                isinstance(usage, dict) and any(k in usage for k in ("prompt_tokens", "completion_tokens", "total_tokens")),
+                safe_detail(str(usage or swarm_done), 80),
+            )
+        else:
+            check("  swarm SSE done.usage", False, "brak payloadu done")
 except requests.RequestException as e:
     check("POST /agents/swarm SSE", False, str(e)[:80])
 
