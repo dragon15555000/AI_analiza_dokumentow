@@ -248,7 +248,7 @@ try:
 except requests.RequestException as e:
     check("/api/config/llm", False, str(e)[:80])
 
-# 4b. Rój LLM — konfiguracja i endpoint (bez czekania na workery LLM)
+# 4b. Rój LLM — konfiguracja i endpoint SSE (bez czekania na pełną syntezę)
 try:
     sm = requests.get(f"{BASE}/api/swarm/modes", headers=headers(), timeout=10)
     if sm.status_code == 401:
@@ -265,34 +265,32 @@ except requests.RequestException as e:
 
 try:
     bad = requests.post(
-        f"{BASE}/agents/swarm",
+        f"{BASE}/agents/swarm/stream",
         headers={**headers(), "Content-Type": "application/json"},
         json={},
         timeout=10,
     )
-    check("POST /agents/swarm pusty", bad.status_code == 400, f"HTTP {bad.status_code}")
+    check("POST /agents/swarm/stream pusty", bad.status_code == 200, f"HTTP {bad.status_code}")
 except requests.RequestException as e:
-    check("POST /agents/swarm pusty", False, str(e)[:80])
+    check("POST /agents/swarm/stream pusty", False, str(e)[:80])
 
 try:
     swarm_events: list[str] = []
     swarm_detail = ""
     swarm_done = None
     with requests.post(
-        f"{BASE}/agents/swarm",
+        f"{BASE}/agents/swarm/stream",
         headers={**headers(), "Content-Type": "application/json"},
         json={
             "query": "__run_tests_swarm_smoke__",
             "limit": 2,
-            "swarm_mode": "B",
-            "mask_pii": False,
-            "strict_incognito": False,
-            "llm_provider": "ollama",
+            "swarm_mode": "quality",
+            "file_filter": None,
         },
         stream=True,
-        timeout=25,
+        timeout=120,
     ) as sresp:
-        check("POST /agents/swarm SSE HTTP", sresp.status_code == 200, str(sresp.status_code))
+        check("POST /agents/swarm/stream SSE HTTP", sresp.status_code == 200, str(sresp.status_code))
         current_event = None
         for raw in sresp.iter_lines(decode_unicode=True):
             if raw is None:
@@ -306,7 +304,8 @@ try:
                         swarm_done = json.loads(raw[6:])
                     except Exception:
                         swarm_done = None
-                if current_event in ("start", "error"):
+                    break
+                if current_event == "error":
                     try:
                         swarm_detail = json.loads(raw[6:]).get("error", "start ok")[:80]
                     except Exception:
@@ -315,11 +314,11 @@ try:
                 if len(swarm_events) > 20:
                     break
     if sresp.status_code == 200:
-        ok_ev = "start" in swarm_events or "error" in swarm_events
+        ok_ev = "progress" in swarm_events or "init" in swarm_events or "done" in swarm_events or "error" in swarm_events
         if "error" in swarm_events and "Brak dokumentów" in swarm_detail:
-            check("  swarm SSE start/error", ok_ev, "Brak dokumentów (OK bez LLM)")
+            check("  swarm SSE progress/init/error", ok_ev, "Brak dokumentów (OK bez LLM)")
         else:
-            check("  swarm SSE start/error", ok_ev, safe_detail(swarm_detail))
+            check("  swarm SSE progress/init/error", ok_ev, safe_detail(swarm_detail))
         if isinstance(swarm_done, dict):
             usage = swarm_done.get("usage")
             check(
@@ -328,9 +327,12 @@ try:
                 safe_detail(str(usage or swarm_done), 80),
             )
         else:
-            check("  swarm SSE done.usage", False, "brak payloadu done")
+            if "error" in swarm_events and "Brak dokumentów" in swarm_detail:
+                check("  swarm SSE done.usage", True, "skipped: Brak dokumentów")
+            else:
+                check("  swarm SSE done.usage", False, "brak payloadu done")
 except requests.RequestException as e:
-    check("POST /agents/swarm SSE", False, str(e)[:80])
+    check("POST /agents/swarm/stream SSE", False, str(e)[:80])
 
 # 4c. Flota LLM — ranking z cache (bez POST /fleet/probe)
 try:

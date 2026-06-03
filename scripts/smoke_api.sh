@@ -256,29 +256,29 @@ PY
 
 test_swarm_stream_sse() {
   if [[ "$RETRIEVAL_AVAILABLE" -ne 1 ]]; then
-    note_skip "POST /agents/swarm (SSE) skipped: Qdrant unavailable"
+    note_skip "POST /agents/swarm/stream (SSE) skipped: Qdrant unavailable"
     return
   fi
   local headers="$TMP_DIR/swarm_stream.headers"
   local body="$TMP_DIR/swarm_stream.body"
   local code
-  if ! code="$(curl_with_retry "sse" "$BASE_URL/agents/swarm" "$body" "$headers" \
+  if ! code="$(curl_with_retry "sse" "$BASE_URL/agents/swarm/stream" "$body" "$headers" \
     "${AUTH_ARGS[@]}" \
     -H "Content-Type: application/json" \
-    -d '{"query":"test","limit":2,"swarm_mode":"B","mask_pii":false,"strict_incognito":false,"llm_provider":"ollama"}')"; then
-    note_fail "POST /agents/swarm transport error"
+    -d '{"query":"test","limit":2,"swarm_mode":"quality"}')"; then
+    note_fail "POST /agents/swarm/stream transport error"
     return
   fi
   if [[ "$code" != "200" ]]; then
-    note_fail "POST /agents/swarm -> HTTP $code"
+    note_fail "POST /agents/swarm/stream -> HTTP $code"
     return
   fi
   if ! grep -qi "content-type: text/event-stream" "$headers"; then
-    note_fail "POST /agents/swarm missing text/event-stream content-type"
+    note_fail "POST /agents/swarm/stream missing text/event-stream content-type"
     return
   fi
-  if ! grep -Eq '"event"\s*:\s*"(start|done|error)"|event:\s*(start|done|error)' "$body"; then
-    note_fail "POST /agents/swarm missing start/done/error event"
+  if ! grep -Eq '"event"\s*:\s*"(progress|init|worker_start|worker_done|synthesis_start|done|error)"|event:\s*(progress|init|worker_start|worker_done|synthesis_start|done|error)' "$body"; then
+    note_fail "POST /agents/swarm/stream missing SSE events"
     return
   fi
   if ! python3 - "$body" <<'PY'
@@ -323,13 +323,13 @@ PY
   then
     rc=$?
     if [[ "$rc" == "2" ]]; then
-      note_skip "POST /agents/swarm (SSE) skipped: Brak dokumentów"
+      note_skip "POST /agents/swarm/stream (SSE) skipped: Brak dokumentów"
       return
     fi
-    note_fail "POST /agents/swarm missing done.usage payload"
+    note_fail "POST /agents/swarm/stream missing done.usage payload"
     return
   fi
-  note_pass "POST /agents/swarm (SSE)"
+  note_pass "POST /agents/swarm/stream (SSE)"
 }
 
 test_get_context_validation() {

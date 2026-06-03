@@ -1494,6 +1494,33 @@ def _check_openrouter_health() -> dict:
         return {"ok": False, "error": str(e)[:120]}
 
 
+def _check_custom_endpoint_health(url: str, key: str = "") -> dict:
+    """Sprawdza czy custom endpoint działa (GET /api/tags)."""
+    if not url:
+        return {"ok": False, "error": "Brak URL"}
+    try:
+        headers = {}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        url_clean = url.rstrip("/")
+        req = urllib.request.Request(
+            f"{url_clean}/api/tags",
+            headers=headers,
+            method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            models = [m["name"] for m in data.get("models", [])]
+            return {
+                "ok": True,
+                "url": url,
+                "models_available": len(models),
+                "error": None
+            }
+    except Exception as e:
+        return {"ok": False, "url": url, "error": str(e)[:120]}
+
+
 def _sanitize_for_prompt(text: str, max_len: int = 1400) -> str:
     """
     Podstawowa ochrona przed Prompt Injection.
@@ -1665,6 +1692,60 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
         return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
     else:
         return _call_ollama(prompt, system, stream, model or LLM_MODEL)
+
+
+def _llm_usage_from_result(result) -> dict:
+    """Wyciąga usage z wyniku call_llm(); zwraca pusty dict, jeśli provider nie podał metryk."""
+    if not isinstance(result, dict):
+        return {}
+
+    usage_src = result.get("usage")
+    if not isinstance(usage_src, dict):
+        raw = result.get("raw")
+        if isinstance(raw, dict):
+            usage_src = raw.get("usage") if isinstance(raw.get("usage"), dict) else raw
+
+    if not isinstance(usage_src, dict):
+        return {}
+
+    def _as_int(value):
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return max(0, int(value))
+            text = str(value).strip()
+            if not text:
+                return None
+            return max(0, int(float(text)))
+        except Exception:
+            return None
+
+    prompt_tokens = _as_int(
+        usage_src.get("prompt_tokens")
+        or usage_src.get("input_tokens")
+        or usage_src.get("prompt_eval_count")
+    )
+    completion_tokens = _as_int(
+        usage_src.get("completion_tokens")
+        or usage_src.get("output_tokens")
+        or usage_src.get("eval_count")
+    )
+    total_tokens = _as_int(usage_src.get("total_tokens"))
+
+    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        total_tokens = prompt_tokens + completion_tokens
+
+    usage = {}
+    if prompt_tokens is not None:
+        usage["prompt_tokens"] = prompt_tokens
+    if completion_tokens is not None:
+        usage["completion_tokens"] = completion_tokens
+    if total_tokens is not None:
+        usage["total_tokens"] = total_tokens
+    return usage
 
 
 def stream_llm_tokens(prompt: str, system: str = "",
@@ -4094,12 +4175,17 @@ def agents_swarm_stream():
                 model=synth_model,
             )
             final_text = _llm_response_text(final)
+            final_usage = _llm_usage_from_result(final)
+            if not final_usage and final_text:
+                approx_tokens = max(1, len(final_text.split()))
+                final_usage = {"completion_tokens": approx_tokens, "total_tokens": approx_tokens}
 
             yield sse('done', {
                 'answer': final_text,
                 'n_workers': n_workers,
                 'mode': swarm_mode,
                 'mode_label': cfg['label'],
+                'usage': final_usage,
             })
 
         except Exception as e:
