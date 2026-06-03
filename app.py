@@ -1514,23 +1514,84 @@ def _gemini_generate_url(model: str, stream: bool = False) -> str:
     )
 
 
+def _is_gemini_base_url(url: str, provider_name: str = "") -> bool:
+    """Sprawdza czy URL/provider wskazuje na natywne API Gemini."""
+    haystack = f"{url or ''} {provider_name or ''}".lower()
+    return "generativelanguage.googleapis.com" in haystack or "gemini" in haystack
+
+
+def _gemini_request_with_retry(method: str, url: str, *, timeout: int = 60,
+                               max_retries: int = 3, initial_delay: float = 1.5,
+                               **kwargs):
+    """Wysyła request do Gemini z prostym backoff przy 429."""
+    delay = initial_delay
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.request(method, url, timeout=timeout, **kwargs)
+            if response.status_code == 429 and attempt < max_retries - 1:
+                retry_after = response.headers.get("Retry-After")
+                wait = delay
+                if retry_after:
+                    try:
+                        wait = max(0.5, float(retry_after))
+                    except Exception:
+                        pass
+                time.sleep(wait)
+                delay *= 2
+                continue
+
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as exc:
+            last_error = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 429 and attempt < max_retries - 1:
+                retry_after = getattr(exc.response, "headers", {}).get("Retry-After") if getattr(exc, "response", None) is not None else None
+                wait = delay
+                if retry_after:
+                    try:
+                        wait = max(0.5, float(retry_after))
+                    except Exception:
+                        pass
+                time.sleep(wait)
+                delay *= 2
+                continue
+            raise
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < max_retries - 1 and "429" in str(exc):
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
+
+    raise last_error if last_error else RuntimeError("Gemini request failed")
+
+
 def _check_gemini_health() -> dict:
     """Lekkie sprawdzenie Gemini API (lista modeli)."""
     if not GEMINI_API_KEY:
         return {"ok": False, "error": "Brak GEMINI_API_KEY"}
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-        with urllib.request.urlopen(url, timeout=8) as r:
-            data = json.loads(r.read().decode("utf-8"))
-            models = [m.get("name", "") for m in data.get("models", [])]
-            has_model = any(GEMINI_MODEL in m for m in models)
-            return {
-                "ok": True,
-                "models_available": len(models),
-                "has_configured_model": has_model,
-                "model": GEMINI_MODEL,
-                "error": None,
-            }
+        response = _gemini_request_with_retry("GET", url, timeout=8, max_retries=2)
+        data = response.json()
+        models = [m.get("name", "") for m in data.get("models", [])]
+        has_model = any(GEMINI_MODEL in m for m in models)
+        return {
+            "ok": True,
+            "models_available": len(models),
+            "has_configured_model": has_model,
+            "model": GEMINI_MODEL,
+            "error": None,
+        }
+    except requests.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 429:
+            return {"ok": False, "model": GEMINI_MODEL, "error": "Limit RPM Gemini (429)"}
+        return {"ok": False, "model": GEMINI_MODEL, "error": str(exc)[:120]}
     except Exception as e:
         return {"ok": False, "model": GEMINI_MODEL, "error": str(e)[:120]}
 
@@ -1581,7 +1642,7 @@ def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = Non
     if system:
         payload["systemInstruction"] = {"parts": [{"text": system}]}
     try:
-        with requests.post(url, json=payload, stream=True, timeout=600) as r:
+        with _gemini_request_with_retry("POST", url, json=payload, stream=True, timeout=600, max_retries=3) as r:
             if r.status_code >= 400:
                 err_body = (r.text or "")[:400]
                 yield f"[Błąd Gemini streaming: HTTP {r.status_code} — {err_body}]"
@@ -1616,7 +1677,8 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
         raise RuntimeError("Brak GEMINI_API_KEY w .env")
     effective_model = model or GEMINI_MODEL
     if stream:
-        return requests.post(
+        return _gemini_request_with_retry(
+            "POST",
             _gemini_generate_url(effective_model, stream=True),
             json={
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -1625,6 +1687,7 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
             },
             stream=True,
             timeout=600,
+            max_retries=3,
         )
     url = _gemini_generate_url(effective_model, stream=False)
     payload: dict = {
@@ -1633,8 +1696,7 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
     }
     if system:
         payload["systemInstruction"] = {"parts": [{"text": system}]}
-    r = requests.post(url, json=payload, timeout=300)
-    r.raise_for_status()
+    r = _gemini_request_with_retry("POST", url, json=payload, timeout=300, max_retries=3)
     data = r.json()
     text_parts = []
     for cand in data.get("candidates", []):
@@ -1697,6 +1759,20 @@ def _check_custom_endpoint_health(url: str, key: str = "") -> dict:
     if not url:
         return {"ok": False, "error": "Brak URL"}
     try:
+        if _is_gemini_base_url(url):
+            if not key:
+                return {"ok": False, "url": url, "error": "Brak klucza Gemini"}
+            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+            response = _gemini_request_with_retry("GET", gemini_url, timeout=8, max_retries=2)
+            data = response.json()
+            models = [m.get("name", "") for m in data.get("models", [])]
+            return {
+                "ok": True,
+                "url": url,
+                "models_available": len(models),
+                "error": None,
+            }
+
         headers = {}
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -5332,7 +5408,28 @@ def providers_test(entry_id: str):
         elif ptype in ("ollama_urls", "custom_endpoints"):
             url = entry.get("url", "").rstrip("/")
             key = entry.get("key", "")
-            if ptype == "custom_endpoints" and _custom_endpoint_is_openai(url):
+            if ptype == "custom_endpoints" and _is_gemini_base_url(url):
+                if not key:
+                    return jsonify({"success": False, "error": "Brak klucza", "ms": 0})
+                try:
+                    r = _gemini_request_with_retry(
+                        "GET",
+                        "https://generativelanguage.googleapis.com/v1beta/models?key=" + key,
+                        timeout=8,
+                        max_retries=2,
+                    )
+                    ms = int((time.time() - t0) * 1000)
+                    data = r.json()
+                    return jsonify({
+                        "success": True,
+                        "ms": ms,
+                        "status": r.status_code,
+                        "models_available": len(data.get("models", [])),
+                    })
+                except Exception as exc:
+                    ms = int((time.time() - t0) * 1000)
+                    return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
+            elif ptype == "custom_endpoints" and _custom_endpoint_is_openai(url):
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
@@ -7613,6 +7710,7 @@ def health():
             "provider": DEFAULT_LLM_PROVIDER,
             "gemini_configured": bool(GEMINI_API_KEY),
             "gemini_model": GEMINI_MODEL,
+            "gemini": _check_gemini_health(),
             "app_api_key_set": bool(APP_API_KEY),
         })
     except Exception as e:

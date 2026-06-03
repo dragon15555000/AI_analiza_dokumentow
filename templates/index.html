@@ -7287,23 +7287,31 @@ let auditLastReport = '';
 let auditLastMeta = null;
 
 function auditTabInit() {
-    fetch('/audit/info')
-        .then(r => r.json())
-        .then(d => {
+    Promise.all([
+        fetch('/audit/info').then(r => r.json()),
+        fetch('/health').then(r => r.json()),
+    ])
+        .then(([info, health]) => {
             const banner = document.getElementById('auditConfigBanner');
             const runBtn = document.getElementById('auditRunBtn');
-            if (!d.success || !d.gemini_configured) {
+            const geminiHealth = health && health.gemini ? health.gemini : null;
+            if (!info.success || !info.gemini_configured) {
                 banner.classList.remove('d-none');
                 banner.innerHTML = '⚠️ Brak <code>GEMINI_API_KEY</code> w .env. Dodaj klucz z '
                     + '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> '
                     + 'i zrestartuj aplikację (<code>./restart-app.sh --user</code>).';
                 if (runBtn) runBtn.disabled = true;
+            } else if (!geminiHealth || !geminiHealth.ok) {
+                banner.classList.remove('d-none');
+                banner.innerHTML = '⚠️ Gemini jest skonfigurowany, ale health-check zwraca błąd'
+                    + (geminiHealth && geminiHealth.error ? `: <code>${escapeHtml(geminiHealth.error)}</code>` : '.');
+                if (runBtn) runBtn.disabled = true;
             } else {
                 banner.classList.add('d-none');
                 if (runBtn) runBtn.disabled = false;
                 const sel = document.getElementById('auditModelSelect');
-                if (sel && d.default_model && [...sel.options].some(o => o.value === d.default_model)) {
-                    sel.value = d.default_model;
+                if (sel && info.default_model && [...sel.options].some(o => o.value === info.default_model)) {
+                    sel.value = info.default_model;
                 }
             }
         })
