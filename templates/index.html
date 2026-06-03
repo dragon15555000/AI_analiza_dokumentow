@@ -2166,20 +2166,35 @@ function executeSearch() {
         }
 
         function _stopTokenCounter(realUsage = null) {
+            if (!_tokStart) return;
             const secs = ((Date.now() - _tokStart) / 1000).toFixed(1);
             const tps  = secs > 0 ? Math.round(_tokCount / secs) : 0;
             document.getElementById('tokenSpeed').textContent = tps;
             const fin = document.getElementById('tokenFinalMsg');
 
             let finalCount = _tokCount;
-            if (realUsage && realUsage.completion_tokens) {
-                finalCount = realUsage.completion_tokens;
-                document.getElementById('tokenCount').textContent = finalCount.toLocaleString('pl');
-            }
+            let sessionCount = _tokCount;
+            if (realUsage) {
+                const prompt = Number(realUsage.prompt_tokens || 0);
+                const completion = Number(realUsage.completion_tokens || 0);
+                const total = Number(realUsage.total_tokens || 0);
+                if (completion > 0) finalCount = completion;
+                else if (total > 0) finalCount = total;
+                if (total > 0) sessionCount = total;
+                else if (completion > 0) sessionCount = completion;
 
-            fin.textContent = `Gotowe — ${finalCount.toLocaleString('pl')} tokenów w ${secs}s`;
+                const detailBits = [];
+                if (prompt > 0) detailBits.push(`${prompt.toLocaleString('pl')} prompt`);
+                if (completion > 0) detailBits.push(`${completion.toLocaleString('pl')} output`);
+                const tokenLabel = total > 0 ? total.toLocaleString('pl') : finalCount.toLocaleString('pl');
+                fin.textContent = `Gotowe — ${tokenLabel} tokenów${detailBits.length ? ` (${detailBits.join(' + ')})` : ''} w ${secs}s`;
+            } else {
+                fin.textContent = `Gotowe — ~${finalCount.toLocaleString('pl')} tokenów (szacunek) w ${secs}s`;
+            }
+            document.getElementById('tokenCount').textContent = finalCount.toLocaleString('pl');
             fin.style.display = 'inline';
-            updateSessionTokenCounter(finalCount);
+            updateSessionTokenCounter(sessionCount);
+            _tokStart = 0;
         }
 
         const readChunk = async () => {
@@ -2235,7 +2250,7 @@ function executeSearch() {
                             const body = document.getElementById('aiAnswerBody');
                             if (body) body.innerHTML = formatAiText(aiText, mode);
                         } else if (ev.ai_answer !== undefined || ev.done === true) {
-                            _stopTokenCounter();
+                            _stopTokenCounter(ev.usage || null);
                             const box = document.getElementById('aiStreamBox');
                             if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
                             if (resultsData) {
@@ -2251,10 +2266,12 @@ function executeSearch() {
                             btn.disabled = false; return;
                         } else if (ev.error) {
                             loader.classList.add('d-none');
-                            if (isLlmStreamError(ev.error)) {
-                                handleRateLimitError(ev.error, container, loader, btn, stopBtn, query, mode);
+                            if (isLlmStreamError(ev.error) || ev.kind === 'rate_limit') {
+                                handleRateLimitError(ev, container, loader, btn, stopBtn, query, mode);
                             } else {
-                                container.innerHTML = `<div class="alert alert-danger">${escapeHtml(ev.error)}</div>`;
+                                renderAppError(container, ev, {
+                                    onRetry: () => retryLastQuery(query, mode),
+                                });
                             }
                             btn.disabled = false; return;
                         }
@@ -2266,7 +2283,12 @@ function executeSearch() {
                 btn.disabled = false;
                 if (stopBtn) stopBtn.style.display = 'none';
                 if (err.name === 'AbortError') return; // użytkownik kliknął Stop
-                container.innerHTML = `<div class="alert alert-warning">Połączenie przerwane podczas wyszukiwania. Spróbuj ponownie.</div>`;
+                renderAppError(container, {
+                    error: 'Strumień SSE zerwany — serwer mógł się zrestartować lub połączenie wygasło.',
+                    kind: 'network',
+                    hint: 'Spróbuj ponownie. Przy długich zapytaniach użyj Ollama lokalnie.',
+                    retryable: true,
+                }, { onRetry: () => retryLastQuery(query, mode) });
                 console.warn('Search stream interrupted:', err);
             }
         };
@@ -2276,7 +2298,7 @@ function executeSearch() {
         loader.classList.add('d-none');
         if (stopBtn) stopBtn.style.display = 'none';
         btn.disabled = false;
-        container.innerHTML = `<div class="alert alert-danger">Błąd: ${escapeHtml(err)}</div>`;
+        renderAppError(container, err, { onRetry: () => retryLastQuery(query, mode) });
     });
 }
 
@@ -2388,7 +2410,10 @@ function compareDocuments() {
     })
     .then(d => {
         btn.disabled = false; st.classList.add('d-none');
-        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`; return; }
+        if (!d.success) {
+            renderAppError(res, d, { onRetry: () => compareDocuments() });
+            return;
+        }
         const comparisonHtml = escapeHtml(d.comparison || '').replace(/\n/g,'<br>');
         res.innerHTML = `
             <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
@@ -2403,7 +2428,11 @@ function compareDocuments() {
                 <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
             </div>`;
     })
-    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e.message || e)}</div>`; });
+    .catch(e => {
+        btn.disabled = false;
+        st.classList.add('d-none');
+        renderAppError(res, e, { onRetry: () => compareDocuments() });
+    });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
@@ -3004,6 +3033,74 @@ async function streamSSE(url, eventHandlers = {}) {
     };
 }
 
+/** Parsuje błąd API/SSE (string lub obiekt z kind/hint). */
+function parseApiError(err) {
+    if (!err) return { error: 'Nieznany błąd', kind: 'unknown', hint: '', retryable: false };
+    if (typeof err === 'string') {
+        const low = err.toLowerCase();
+        const kind = (low.includes('429') || low.includes('rate limit') || err.startsWith('[RATE_LIMIT]'))
+            ? 'rate_limit'
+            : (low.includes('embedding') || low.includes('ollama') && low.includes('embed'))
+                ? 'embedding'
+                : 'unknown';
+        return { error: err, kind, hint: '', retryable: kind === 'rate_limit' || kind === 'embedding' };
+    }
+    return {
+        error: err.error || err.msg || String(err),
+        kind: err.kind || 'unknown',
+        hint: err.hint || '',
+        retryable: !!err.retryable,
+        provider: err.provider || '',
+    };
+}
+
+const ERROR_KIND_LABELS = {
+    rate_limit: 'Limit API',
+    embedding: 'Embedding (Ollama)',
+    auth: 'Autoryzacja API',
+    qdrant: 'Qdrant',
+    network: 'Połączenie',
+    llm: 'Model LLM',
+    llm_empty: 'Pusta odpowiedź LLM',
+    no_results: 'Brak wyników',
+    validation: 'Walidacja',
+    unknown: 'Błąd',
+};
+
+/** Jednolity alert błędu z podpowiedzią i akcjami. */
+function renderAppError(container, err, options = {}) {
+    const p = parseApiError(err);
+    const label = ERROR_KIND_LABELS[p.kind] || ERROR_KIND_LABELS.unknown;
+    const isRate = p.kind === 'rate_limit' || isLlmStreamError(p.error);
+    const alertClass = isRate ? 'alert-warning' : (p.kind === 'no_results' ? 'alert-info' : 'alert-danger');
+    const icon = isRate ? '⚠️' : (p.kind === 'no_results' ? 'ℹ️' : '🚫');
+    const cleanErr = escapeHtml(p.error.replace(/^\[RATE_LIMIT\]|\[Błąd[^\]]*\]:?\s*/i, '').trim() || p.error);
+
+    let actions = '';
+    if (isRate || p.kind === 'auth' || p.kind === 'llm') {
+        actions += `<button type="button" onclick="quickSwitchToOllama()" class="btn btn-primary btn-sm">🔄 Przełącz na Ollama</button>`;
+    }
+    if (p.retryable && typeof options.onRetry === 'function') {
+        actions += `<button type="button" class="btn btn-outline-secondary btn-sm ms-1" data-retry-btn>Ponów</button>`;
+    }
+    if (actions) actions = `<div class="mt-2 d-flex gap-2 flex-wrap">${actions}</div>`;
+
+    const hintBlock = p.hint
+        ? `<div class="small mt-2 text-muted">${escapeHtml(p.hint)}</div>`
+        : (isRate ? `<div class="small mt-2 text-muted">Wskazówka: ustaw <code>OPENROUTER_FALLBACK_TO_OLLAMA=true</code> w <code>.env</code> dla automatycznego fallbacku.</div>` : '');
+
+    container.innerHTML = `
+        <div class="alert ${alertClass}">
+            <strong>${icon} ${escapeHtml(label)}</strong><br>
+            ${cleanErr}
+            ${hintBlock}
+            ${actions}
+        </div>`;
+
+    const retryBtn = container.querySelector('[data-retry-btn]');
+    if (retryBtn && options.onRetry) retryBtn.addEventListener('click', options.onRetry);
+}
+
 /** Bezpieczne parsowanie JSON — unika błędu "Unexpected token '<'" gdy serwer zwraca HTML. */
 async function fetchJson(url, options = {}) {
     const res = await fetch(url, options);
@@ -3011,12 +3108,19 @@ async function fetchJson(url, options = {}) {
     if (!res.ok) {
         const text = await res.text().catch(() => '');
         if (text.trim().startsWith('<!')) {
-            throw new Error(`Serwer zwrócił stronę HTML (HTTP ${res.status}) — endpoint może być niedostępny. Zrestartuj aplikację.`);
+            throw Object.assign(
+                new Error(`Serwer zwrócił stronę HTML (HTTP ${res.status}) — endpoint może być niedostępny. Zrestartuj aplikację.`),
+                { kind: 'network', retryable: true }
+            );
         }
         try {
-            const err = JSON.parse(text);
-            throw new Error(err.error || err.msg || `HTTP ${res.status}`);
+            const body = JSON.parse(text);
+            throw Object.assign(
+                new Error(body.error || body.msg || `HTTP ${res.status}`),
+                { kind: body.kind, hint: body.hint, retryable: body.retryable }
+            );
         } catch (e) {
+            if (e.message && !e.message.includes('JSON') && e.kind !== undefined) throw e;
             if (e.message && !e.message.includes('JSON')) throw e;
             throw new Error(text.slice(0, 200) || `HTTP ${res.status}`);
         }
@@ -3042,10 +3146,16 @@ async function streamSSEPost(url, body, eventHandlers = {}, signal = null) {
 
     if (!res.ok) {
         const text = await res.text().catch(() => '');
-        const msg = text.trim().startsWith('<!')
-            ? `Serwer zwrócił HTML (HTTP ${res.status}) — zrestartuj aplikację.`
-            : (text.slice(0, 180) || `HTTP ${res.status}`);
-        if (eventHandlers.error) eventHandlers.error({ error: msg, msg });
+        let payload = { error: text.slice(0, 180) || `HTTP ${res.status}` };
+        if (text.trim().startsWith('<!')) {
+            payload = { error: `Serwer zwrócił HTML (HTTP ${res.status}) — zrestartuj aplikację.`, kind: 'network', retryable: true };
+        } else {
+            try {
+                const body = JSON.parse(text);
+                payload = { error: body.error || body.msg || payload.error, kind: body.kind, hint: body.hint, retryable: body.retryable };
+            } catch (_) {}
+        }
+        if (eventHandlers.error) eventHandlers.error(payload);
         return;
     }
 
@@ -4651,16 +4761,14 @@ function runSwarm() {
         },
         error: (d) => {
             if (bar) bar.style.width = '0%';
-            if (status) status.textContent = d.error || 'Błąd roju.';
-            if (result) result.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error || 'Błąd roju')}</div>`;
+            if (status) status.textContent = parseApiError(d).error;
+            if (result) renderAppError(result, d, { onRetry: () => runSwarm() });
             if (btn) btn.disabled = false;
         }
-    }).then(() => {
-        if (btn) btn.disabled = false;
     }).catch(err => {
         if (btn) btn.disabled = false;
-        if (status) status.textContent = 'Błąd połączenia.';
-        if (result) result.innerHTML = `<div class="alert alert-danger">${escapeHtml(String(err.message || err))}</div>`;
+        if (status) status.textContent = parseApiError(err).error;
+        if (result) renderAppError(result, err, { onRetry: () => runSwarm() });
     });
 }
 
@@ -4878,36 +4986,14 @@ function isLlmStreamError(text) {
         || text.includes('Too Many');
 }
 
-function handleRateLimitError(errorText, container, loader, btn, stopBtn, lastQuery, lastMode) {
+function handleRateLimitError(errorInput, container, loader, btn, stopBtn, lastQuery, lastMode) {
+    if (typeof _stopTokenCounter === 'function') _stopTokenCounter();
     loader.classList.add('d-none');
     if (stopBtn) stopBtn.style.display = 'none';
     btn.disabled = false;
-
-    const isFallback = errorText.includes('[FALLBACK]');
-    const alertClass = isFallback ? 'alert-warning' : 'alert-danger';
-    const icon = isFallback ? '⚠️' : '🚫';
-
-    container.innerHTML = `
-        <div class="alert ${alertClass}">
-            <strong>${icon} Limit OpenRouter</strong><br>
-            ${escapeHtml(errorText.replace(/^\[RATE_LIMIT\]|\[Błąd OpenRouter streaming:\]/, '').trim()) || 'Zbyt wiele zapytań w krótkim czasie.'}
-            <div class="mt-2 d-flex gap-2 flex-wrap">
-                <button onclick="quickSwitchToOllama()" class="btn btn-primary btn-sm">
-                    🔄 Przełącz na Ollama (lokalny)
-                </button>
-                ${lastQuery ? `<button onclick="retryLastQuery(${JSON.stringify(lastQuery)}, ${JSON.stringify(lastMode || 'normal')})" class="btn btn-outline-secondary btn-sm">🔁 Spróbuj ponownie</button>` : ''}
-            </div>
-            <div class="small mt-2 text-muted">
-                Wskazówka: w <code>.env</code> ustaw <code>OPENROUTER_FALLBACK_TO_OLLAMA=true</code> żeby aplikacja automatycznie przełączała się na Ollama przy limicie.
-            </div>
-        </div>`;
-
-    // Opcjonalnie: automatycznie podświetl selektor providera
-    const providerSel = document.getElementById('llmProviderSelect');
-    if (providerSel) {
-        providerSel.style.boxShadow = '0 0 0 3px rgba(220, 53, 69, 0.4)';
-        setTimeout(() => { if (providerSel) providerSel.style.boxShadow = ''; }, 2200);
-    }
+    renderAppError(container, errorInput, {
+        onRetry: lastQuery ? () => retryLastQuery(lastQuery, lastMode || 'normal') : null,
+    });
 }
 
 function quickSwitchToOllama() {

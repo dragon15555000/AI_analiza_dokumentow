@@ -669,6 +669,58 @@ def _llm_response_text(result) -> str:
     return str(result).strip()
 
 
+def _safe_llm_int(value):
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+        text = str(value).strip()
+        if not text:
+            return None
+        return max(0, int(float(text)))
+    except Exception:
+        return None
+
+
+def _normalize_llm_usage(raw) -> dict:
+    """Ujednolica liczniki tokenów z różnych providerów i formatów odpowiedzi."""
+    if not isinstance(raw, dict):
+        return {}
+
+    usage_src = raw.get("usage")
+    if isinstance(usage_src, dict):
+        src = usage_src
+    else:
+        src = raw
+
+    prompt = _safe_llm_int(
+        src.get("prompt_tokens")
+        or src.get("input_tokens")
+        or src.get("prompt_eval_count")
+    )
+    completion = _safe_llm_int(
+        src.get("completion_tokens")
+        or src.get("output_tokens")
+        or src.get("eval_count")
+    )
+    total = _safe_llm_int(src.get("total_tokens"))
+
+    if total is None and prompt is not None and completion is not None:
+        total = prompt + completion
+
+    usage = {}
+    if prompt is not None:
+        usage["prompt_tokens"] = prompt
+    if completion is not None:
+        usage["completion_tokens"] = completion
+    if total is not None:
+        usage["total_tokens"] = total
+    return usage
+
+
 def _extract_first_json_value(raw_text: str):
     """Wyciąga pierwszy poprawny obiekt albo tablicę JSON z odpowiedzi LLM."""
     text = (raw_text or "").strip()
@@ -2203,6 +2255,58 @@ def _format_cloud_api_error(exc: Exception, label: str = "API") -> str:
     return str(exc)[:300]
 
 
+def _classify_api_error(exc: Exception, *, label: str = "Operacja") -> dict:
+    """Czytelny błąd API/SSE: error, kind, hint, retryable."""
+    if isinstance(exc, EmbeddingError):
+        msg = str(exc)[:300]
+        return {
+            "error": msg,
+            "kind": "embedding",
+            "hint": "Embedding wymaga Ollama (nomic-embed-text). Uruchom: ollama serve && ollama pull nomic-embed-text",
+            "retryable": True,
+        }
+
+    msg = _format_cloud_api_error(exc, label)[:300]
+    low = msg.lower()
+    kind = "unknown"
+    hint: str | None = None
+    retryable = False
+
+    if _is_rate_limit_error(exc):
+        kind = "rate_limit"
+        hint = "Poczekaj chwilę, przełącz provider na Ollama lub ustaw OPENROUTER_FALLBACK_TO_OLLAMA=true w .env"
+        retryable = True
+    elif _is_auth_error(exc):
+        kind = "auth"
+        hint = "Sprawdź klucz API w .env lub w panelu Konfiguracja LLM (⚙️)"
+    elif _is_transient_llm_error(exc):
+        kind = "network"
+        hint = "Problem połączenia z modelem — spróbuj ponownie za chwilę"
+        retryable = True
+    elif "qdrant" in low or ("6333" in low and "connection" in low):
+        kind = "qdrant"
+        hint = "Uruchom Qdrant (.local/qdrant) lub sprawdź QDRANT_URL / QDRANT_KEY w .env"
+        retryable = True
+    elif any(x in low for x in ("connection refused", "connection reset", "timed out", "timeout", "name or service not known")):
+        kind = "network"
+        hint = "Sprawdź czy Ollama, Qdrant i sieć działają (GET /health)"
+        retryable = True
+    elif "brak" in low and ("klucz" in low or "api_key" in low or "_api_key" in low):
+        kind = "auth"
+        hint = "Uzupełnij klucz providera w .env lub panelu Konfiguracja LLM"
+
+    return {"error": msg, "kind": kind, "hint": hint, "retryable": retryable}
+
+
+def _json_error_from_exc(exc: Exception, status: int = 500, **extra):
+    payload = {"success": False, **_classify_api_error(exc), **extra}
+    return jsonify(payload), status
+
+
+def _sse_error_from_exc(exc: Exception, **extra) -> dict:
+    return {**_classify_api_error(exc), **extra}
+
+
 def _check_groq_health() -> dict:
     """Sprawdza Groq: klucz + czy chat na domyślnym modelu nie jest zablokowany w org."""
     api_key = GROQ_KEY_POOL.peek_primary() or GROQ_API_KEY
@@ -2537,7 +2641,8 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
 def stream_llm_tokens(prompt: str, system: str = "",
                       provider: str | None = None, model: str | None = None,
                       max_tokens: int = 2000, temperature: float = 0.2,
-                      task: str | None = None):
+                      task: str | None = None,
+                      usage_sink: dict | None = None):
     """
     Generator zwracający kolejne tokeny tekstu z LLM (działa dla Ollama i OpenRouter).
     Używany w streamingowych endpointach.
@@ -2595,6 +2700,9 @@ def stream_llm_tokens(prompt: str, system: str = "",
                                 choice = chunk.get("choices", [{}])[0]
                                 delta = choice.get("delta", {})
                                 token = delta.get("content", "")
+                                usage = _normalize_llm_usage(chunk)
+                                if usage and usage_sink is not None:
+                                    usage_sink["usage"] = usage
                                 if token:
                                     yield token
                                 if choice.get("finish_reason"):
@@ -2696,6 +2804,9 @@ def stream_llm_tokens(prompt: str, system: str = "",
                             try:
                                 data = json.loads(line)
                                 tok = data.get("response", "")
+                                usage = _normalize_llm_usage(data)
+                                if usage and usage_sink is not None:
+                                    usage_sink["usage"] = usage
                                 if tok:
                                     yield tok
                                 if data.get("done", False):
@@ -2739,6 +2850,9 @@ def stream_llm_tokens(prompt: str, system: str = "",
                         try:
                             data = json.loads(line)
                             token = data.get("response", "")
+                            usage = _normalize_llm_usage(data)
+                            if usage and usage_sink is not None:
+                                usage_sink["usage"] = usage
                             if token:
                                 yield token
                             if data.get("done", False):
@@ -2780,7 +2894,8 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | r
                 r = requests.post(url, json=payload, timeout=180)
                 r.raise_for_status()
                 OLLAMA_URL_POOL.mark_success(base)
-                return r.json()
+                data = r.json()
+                return {"response": _llm_response_text(data), "raw": data, "usage": _normalize_llm_usage(data)}
             except Exception as e:
                 last_error = e
                 if _is_transient_llm_error(e) and attempt < 2:
@@ -2834,7 +2949,7 @@ def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, mo
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if pool:
                 pool.mark_success(current_key)
-            return {"response": content, "raw": data}
+            return {"response": content, "raw": data, "usage": _normalize_llm_usage(data)}
         except Exception as e:
             last_error = e
             if _should_rotate_pool(e) and pool and pool.count() > 1:
@@ -4562,6 +4677,7 @@ def hybrid_stream():
 
             # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
             full_answer = ""
+            usage_meta = {}
 
             try:
                 for token in stream_llm_tokens(
@@ -4570,6 +4686,7 @@ def hybrid_stream():
                     provider=llm_provider,
                     model=openrouter_model,
                     task="search",
+                    usage_sink=usage_meta,
                 ):
                     if isinstance(token, str) and token.startswith("[FALLBACK]"):
                         logger.info("LLM fallback (hybrid): %s", token[:120])
@@ -4584,7 +4701,10 @@ def hybrid_stream():
                 logger.warning(f"LLM stream error: {e}")
                 yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
 
-            yield sse("done", {"ai_answer": full_answer})
+            yield sse("done", {
+                "ai_answer": full_answer,
+                "usage": usage_meta.get("usage"),
+            })
 
         except Exception as e:
             yield sse("error", {"error": str(e)})
@@ -4619,7 +4739,7 @@ def search_stream():
                     client, query_text, limit, file_filter, mode
                 )
             except EmbeddingError as e:
-                yield sse("error", {"error": str(e)})
+                yield sse("error", _sse_error_from_exc(e))
                 return
 
             # Wyślij wyniki od razu
@@ -4638,6 +4758,7 @@ def search_stream():
             full_answer = ""
             openrouter_model = _model_from_request(data, data.get("llm_provider"))
             resolved_prov = get_llm_provider(llm_provider, task=fleet_task)
+            usage_meta = {}
 
             try:
                 for token in stream_llm_tokens(
@@ -4646,29 +4767,40 @@ def search_stream():
                     provider=llm_provider,
                     model=openrouter_model,
                     task=fleet_task,
+                    usage_sink=usage_meta,
                 ):
                     if isinstance(token, str) and token.startswith("[FALLBACK]"):
                         logger.info("LLM fallback (search): %s", token[:120])
                         continue
                     if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
-                        # Czysty błąd zamiast zaśmiecania odpowiedzi
                         logger.warning(f"LLM stream error (search): {token[:120]}")
-                        yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
+                        err_payload = {"error": token, "provider": get_llm_provider(llm_provider)}
+                        if token.startswith("[RATE_LIMIT]"):
+                            err_payload.update({
+                                "kind": "rate_limit",
+                                "hint": "Przełącz na Ollama lub poczekaj przed ponowną próbą.",
+                                "retryable": True,
+                            })
+                        elif token.startswith("[Błąd"):
+                            err_payload.update({"kind": "llm", "retryable": True})
+                        yield sse("error", err_payload)
                         return
                     full_answer += token
                     yield sse("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error w search_stream: {e}")
-                yield sse("error", {"error": "Błąd streamingu modelu językowego."})
+                yield sse("error", _sse_error_from_exc(e, provider=get_llm_provider(llm_provider)))
 
             yield sse("done", {
                 "ai_answer": full_answer,
                 "llm_provider_used": resolved_prov,
                 "fleet_auto_route": FLEET_AUTO_ROUTE,
+                "usage": usage_meta.get("usage"),
             })
 
         except Exception as e:
-            yield sse("error", {"error": str(e)})
+            logger.exception("search_stream")
+            yield sse("error", _sse_error_from_exc(e))
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -5299,6 +5431,15 @@ def compare_documents():
             temperature=0.2,
         )
         comparison = _llm_response_text(result)
+        if not (comparison or "").strip():
+            return jsonify({
+                "success": False,
+                "error": "Model zwrócił pustą odpowiedź — spróbuj ponownie lub zmień provider.",
+                "kind": "llm_empty",
+                "hint": "Przełącz na inny model (Ollama/OpenRouter) lub skróć dokumenty.",
+                "retryable": True,
+            }), 502
+
         return jsonify({
             "success": True,
             "file_a": file_a,
@@ -5308,9 +5449,11 @@ def compare_documents():
             "focus": focus,
             "comparison": comparison,
         })
+    except EmbeddingError as e:
+        return _json_error_from_exc(e, 503)
     except Exception as e:
         logger.exception("compare_documents")
-        return jsonify({"success": False, "error": str(e)[:300]}), 500
+        return _json_error_from_exc(e, 500)
 
 @app.route('/export/metadata_report', methods=['POST'])
 def export_metadata_report_docx():
@@ -6372,11 +6515,16 @@ def agents_swarm():
                     client, query, search_limit, file_filter, "detective"
                 )
             except EmbeddingError as e:
-                yield sse("error", {"error": str(e)})
+                yield sse("error", _sse_error_from_exc(e))
                 return
 
             if not raw_contexts:
-                yield sse("error", {"error": "Brak dokumentów do analizy"})
+                yield sse("error", {
+                    "error": "Brak dokumentów do analizy — zaimportuj pliki lub zmień zapytanie.",
+                    "kind": "no_results",
+                    "hint": "Sprawdź aktywną kolekcję i czy zapytanie pasuje do zindeksowanych dokumentów.",
+                    "retryable": False,
+                })
                 return
 
             groups = _swarm_split_contexts(
@@ -6386,7 +6534,11 @@ def agents_swarm():
                 config["shuffle_chunks"],
             )
             if not groups:
-                yield sse("error", {"error": "Nie udało się podzielić dokumentów na grupy"})
+                yield sse("error", {
+                    "error": "Nie udało się podzielić dokumentów na grupy workerów",
+                    "kind": "validation",
+                    "retryable": False,
+                })
                 return
 
             pii_stats: dict[str, int] = {}
@@ -6470,12 +6622,15 @@ def agents_swarm():
                             "summary": f"[Błąd workera: {str(e)[:200]}]",
                             "chunks": len(group),
                         })
+                        werr = _classify_api_error(e, label="Worker roju")
                         yield sse("worker", {
                             "worker_index": idx,
                             "workers": len(groups),
                             "model": models[0] if models else "",
                             "chunks": len(group),
-                            "error": str(e)[:200],
+                            "error": werr["error"],
+                            "kind": werr.get("kind"),
+                            "hint": werr.get("hint"),
                         })
 
             worker_outputs.sort(key=lambda x: x["worker_index"])
@@ -6517,7 +6672,7 @@ def agents_swarm():
             })
         except Exception as e:
             logger.exception("agents_swarm error")
-            yield sse("error", {"error": str(e)})
+            yield sse("error", _sse_error_from_exc(e))
 
     return Response(
         stream_with_context(generate()),
