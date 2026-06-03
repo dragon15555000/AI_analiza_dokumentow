@@ -219,6 +219,38 @@ test_search_stream_sse() {
     note_fail "POST /search/stream missing done/error event"
     return
   fi
+  if ! python3 - "$body" <<'PY'
+import json, sys
+from pathlib import Path
+
+raw = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+done_payload = None
+current_event = None
+for line in raw.splitlines():
+    if line.startswith("event: "):
+        current_event = line[7:].strip()
+    elif line.startswith("data: ") and current_event == "done":
+        try:
+            done_payload = json.loads(line[6:])
+        except Exception:
+            done_payload = None
+        break
+
+if not isinstance(done_payload, dict):
+    sys.exit(1)
+
+usage = done_payload.get("usage")
+if not isinstance(usage, dict):
+    sys.exit(1)
+
+if any(k in usage for k in ("prompt_tokens", "completion_tokens", "total_tokens")):
+    sys.exit(0)
+sys.exit(1)
+PY
+  then
+    note_fail "POST /search/stream missing done.usage payload"
+    return
+  fi
   note_pass "POST /search/stream (SSE)"
 }
 
