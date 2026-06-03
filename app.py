@@ -758,6 +758,17 @@ def _pick_ollama_url() -> str:
     active = [e for e in pool.get("ollama_urls", []) if e.get("active") and e.get("url")]
     return active[0]["url"] if active else OLLAMA_URL
 
+
+def _ollama_url_for_provider(provider: str | None = None) -> str:
+    """Adres Ollama: domyślny, z puli (ollama:<id>) lub pierwszy aktywny z puli."""
+    if provider and str(provider).lower().startswith("ollama:"):
+        entry_id = str(provider).split(":", 1)[1]
+        pool = _load_provider_pool()
+        for entry in pool.get("ollama_urls", []):
+            if entry.get("id") == entry_id and entry.get("active", True) and entry.get("url"):
+                return entry["url"]
+    return _pick_ollama_url()
+
 # ---- Custom Endpoint Health & Stats ----
 _CUSTOM_STATS_FILE = Path(__file__).parent / ".llm_custom_endpoint_stats.json"
 _custom_stats_lock = threading.Lock()
@@ -1467,11 +1478,18 @@ def save_llm_config():
 # ============================================================
 
 def get_llm_provider(request_provider: str | None = None) -> str:
-    """Zwraca aktywny provider: 'ollama' lub 'openrouter'."""
+    """Zwraca aktywny provider: 'ollama', 'openrouter', 'ollama:<id>' lub ID custom endpointu."""
     if request_provider:
-        p = request_provider.lower()
-        if p in ("ollama", "openrouter"):
-            return p
+        p = request_provider.strip()
+        pl = p.lower()
+        if pl == "openrouter":
+            return "openrouter"
+        if pl == "ollama" or pl.startswith("ollama:"):
+            return "ollama"
+        pool = _load_provider_pool()
+        for endpoint in pool.get("custom_endpoints", []):
+            if endpoint.get("id") == p and endpoint.get("active", True):
+                return p
     return DEFAULT_LLM_PROVIDER
 
 
@@ -1706,6 +1724,223 @@ def _get_retry_after(exc: Exception) -> float | None:
     return None
 
 
+def _is_openrouter_no_endpoints_error(exc: Exception) -> bool:
+    """Sprawdza czy OpenRouter zwrócił 404 'No endpoints found' dla modelu."""
+    if exc is None:
+        return False
+
+    try:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            status = getattr(response, "status_code", None)
+            if status != 404:
+                return False
+            chunks = [str(exc)]
+            try:
+                chunks.append(response.text or "")
+            except Exception:
+                pass
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    chunks.append(json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                pass
+            text = " ".join(chunks).lower()
+            return "no endpoints found" in text
+    except Exception:
+        pass
+
+    return "no endpoints found" in str(exc).lower()
+
+
+def _openrouter_model_candidates(primary_model: str | None) -> list[str]:
+    """Zwraca listę modeli OpenRouter do wypróbowania w kolejności preferencji."""
+    primary = (primary_model or OPENROUTER_MODEL or "").strip()
+    candidates: list[str] = []
+    for candidate in (primary, OPENROUTER_MODEL, OPENROUTER_MODEL_VERIFY):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _call_openrouter_once(prompt: str, system: str, model: str,
+                          max_tokens: int, temperature: float) -> dict:
+    """Jedna próba non-stream dla OpenRouter bez fallbacków modelu."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {_pick_openrouter_key()}",
+        "HTTP-Referer": "http://localhost",
+        "X-Title": "AI Analiza Dokumentów"
+    }
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+
+    last_error = None
+    for attempt in range(OPENROUTER_MAX_RETRIES):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=180)
+            r.raise_for_status()
+            data = r.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"response": content, "raw": data}
+        except Exception as e:
+            last_error = e
+            if _is_openrouter_no_endpoints_error(e):
+                raise
+            if _is_rate_limit_error(e):
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = min(wait, 12.0)
+                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    time.sleep(wait)
+                continue
+            if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
+                try:
+                    status = e.response.status_code
+                except Exception:
+                    status = None
+                if status == 400:
+                    logger.warning("OpenRouter 400 → fallback do Ollama")
+                    result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+                    if isinstance(result, dict):
+                        return result
+                    return {"response": str(result)}
+            break
+
+    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
+        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+        if isinstance(result, dict):
+            return result
+        return {"response": str(result)}
+
+    raise last_error if last_error else RuntimeError("OpenRouter call failed")
+
+
+def _stream_openrouter_once(prompt: str, system: str, model: str,
+                            max_tokens: int, temperature: float,
+                            meta: dict | None = None):
+    """Jedna próba stream dla OpenRouter bez fallbacków modelu."""
+    if isinstance(meta, dict):
+        meta.setdefault("requested_provider", "openrouter")
+        meta.setdefault("requested_model", model)
+        meta["provider_used"] = "openrouter"
+        meta["model_used"] = model
+        meta["fallback_used"] = False
+        meta["fallback_reason"] = None
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {_pick_openrouter_key()}",
+        "Content-Type": "application/json"
+    }
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+
+    last_error = None
+    for attempt in range(OPENROUTER_MAX_RETRIES):
+        try:
+            with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    line = line.decode("utf-8", errors="replace")
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data_str)
+                            choice = chunk.get("choices", [{}])[0]
+                            delta = choice.get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                yield token
+                            if choice.get("finish_reason"):
+                                return
+                        except Exception:
+                            continue
+                return
+        except Exception as e:
+            last_error = e
+            if _is_openrouter_no_endpoints_error(e):
+                raise
+            if _is_rate_limit_error(e):
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = min(wait, 12.0)
+                    logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    time.sleep(wait)
+                continue
+            break
+
+    err_msg = str(last_error) if last_error else "nieznany błąd"
+
+    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+        if isinstance(meta, dict):
+            meta["provider_used"] = "ollama"
+            meta["model_used"] = LLM_MODEL
+            meta["fallback_used"] = True
+            meta["fallback_reason"] = "openrouter_rate_limit"
+        ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
+        ollama_payload = {
+            "model": LLM_MODEL,
+            "prompt": prompt,
+            "system": system,
+            "stream": True,
+            "options": {"temperature": temperature if temperature is not None else 0.2}
+        }
+        try:
+            with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        tok = data.get("response", "")
+                        if tok:
+                            yield tok
+                        if data.get("done", False):
+                            return
+                    except Exception:
+                        continue
+            return
+        except Exception as fb_err:
+            yield f"[Błąd fallback na Ollama: {fb_err}]"
+            return
+
+    if _is_rate_limit_error(last_error):
+        friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
+        yield friendly
+    else:
+        yield f"[Błąd OpenRouter streaming: {err_msg}]"
+
+
 def call_llm(prompt: str, system: str = "", stream: bool = False,
              provider: str | None = None, model: str | None = None,
              max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
@@ -1718,7 +1953,7 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
     custom_endpoint = None
     if provider:
         for endpoint in pool.get("custom_endpoints", []):
-            if endpoint.get("id") == provider:
+            if endpoint.get("id") == provider and endpoint.get("active", True):
                 custom_endpoint = endpoint
                 break
 
@@ -1726,7 +1961,8 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
         return _call_custom_endpoint(
             custom_endpoint.get("url", ""),
             custom_endpoint.get("key", ""),
-            prompt, system, stream, model or ""
+            prompt, system, stream, model or LLM_MODEL,
+            max_tokens, temperature,
         )
 
     prov = get_llm_provider(provider)
@@ -1736,7 +1972,7 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
             raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
         return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
     else:
-        return _call_ollama(prompt, system, stream, model or LLM_MODEL)
+        return _call_ollama(prompt, system, stream, model or LLM_MODEL, provider=provider)
 
 
 def _llm_usage_from_result(result) -> dict:
@@ -1795,7 +2031,8 @@ def _llm_usage_from_result(result) -> dict:
 
 def stream_llm_tokens(prompt: str, system: str = "",
                       provider: str | None = None, model: str | None = None,
-                      max_tokens: int = 2000, temperature: float = 0.2):
+                      max_tokens: int = 2000, temperature: float = 0.2,
+                      meta: dict | None = None):
     """
     Generator zwracający kolejne tokeny tekstu z LLM (Ollama, OpenRouter, custom endpoint).
     Używany w streamingowych endpointach.
@@ -1805,18 +2042,28 @@ def stream_llm_tokens(prompt: str, system: str = "",
     custom_endpoint = None
     if provider:
         for endpoint in pool.get("custom_endpoints", []):
-            if endpoint.get("id") == provider:
+            if endpoint.get("id") == provider and endpoint.get("active", True):
                 custom_endpoint = endpoint
                 break
 
     if custom_endpoint:
-        url = custom_endpoint.get("url", "").rstrip("/") + "/api/generate"
+        url_base = custom_endpoint.get("url", "")
+        if _custom_endpoint_is_openai(url_base):
+            yield from _stream_openai_compatible(
+                url_base,
+                custom_endpoint.get("key", ""),
+                prompt, system,
+                model or LLM_MODEL,
+                max_tokens, temperature,
+            )
+            return
+        url = url_base.rstrip("/") + "/api/generate"
         key = custom_endpoint.get("key", "")
         headers = {}
         if key:
             headers["Authorization"] = f"Bearer {key}"
         payload = {
-            "model": model or "default",
+            "model": model or LLM_MODEL,
             "prompt": prompt,
             "system": system,
             "stream": True,
@@ -1848,71 +2095,62 @@ def stream_llm_tokens(prompt: str, system: str = "",
         if not OPENROUTER_API_KEY:
             yield "Błąd: Brak klucza OPENROUTER_API_KEY"
             return
-
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {_pick_openrouter_key()}",
-            "Content-Type": "application/json"
-        }
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": effective_model,
-            "messages": messages,
-            "stream": True,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-
         last_error = None
-        for attempt in range(OPENROUTER_MAX_RETRIES):
+        for candidate in _openrouter_model_candidates(effective_model):
             try:
-                with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
+                yield from _stream_openrouter_once(
+                    prompt, system, candidate, max_tokens, temperature, meta=meta
+                )
+                if isinstance(meta, dict) and meta.get("provider_used") == "openrouter":
+                    meta["model_used"] = meta.get("model_used") or candidate
+                    meta["fallback_used"] = bool(candidate != effective_model)
+                    if candidate != effective_model and meta.get("fallback_reason") is None:
+                        meta["fallback_reason"] = "openrouter_model_unavailable"
+                return
+            except Exception as e:
+                last_error = e
+                if _is_openrouter_no_endpoints_error(e):
+                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                    continue
+                raise
+
+        if _is_openrouter_no_endpoints_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            logger.info("OpenRouter no-endpoints → fallback do Ollama")
+            if isinstance(meta, dict):
+                meta["provider_used"] = "ollama"
+                meta["model_used"] = LLM_MODEL
+                meta["fallback_used"] = True
+                meta["fallback_reason"] = "openrouter_no_endpoints"
+            ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
+            ollama_payload = {
+                "model": LLM_MODEL,
+                "prompt": prompt,
+                "system": system,
+                "stream": True,
+                "options": {"temperature": temperature if temperature is not None else 0.2}
+            }
+            try:
+                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
                     r.raise_for_status()
                     for line in r.iter_lines():
                         if not line:
                             continue
-                        line = line.decode("utf-8", errors="replace")
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
+                        try:
+                            data = json.loads(line)
+                            tok = data.get("response", "")
+                            if tok:
+                                yield tok
+                            if data.get("done", False):
                                 return
-                            try:
-                                chunk = json.loads(data_str)
-                                choice = chunk.get("choices", [{}])[0]
-                                delta = choice.get("delta", {})
-                                token = delta.get("content", "")
-                                if token:
-                                    yield token
-                                if choice.get("finish_reason"):
-                                    return
-                            except Exception:
-                                continue
-                return  # sukces
-            except Exception as e:
-                last_error = e
-                if _is_rate_limit_error(e):
-                    if attempt < OPENROUTER_MAX_RETRIES - 1:
-                        wait = _get_retry_after(e) or (1.5 ** attempt)
-                        wait = min(wait, 12.0)
-                        logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
-                        time.sleep(wait)
-                    continue
-                else:
-                    # Inny błąd — nie retry'ujemy
-                    break
+                        except Exception:
+                            continue
+                return
+            except Exception as fb_err:
+                yield f"[Błąd fallback na Ollama: {fb_err}]"
+                return
 
-        # Po wyczerpaniu prób
-        err_msg = str(last_error) if last_error else "nieznany błąd"
-
-        # Opcjonalny automatyczny fallback na Ollama przy rate limitach OpenRouter
         if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
             logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
-            # Przepuść przez ścieżkę Ollama
             ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
             ollama_payload = {
                 "model": LLM_MODEL,
@@ -1944,12 +2182,12 @@ def stream_llm_tokens(prompt: str, system: str = "",
         if _is_rate_limit_error(last_error):
             friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
             yield friendly
-        else:
-            yield f"[Błąd OpenRouter streaming: {err_msg}]"
+        elif last_error is not None:
+            yield f"[Błąd OpenRouter streaming: {last_error}]"
 
     else:
         # Ollama streaming
-        url = _pick_ollama_url().rstrip("/") + "/api/generate"
+        url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
         payload = {
             "model": effective_model,
             "prompt": prompt,
@@ -1976,8 +2214,9 @@ def stream_llm_tokens(prompt: str, system: str = "",
             yield f"[Błąd Ollama streaming: {str(e)}]"
 
 
-def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
-    url = _pick_ollama_url().rstrip("/") + "/api/generate"
+def _call_ollama(prompt: str, system: str, stream: bool, model: str,
+                 provider: str | None = None) -> dict | requests.Response:
+    url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -1993,15 +2232,103 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | r
         return r.json()
 
 
+def _custom_endpoint_is_openai(url: str) -> bool:
+    """Czy URL wskazuje na OpenAI-compatible API (Groq, LM Studio, itp.)."""
+    u = (url or "").lower().rstrip("/")
+    return "openai/v1" in u or u.endswith("/v1")
+
+
+def _openai_chat_completions_url(base_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/chat/completions"
+    return base + "/chat/completions"
+
+
+def _stream_openai_compatible(url: str, key: str, prompt: str, system: str,
+                              model: str, max_tokens: int = 2000, temperature: float = 0.2):
+    """Generator tokenów z OpenAI-compatible chat/completions (SSE)."""
+    chat_url = _openai_chat_completions_url(url)
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload = {
+        "model": model or LLM_MODEL,
+        "messages": messages,
+        "stream": True,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    try:
+        with requests.post(chat_url, headers=headers, json=payload, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                line = line.decode("utf-8", errors="replace")
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    return
+                try:
+                    chunk = json.loads(data_str)
+                    choice = chunk.get("choices", [{}])[0]
+                    delta = choice.get("delta", {})
+                    token = delta.get("content", "")
+                    if token:
+                        yield token
+                    if choice.get("finish_reason"):
+                        return
+                except Exception:
+                    continue
+    except Exception as e:
+        yield f"[Błąd OpenAI-compatible streaming: {str(e)}]"
+
+
+def _call_openai_compatible(url: str, key: str, prompt: str, system: str, stream: bool,
+                            model: str, max_tokens: int = 2000, temperature: float = 0.2):
+    chat_url = _openai_chat_completions_url(url)
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload = {
+        "model": model or LLM_MODEL,
+        "messages": messages,
+        "stream": stream,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if stream:
+        return requests.post(chat_url, headers=headers, json=payload, stream=True, timeout=300)
+    r = requests.post(chat_url, headers=headers, json=payload, timeout=180)
+    r.raise_for_status()
+    return r.json()
+
+
 def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: bool,
-                          model: str = "") -> dict | requests.Response:
-    """Calls custom endpoint (assumes Ollama-compatible /api/generate)."""
+                          model: str = "", max_tokens: int = 2000, temperature: float = 0.2):
+    """Custom endpoint: OpenAI-compatible (/v1/chat/completions) lub Ollama (/api/generate)."""
+    if _custom_endpoint_is_openai(url):
+        return _call_openai_compatible(
+            url, key, prompt, system, stream, model or LLM_MODEL, max_tokens, temperature
+        )
     url_clean = url.rstrip("/") + "/api/generate"
     headers = {}
     if key:
         headers["Authorization"] = f"Bearer {key}"
     payload = {
-        "model": model or "default",
+        "model": model or LLM_MODEL,
         "prompt": prompt,
         "system": system,
         "stream": stream,
@@ -2017,65 +2344,86 @@ def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: 
 
 def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                      max_tokens: int, temperature: float) -> dict | requests.Response:
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {_pick_openrouter_key()}",
-        "HTTP-Referer": "http://localhost",  # opcjonalnie
-        "X-Title": "AI Analiza Dokumentów"
-    }
-
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "max_tokens": max_tokens,
-        "temperature": temperature
-    }
+    candidates = _openrouter_model_candidates(model)
 
     if stream:
-        return requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
+        # Zachowujemy zgodność API: zwracamy surowy Response dla pierwszego działającego modelu.
+        last_error = None
+        for candidate in candidates:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {_pick_openrouter_key()}",
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "AI Analiza Dokumentów"
+            }
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+            payload = {
+                "model": candidate,
+                "messages": messages,
+                "stream": True,
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
+            try:
+                r = requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
+                if r.status_code == 404 and "no endpoints found" in (r.text or "").lower():
+                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                    continue
+                r.raise_for_status()
+                return r
+            except Exception as e:
+                last_error = e
+                if _is_openrouter_no_endpoints_error(e):
+                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                    continue
+                raise
 
-    # Non-streaming with retry on 429
+        if _is_openrouter_no_endpoints_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            logger.info("OpenRouter no-endpoints → fallback do Ollama")
+            return _call_ollama(prompt, system, stream=True, model=LLM_MODEL)
+
+        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            return _call_ollama(prompt, system, stream=True, model=LLM_MODEL)
+        raise last_error if last_error else RuntimeError("OpenRouter call failed")
+
     last_error = None
-    for attempt in range(OPENROUTER_MAX_RETRIES):
+    for candidate in candidates:
         try:
-            r = requests.post(url, headers=headers, json=payload, timeout=180)
-            r.raise_for_status()
-            data = r.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return {"response": content, "raw": data}
+            return _call_openrouter_once(prompt, system, candidate, max_tokens, temperature)
         except Exception as e:
             last_error = e
-            if _is_rate_limit_error(e):
-                if attempt < OPENROUTER_MAX_RETRIES - 1:
-                    wait = _get_retry_after(e) or (1.5 ** attempt)
-                    wait = min(wait, 12.0)
-                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
-                    time.sleep(wait)
+            if _is_openrouter_no_endpoints_error(e):
+                logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
                 continue
-            else:
-                # 400 (zły model/ payload) — opcjonalny fallback na Ollama
-                if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
-                    try:
-                        status = e.response.status_code
-                    except Exception:
-                        status = None
-                    if status == 400:
-                        logger.warning("OpenRouter 400 → fallback do Ollama")
-                        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-                        if isinstance(result, dict):
-                            return result
-                        return {"response": str(result)}
-                break
 
-    # Final failure — optional fallback na Ollama (np. generowanie SQL / synteza)
+            if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
+                try:
+                    status = e.response.status_code
+                except Exception:
+                    status = None
+                if status == 400:
+                    logger.warning("OpenRouter 400 → fallback do Ollama")
+                    result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+                    if isinstance(result, dict):
+                        return result
+                    return {"response": str(result)}
+            if _is_rate_limit_error(e):
+                # 429 nadal obsługujemy na poziomie wywołania modelu; tutaj nie przełączamy modeli.
+                break
+            raise
+
     if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
         logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
+        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
+        if isinstance(result, dict):
+            return result
+        return {"response": str(result)}
+
+    if _is_openrouter_no_endpoints_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        logger.info("OpenRouter no-endpoints (non-stream) → fallback do Ollama")
         result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
         if isinstance(result, dict):
             return result
@@ -3775,13 +4123,15 @@ def hybrid_stream():
 
             # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
             full_answer = ""
+            llm_meta = {}
 
             try:
                 for token in stream_llm_tokens(
                     prompt=prompt,
                     system=system,
                     provider=llm_provider,
-                    model=openrouter_model
+                    model=openrouter_model,
+                    meta=llm_meta,
                 ):
                     if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         logger.warning(f"LLM stream error (hybrid): {token[:120]}")
@@ -3793,7 +4143,14 @@ def hybrid_stream():
                 logger.warning(f"LLM stream error: {e}")
                 yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
 
-            yield sse("done", {"ai_answer": full_answer})
+            done_payload = {"ai_answer": full_answer}
+            if llm_meta:
+                done_payload["llm_provider_used"] = llm_meta.get("provider_used")
+                done_payload["llm_model_used"] = llm_meta.get("model_used")
+                done_payload["llm_fallback_used"] = llm_meta.get("fallback_used", False)
+                if llm_meta.get("fallback_reason"):
+                    done_payload["llm_fallback_reason"] = llm_meta.get("fallback_reason")
+            yield sse("done", done_payload)
 
         except Exception as e:
             yield sse("error", {"error": str(e)})
@@ -3845,13 +4202,15 @@ def search_stream():
             # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
             openrouter_model = data.get("openrouter_model")
+            llm_meta = {}
 
             try:
                 for token in stream_llm_tokens(
                     prompt=prompt,
                     system=system,
                     provider=llm_provider,
-                    model=openrouter_model
+                    model=openrouter_model,
+                    meta=llm_meta,
                 ):
                     if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         # Czysty błąd zamiast zaśmiecania odpowiedzi
@@ -3864,7 +4223,14 @@ def search_stream():
                 logger.warning(f"LLM stream error w search_stream: {e}")
                 yield sse("error", {"error": "Błąd streamingu modelu językowego."})
 
-            yield sse("done", {"ai_answer": full_answer})
+            done_payload = {"ai_answer": full_answer}
+            if llm_meta:
+                done_payload["llm_provider_used"] = llm_meta.get("provider_used")
+                done_payload["llm_model_used"] = llm_meta.get("model_used")
+                done_payload["llm_fallback_used"] = llm_meta.get("fallback_used", False)
+                if llm_meta.get("fallback_reason"):
+                    done_payload["llm_fallback_reason"] = llm_meta.get("fallback_reason")
+            yield sse("done", done_payload)
 
         except Exception as e:
             yield sse("error", {"error": str(e)})
@@ -4547,6 +4913,7 @@ def providers_list():
     for entry in safe.get("custom_endpoints", []):
         k = entry.get("key", "")
         entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
+        entry["api_type"] = "openai" if _custom_endpoint_is_openai(entry.get("url", "")) else "ollama"
         if "key" in entry:
             del entry["key"]
     pool_or = [e for e in pool.get("openrouter_keys", []) if e.get("active")]
@@ -4681,7 +5048,24 @@ def providers_test(entry_id: str):
                            "error": None if ok else r.text[:200]})
         elif ptype in ("ollama_urls", "custom_endpoints"):
             url = entry.get("url", "").rstrip("/")
-            r = requests.get(f"{url}/api/tags", timeout=8)
+            key = entry.get("key", "")
+            if ptype == "custom_endpoints" and _custom_endpoint_is_openai(url):
+                headers = {"Content-Type": "application/json"}
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                r = requests.post(
+                    _openai_chat_completions_url(url),
+                    headers=headers,
+                    json={"model": "llama-3.3-70b-versatile",
+                          "messages": [{"role": "user", "content": "Say: OK"}],
+                          "max_tokens": 5},
+                    timeout=20,
+                )
+            else:
+                headers = {}
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                r = requests.get(f"{url}/api/tags", headers=headers, timeout=8)
             ms = int((time.time() - t0) * 1000)
             return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
     except Exception as exc:

@@ -525,7 +525,7 @@ table { margin: 0; }
             <option value="openrouter">OpenRouter</option>
             <option value="ollama">Lokalny (Ollama)</option>
         </select>
-        <span style="color:rgba(255,255,255,0.2);">│</span>
+        <span id="llmModelSeparator" style="color:rgba(255,255,255,0.2);">│</span>
         <select id="openrouterModelSelect" onchange="onOpenRouterModelSelectChange()" style="max-width:220px;">
             <option value="">-- wybierz model --</option>
             <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★ najlepszy</option>
@@ -538,6 +538,20 @@ table { margin: 0; }
         <input id="openrouterModelInput" type="text" placeholder="lub wpisz model" class="ctrl-input"
                style="display:none;" onchange="onOpenRouterModelChange()"
                title="Np: meta-llama/llama-3.3-70b-instruct:free">
+        <input id="topbarLlmModel" type="text" placeholder="model (np. llama3)" class="ctrl-input"
+               style="display:none; max-width:180px;" onchange="onTopbarLlmModelChange()"
+               title="Nazwa modelu Ollama lub custom endpoint">
+        <select id="openaiModelSelect" onchange="onOpenaiModelSelectChange()" style="display:none; max-width:220px;">
+            <option value="">-- wybierz model --</option>
+            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (Groq)</option>
+            <option value="groq/compound">Groq Compound</option>
+            <option value="groq/compound-mini">Groq Compound Mini</option>
+            <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
+            <option value="custom">Własny model...</option>
+        </select>
+        <input id="openaiModelInput" type="text" placeholder="np. llama-3.3-70b-versatile" class="ctrl-input"
+               style="display:none; max-width:180px;" onchange="onOpenaiModelInputChange()"
+               title="Nazwa modelu OpenAI-compatible (Groq, LM Studio…)">
     </div>
     <div class="badge-stat" style="font-size:0.7rem; background:rgba(255,255,255,0.05);">Model: <span>768 · Nomic</span></div>
   </div>
@@ -1858,7 +1872,14 @@ function applyTabModel() {
             if (msel) { msel.value = model; onOpenRouterModelSelectChange(); }
             const minp = document.getElementById('openrouterModelInput');
             if (minp) { minp.value = model; localStorage.setItem('openrouter_model', model); }
+        } else if (provider && model && isOllamaLikeProvider(provider)) {
+            const topModel = document.getElementById('topbarLlmModel');
+            if (topModel) {
+                topModel.value = model;
+                localStorage.setItem('llm_model', model);
+            }
         }
+        syncLlmModelPickerVisibility();
     }
     document.getElementById('modelSuggestionToast').style.display = 'none';
     _pendingTabModel = null;
@@ -2414,8 +2435,7 @@ function executeSearch() {
         chat_context: chatCtx,
         limit, mode,
         file_filter: activeFileFilter,
-        llm_provider: getCurrentLlmProvider(),
-        openrouter_model: getCurrentOpenRouterModel(),
+        ...getLlmRequestPayload(),
         ...(hasSQL ? {conn: activeConn, schema: sqlSchema} : {})
     };
 
@@ -2438,11 +2458,14 @@ function executeSearch() {
             document.getElementById('tokenCount').textContent = '0';
             document.getElementById('tokenSpeed').textContent = '—';
             document.getElementById('tokenFinalMsg').style.display = 'none';
-            const prov = document.getElementById('llmProviderSelect').value;
-            const model = prov === 'openrouter'
-                ? (document.getElementById('openrouterModelInput').value || document.getElementById('openrouterModelSelect').value || '')
-                : (document.getElementById('cfgLlmModel')?.value || '');
-            document.getElementById('tokenProviderBadge').textContent = prov === 'openrouter' ? `OpenRouter · ${model.split('/').pop()}` : `Ollama · ${model}`;
+            const prov = getCurrentLlmProvider();
+            const model = getCurrentLlmModel() || '?';
+            const provLabel = prov === 'openrouter'
+                ? `OpenRouter · ${model.split('/').pop()}`
+                : (isOpenAiCustomProvider(prov)
+                    ? `${_poolCustomProviders[prov]?.name || 'API'} · ${model.split('/').pop()}`
+                    : `Ollama · ${model}`);
+            document.getElementById('tokenProviderBadge').textContent = provLabel;
         }
 
         function _tickTokenCounter(token) {
@@ -2527,6 +2550,22 @@ function executeSearch() {
                             _stopTokenCounter();
                             const box = document.getElementById('aiStreamBox');
                             if (box) { const sp = box.querySelector('.spinner-border'); if(sp) sp.remove(); }
+                            if (ev.llm_provider_used === 'openrouter' && ev.llm_model_used) {
+                                syncOpenRouterModelSelection(ev.llm_model_used);
+                            } else if (ev.llm_provider_used === 'ollama' && ev.llm_fallback_reason === 'openrouter_no_endpoints') {
+                                const providerSel = document.getElementById('llmProviderSelect');
+                                if (providerSel) providerSel.value = 'ollama';
+                                localStorage.setItem('llm_provider', 'ollama');
+                                localStorage.removeItem('openrouter_model');
+                                const orSel = document.getElementById('openrouterModelSelect');
+                                const orInp = document.getElementById('openrouterModelInput');
+                                if (orSel) orSel.value = 'custom';
+                                if (orInp) {
+                                    orInp.value = '';
+                                    orInp.style.display = 'none';
+                                }
+                                syncLlmModelPickerVisibility();
+                            }
                             if (resultsData) {
                                 window._lastSearchData = {query, mode_label: resultsData.mode_label,
                                     results: resultsData.results, ai_answer: aiText, contexts: resultsData.contexts};
@@ -2796,8 +2835,7 @@ function runVerification(query, answer, contexts) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             query, answer, contexts,
-            llm_provider: getCurrentLlmProvider(),
-            openrouter_model: getCurrentOpenRouterModel()
+            ...getLlmRequestPayload(),
         })
     })
     .then(r => r.json())
@@ -3858,8 +3896,7 @@ function buildNetwork() {
         query,
         limit,
         include_briefing: true,
-        llm_provider: getCurrentLlmProvider(),
-        openrouter_model: getCurrentOpenRouterModel(),
+        ...getLlmRequestPayload(),
     }, {
         progress: (d) => {
             const pct = d.total ? Math.round((d.processed / d.total) * 85) + 5 : 10;
@@ -4276,8 +4313,7 @@ function generateTimeline() {
     streamSSEPost('/timeline', {
         query,
         limit,
-        llm_provider: getCurrentLlmProvider(),
-        openrouter_model: getCurrentOpenRouterModel(),
+        ...getLlmRequestPayload(),
     }, {
         progress: (d) => {
             document.getElementById('timelineStatusText').textContent = d.message || 'Przetwarzanie…';
@@ -4333,7 +4369,7 @@ function renderTimeline(data) {
 // Uruchom inicjalizację filtrów po załadowaniu strony
 document.addEventListener('DOMContentLoaded', () => {
     initNetworkFilterListeners();
-    restoreLlmProvider();
+    loadTopbarProviders().then(() => restoreLlmProvider());
     startHealthAutoRefresh();
 });
 
@@ -4536,12 +4572,200 @@ function renderNetwork(nodes, edges) {
 }
 
 // ============================================================
-// PROSTY PRZEŁĄCZNIK LLM (Ollama <-> OpenRouter)
+// PROSTY PRZEŁĄCZNIK LLM (Ollama <-> OpenRouter + pula dostawców)
 // ============================================================
+let _poolCustomProviders = {};
+let _poolOllamaProviders = {};
+
+function loadTopbarProviders() {
+    return fetch('/api/providers')
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) syncTopbarProviders(data.pool);
+        })
+        .catch(err => console.warn('loadTopbarProviders', err));
+}
+
+function syncTopbarProviders(pool) {
+    const sel = document.getElementById('llmProviderSelect');
+    if (!sel || !pool) return;
+
+    const current = sel.value;
+    _poolCustomProviders = {};
+    _poolOllamaProviders = {};
+
+    const opts = [
+        { value: 'openrouter', label: 'OpenRouter' },
+        { value: 'ollama', label: 'Lokalny (Ollama)' },
+    ];
+
+    (pool.ollama_urls || []).forEach(e => {
+        if (e.active === false) return;
+        const val = `ollama:${e.id}`;
+        _poolOllamaProviders[val] = e.name || e.url || e.id;
+        opts.push({ value: val, label: `🦙 ${e.name || e.url || e.id}` });
+    });
+
+    (pool.custom_endpoints || []).forEach(e => {
+        if (e.active === false) return;
+        _poolCustomProviders[e.id] = {
+            name: e.name || e.url || e.id,
+            url: e.url || '',
+            api_type: e.api_type || 'ollama',
+        };
+        opts.push({ value: e.id, label: `🔌 ${e.name || e.url || e.id}` });
+    });
+
+    sel.innerHTML = opts.map(o =>
+        `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`
+    ).join('');
+
+    const pick = (v) => v && opts.some(o => o.value === v) ? v : null;
+    sel.value = pick(current) || pick(localStorage.getItem('llm_provider')) || 'openrouter';
+    syncLlmModelPickerVisibility();
+}
+
+function isOpenRouterProvider(prov) {
+    return prov === 'openrouter';
+}
+
+function isOllamaLikeProvider(prov) {
+    if (prov === 'ollama' || (prov && prov.startsWith('ollama:'))) return true;
+    const meta = _poolCustomProviders[prov];
+    return meta && meta.api_type === 'ollama';
+}
+
+function isOpenAiCustomProvider(prov) {
+    const meta = _poolCustomProviders[prov];
+    return meta && meta.api_type === 'openai';
+}
+
+function syncLlmModelPickerVisibility() {
+    const prov = getCurrentLlmProvider();
+    const isOr = isOpenRouterProvider(prov);
+    const isOpenAiCustom = isOpenAiCustomProvider(prov);
+    const isOllamaLike = isOllamaLikeProvider(prov);
+    const orSel = document.getElementById('openrouterModelSelect');
+    const orInp = document.getElementById('openrouterModelInput');
+    const topModel = document.getElementById('topbarLlmModel');
+    const oaiSel = document.getElementById('openaiModelSelect');
+    const oaiInp = document.getElementById('openaiModelInput');
+    const sep = document.getElementById('llmModelSeparator');
+
+    if (orSel) orSel.style.display = isOr ? '' : 'none';
+    if (orInp) {
+        if (!isOr) {
+            orInp.style.display = 'none';
+        } else if (orSel && orSel.value === 'custom') {
+            orInp.style.display = 'inline-block';
+        }
+    }
+    if (topModel) topModel.style.display = (!isOr && isOllamaLike && !isOpenAiCustom) ? 'inline-block' : 'none';
+    if (oaiSel) oaiSel.style.display = isOpenAiCustom ? '' : 'none';
+    if (oaiInp) {
+        if (!isOpenAiCustom) {
+            oaiInp.style.display = 'none';
+        } else if (oaiSel && oaiSel.value === 'custom') {
+            oaiInp.style.display = 'inline-block';
+        }
+    }
+    if (sep) sep.style.display = isOr || isOllamaLike || isOpenAiCustom ? '' : 'none';
+}
+
 function getCurrentLlmProvider() {
     const sel = document.getElementById('llmProviderSelect');
     if (sel) return sel.value;
     return localStorage.getItem('llm_provider') || 'openrouter';
+}
+
+function getCurrentLlmModel() {
+    const prov = getCurrentLlmProvider();
+    if (isOpenRouterProvider(prov)) return getCurrentOpenRouterModel();
+    if (isOpenAiCustomProvider(prov)) return getCurrentOpenaiModel();
+    const top = document.getElementById('topbarLlmModel');
+    if (top && top.value.trim()) return top.value.trim();
+    const cfg = document.getElementById('cfgLlmModel');
+    if (cfg && cfg.value.trim()) return cfg.value.trim();
+    return localStorage.getItem('llm_model') || null;
+}
+
+function getCurrentOpenaiModel() {
+    const select = document.getElementById('openaiModelSelect');
+    const input = document.getElementById('openaiModelInput');
+    if (select && select.value && select.value !== 'custom') return select.value;
+    if (input && input.value.trim()) return input.value.trim();
+    return localStorage.getItem('openai_model') || localStorage.getItem('groq_model') || null;
+}
+
+function onOpenaiModelSelectChange() {
+    const select = document.getElementById('openaiModelSelect');
+    const input = document.getElementById('openaiModelInput');
+    if (!select || !input) return;
+    if (select.value === 'custom') {
+        input.style.display = 'inline-block';
+        input.focus();
+    } else if (select.value) {
+        input.style.display = 'none';
+        input.value = select.value;
+        localStorage.setItem('openai_model', select.value);
+    } else {
+        input.style.display = 'none';
+        input.value = '';
+        localStorage.removeItem('openai_model');
+    }
+}
+
+function onOpenaiModelInputChange() {
+    const input = document.getElementById('openaiModelInput');
+    if (!input) return;
+    const v = input.value.trim();
+    if (v) localStorage.setItem('openai_model', v);
+    else localStorage.removeItem('openai_model');
+}
+
+function getLlmRequestPayload() {
+    return {
+        llm_provider: getCurrentLlmProvider(),
+        openrouter_model: getCurrentLlmModel(),
+    };
+}
+
+function onTopbarLlmModelChange() {
+    const el = document.getElementById('topbarLlmModel');
+    if (!el) return;
+    const v = el.value.trim();
+    if (v) localStorage.setItem('llm_model', v);
+    else localStorage.removeItem('llm_model');
+}
+
+function syncOpenRouterModelSelection(model) {
+    const value = (model || '').trim();
+    if (!value) return false;
+
+    localStorage.setItem('openrouter_model', value);
+
+    const select = document.getElementById('openrouterModelSelect');
+    const input = document.getElementById('openrouterModelInput');
+    if (!select || !input) return true;
+
+    let found = false;
+    for (let i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === value) {
+            select.value = value;
+            input.style.display = 'none';
+            input.value = value;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        select.value = 'custom';
+        input.style.display = 'inline-block';
+        input.value = value;
+    }
+
+    return true;
 }
 
 function onQdrantModeChange() {
@@ -4586,7 +4810,8 @@ function onLlmProviderChange() {
     const sel = document.getElementById('llmProviderSelect');
     if (!sel) return;
     localStorage.setItem('llm_provider', sel.value);
-    
+    syncLlmModelPickerVisibility();
+
     const badge = sel.parentElement;
     badge.style.transition = 'all 0.2s';
     badge.style.boxShadow = sel.value === 'openrouter' ? '0 0 0 2px #22c55e' : 'none';
@@ -4623,8 +4848,32 @@ function restoreLlmProvider() {
     if (!sel) return;
 
     const savedProvider = localStorage.getItem('llm_provider');
-    if (savedProvider === 'openrouter' || savedProvider === 'ollama') {
+    if (savedProvider && Array.from(sel.options).some(o => o.value === savedProvider)) {
         sel.value = savedProvider;
+    }
+
+    const savedLlmModel = localStorage.getItem('llm_model');
+    const topModel = document.getElementById('topbarLlmModel');
+    if (topModel && savedLlmModel) topModel.value = savedLlmModel;
+
+    const savedOpenaiModel = localStorage.getItem('openai_model') || localStorage.getItem('groq_model');
+    const oaiSelect = document.getElementById('openaiModelSelect');
+    const oaiInput = document.getElementById('openaiModelInput');
+    if (oaiSelect && oaiInput && savedOpenaiModel) {
+        let found = false;
+        for (let i = 0; i < oaiSelect.options.length; i++) {
+            if (oaiSelect.options[i].value === savedOpenaiModel) {
+                oaiSelect.value = savedOpenaiModel;
+                oaiInput.style.display = 'none';
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            oaiSelect.value = 'custom';
+            oaiInput.style.display = 'inline-block';
+            oaiInput.value = savedOpenaiModel;
+        }
     }
 
     // Przywróć zapisany model OpenRouter
@@ -4653,6 +4902,7 @@ function restoreLlmProvider() {
             modelInput.style.display = 'none';
         }
     }
+    syncLlmModelPickerVisibility();
 }
 
 function getCurrentOpenRouterModel() {
@@ -6366,7 +6616,7 @@ function runReadyReport(id) {
 
     fetchJson('/analyze', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, llm_provider: getCurrentLlmProvider()})
+        body: JSON.stringify({query: rep.prompt, limit:10, mode: rep.mode, ...getLlmRequestPayload()})
     }).then(d => {
         document.getElementById('reportContent').innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(d.answer || 'Brak danych.')}</div>`;
     });
@@ -6828,6 +7078,8 @@ function providersLoad() {
             cuBody.innerHTML = rows.length ? rows.map(e => _providerRow(e, 'custom')).join('') :
                 '<tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>';
         }
+
+        syncTopbarProviders(pool);
     }).catch(err => console.error('providersLoad error', err));
 }
 
