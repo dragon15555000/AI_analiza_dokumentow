@@ -3755,78 +3755,107 @@ def analyze():
 
 @app.route('/compare', methods=['POST'])
 def compare_documents():
-    """Porównanie dwóch dokumentów przez LLM — pobiera chunki obu plików z Qdrant."""
+    """SSE: porównanie dwóch dokumentów — streaming wyników porównania przez LLM."""
+    _require_api_key()
     data = request.get_json() or {}
     file_a = (data.get('file_a') or '').strip()
     file_b = (data.get('file_b') or '').strip()
     focus  = (data.get('focus') or 'general').strip()
+
     if not file_a or not file_b:
-        return jsonify({"success": False, "error": "Wymagane file_a i file_b"})
+        def _err():
+            yield sse('error', {'error': 'Wymagane file_a i file_b'})
+        return Response(stream_with_context(_err()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     if file_a == file_b:
-        return jsonify({"success": False, "error": "Wybierz dwa różne pliki"})
+        def _err():
+            yield sse('error', {'error': 'Wybierz dwa różne pliki'})
+        return Response(stream_with_context(_err()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
-    try:
-        client = get_qdrant_client()
+    def generate():
+        def sse(event, d):
+            import json as _j
+            return f"event: {event}\ndata: {_j.dumps(d, ensure_ascii=False)}\n\n"
 
-        def _fetch_chunks(fname: str) -> list[str]:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-            qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
-            records, _ = client.scroll(
-                collection_name=ACTIVE_COLLECTION,
-                scroll_filter=qfilter,
-                limit=30,
-                with_payload=["text"],
-                with_vectors=False,
+        try:
+            client = get_qdrant_client()
+
+            def _fetch_chunks(fname: str) -> list[str]:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
+                records, _ = client.scroll(
+                    collection_name=ACTIVE_COLLECTION,
+                    scroll_filter=qfilter,
+                    limit=30,
+                    with_payload=["text"],
+                    with_vectors=False,
+                )
+                return [r.payload.get("text", "") for r in records if r.payload.get("text")]
+
+            chunks_a = _fetch_chunks(file_a)
+            chunks_b = _fetch_chunks(file_b)
+
+            if not chunks_a:
+                yield sse('error', {'error': f'Brak chunków dla pliku: {file_a}'})
+                return
+            if not chunks_b:
+                yield sse('error', {'error': f'Brak chunków dla pliku: {file_b}'})
+                return
+
+            MAX_CHARS = 8000
+            text_a = "\n\n".join(chunks_a)[:MAX_CHARS]
+            text_b = "\n\n".join(chunks_b)[:MAX_CHARS]
+
+            focus_labels = {
+                'general':    'ogólne porównanie treści i struktury',
+                'dates':      'daty, terminy i harmonogram',
+                'parties':    'strony, sygnatury i upoważnienia',
+                'financial':  'kwoty, wartości i warunki finansowe',
+                'legal':      'zobowiązania prawne i klauzule umowne',
+                'technical':  'wymagania techniczne i specyfikacje',
+            }
+            focus_desc = focus_labels.get(focus, focus_labels['general'])
+
+            system = (
+                "Jesteś ekspertem ds. analizy dokumentów. Porównaj dwa dokumenty skupiając się na: "
+                f"{focus_desc}. "
+                "Wskaż kluczowe podobieństwa, różnice i rozbieżności. "
+                "Odpowiadaj po polsku, używaj punktów i tabel gdzie to pomocne."
             )
-            return [r.payload.get("text", "") for r in records if r.payload.get("text")]
+            prompt = (
+                f"=== DOKUMENT A: {file_a} ===\n{text_a}\n\n"
+                f"=== DOKUMENT B: {file_b} ===\n{text_b}\n\n"
+                f"Przeprowadź szczegółowe porównanie tych dwóch dokumentów "
+                f"z uwzględnieniem: {focus_desc}."
+            )
 
-        chunks_a = _fetch_chunks(file_a)
-        chunks_b = _fetch_chunks(file_b)
+            yield sse('start', {
+                'file_a': file_a,
+                'file_b': file_b,
+                'chunks_a': len(chunks_a),
+                'chunks_b': len(chunks_b),
+                'focus': focus_desc,
+            })
 
-        if not chunks_a:
-            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_a}"})
-        if not chunks_b:
-            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_b}"})
+            comparison_text = ""
+            for token in stream_llm_tokens(prompt=prompt, system=system, max_tokens=2000, temperature=0.2):
+                comparison_text += token
+                yield sse('chunk', {'token': token})
 
-        MAX_CHARS = 8000
-        text_a = "\n\n".join(chunks_a)[:MAX_CHARS]
-        text_b = "\n\n".join(chunks_b)[:MAX_CHARS]
+            yield sse('done', {
+                'file_a': file_a,
+                'file_b': file_b,
+                'chunks_a': len(chunks_a),
+                'chunks_b': len(chunks_b),
+                'comparison': comparison_text,
+            })
+        except Exception as e:
+            logger.exception("compare_documents error")
+            yield sse('error', {'error': str(e)[:300]})
 
-        focus_labels = {
-            'general':    'ogólne porównanie treści i struktury',
-            'dates':      'daty, terminy i harmonogram',
-            'parties':    'strony, sygnatury i upoważnienia',
-            'financial':  'kwoty, wartości i warunki finansowe',
-            'legal':      'zobowiązania prawne i klauzule umowne',
-            'technical':  'wymagania techniczne i specyfikacje',
-        }
-        focus_desc = focus_labels.get(focus, focus_labels['general'])
-
-        system = (
-            "Jesteś ekspertem ds. analizy dokumentów. Porównaj dwa dokumenty skupiając się na: "
-            f"{focus_desc}. "
-            "Wskaż kluczowe podobieństwa, różnice i rozbieżności. "
-            "Odpowiadaj po polsku, używaj punktów i tabel gdzie to pomocne."
-        )
-        prompt = (
-            f"=== DOKUMENT A: {file_a} ===\n{text_a}\n\n"
-            f"=== DOKUMENT B: {file_b} ===\n{text_b}\n\n"
-            f"Przeprowadź szczegółowe porównanie tych dwóch dokumentów "
-            f"z uwzględnieniem: {focus_desc}."
-        )
-
-        result = call_llm(prompt=prompt, system=system, stream=False)
-        return jsonify({
-            "success": True,
-            "file_a": file_a,
-            "file_b": file_b,
-            "chunks_a": len(chunks_a),
-            "chunks_b": len(chunks_b),
-            "comparison": _llm_response_text(result),
-        })
-    except Exception as e:
-        logger.exception("compare_documents error")
-        return jsonify({"success": False, "error": str(e)[:300]})
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route('/api/collection/profile', methods=['GET'])
