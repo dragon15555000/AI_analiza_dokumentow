@@ -19,6 +19,14 @@ Format: [Semantic Versioning](https://semver.org/lang/pl/) · [Keep a Changelog]
   - `GET /api/models/recommend` — rekomendacja modelu dla danego zadania
 - **POST `/compare`** — porównanie dwóch dokumentów przez LLM (brakujący endpoint)
 - **GET `/api/collection/profile`** — profilowanie kolekcji wg typów plików, sugestia trybu
+- **🔑 Pula dostawców API** — wiele kluczy OpenRouter + wiele adresów Ollama z rotacją round-robin:
+  - `GET /api/providers` — lista z zamaskowanymi kluczami
+  - `POST /api/providers` — dodaj klucz/URL (typy: `openrouter_key`, `ollama_url`, `custom_endpoint`)
+  - `DELETE /api/providers/<id>` — usuń wpis
+  - `POST /api/providers/<id>/toggle` — włącz/wyłącz
+  - `POST /api/providers/<id>/test` — ping z latencją (ms)
+  - Panel "Dostawcy API" w zakładce ⚡ Flota LLM z formularzem dodawania i tabelą wpisów
+  - `.providers.json` dodany do `.gitignore` (przechowuje klucze API — nie commitowany)
 
 ### Zmieniono
 - **UI: topbar** — przeprojektowany na dwa wiersze (`topbar-main` + `topbar-controls`); statystyki chowane na mobile (`stat-hide-mobile`)
@@ -45,7 +53,7 @@ Format: [Semantic Versioning](https://semver.org/lang/pl/) · [Keep a Changelog]
 - **`/compare` — TypeError w JS** (`app.py`): `call_llm` zwracał dict zamiast stringa; dodano `_llm_response_text(result)`
 
 ### Inne
-- **`.gitignore`** — dodano `.claude/` (katalog roboczy agentów Claude Code)
+- **`.gitignore`** — dodano `.claude/` i `.providers.json`
 - **`AGENTS.md`** — zaktualizowany z instrukcjami dla AI coderów, sposobami uruchamiania, gotcha i opisem architektury
 
 ---
