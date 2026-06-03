@@ -2754,28 +2754,28 @@ function compareDocuments() {
     st.classList.remove('d-none'); st.textContent = 'LLM czyta oba dokumenty...';
     res.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary"></div><p class="mt-2 small text-muted">Porównywanie dokumentów przez LLM (~30-60 sek)...</p></div>`;
 
-    fetch('/compare', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({file_a: fa, file_b: fb, focus})
-    })
-    .then(r=>r.json())
-    .then(d => {
-        btn.disabled = false; st.classList.add('d-none');
-        if (!d.success) { res.innerHTML = `<div class="alert alert-danger">${escapeHtml(d.error)}</div>`; return; }
-        res.innerHTML = `
-            <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
-                <div class="d-flex gap-3 small">
-                    <span>📄 <strong>${d.file_a}</strong> (${d.chunks_a} chunków)</span>
-                    <span style="color:#4f46e5;">⚖️</span>
-                    <span>📄 <strong>${d.file_b}</strong> (${d.chunks_b} chunków)</span>
+    let comparisonText = '';
+    streamSSEPost('/compare', {file_a: fa, file_b: fb, focus}, {
+        'start': (d) => { comparisonText = ''; },
+        'chunk': (d) => { comparisonText += d.token || ''; },
+        'done': (d) => {
+            btn.disabled = false; st.classList.add('d-none');
+            const html = escapeHtml(comparisonText).replace(/\n/g,'<br>');
+            res.innerHTML = `
+                <div style="background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+                    <div class="d-flex gap-3 small">
+                        <span>📄 <strong>${escapeHtml(d.file_a)}</strong> (${d.chunks_a} chunków)</span>
+                        <span style="color:#4f46e5;">⚖️</span>
+                        <span>📄 <strong>${escapeHtml(d.file_b)}</strong> (${d.chunks_b} chunków)</span>
+                    </div>
                 </div>
-            </div>
-            <div style="font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">${d.comparison.replace(/\n/g,'<br>')}</div>
-            <div class="mt-3 d-flex gap-2">
-                <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
-            </div>`;
-    })
-    .catch(e => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e)}</div>`; });
+                <div style="font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">${html}</div>
+                <div class="mt-3 d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('compareResult').innerText)">📋 Kopiuj</button>
+                </div>`;
+        },
+        'error': (e) => { btn.disabled=false; st.classList.add('d-none'); res.innerHTML=`<div class="alert alert-danger">${escapeHtml(e.error || e)}</div>`; }
+    });
 }
 
 // ---- WERYFIKACJA (Krytyk) ----
