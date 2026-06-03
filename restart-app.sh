@@ -13,6 +13,18 @@ set -e
 
 cd "$(dirname "$0")" || exit 1
 
+# venv: Linux/macOS vs Windows (Git Bash / WSL)
+if [ -f "venv/Scripts/python.exe" ]; then
+    VENV_PYTHON="venv/Scripts/python.exe"
+    VENV_PIP="venv/Scripts/pip.exe"
+elif [ -f "venv/bin/python" ]; then
+    VENV_PYTHON="venv/bin/python"
+    VENV_PIP="venv/bin/pip"
+else
+    VENV_PYTHON=""
+    VENV_PIP=""
+fi
+
 USE_USER_SERVICE=false
 ACTION=""
 
@@ -40,6 +52,12 @@ if [ "$USE_USER_SERVICE" = true ]; then
     echo "========================================"
     echo "   Restart (systemd user service) — zalecane"
     echo "========================================"
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "BŁĄD: systemctl niedostępny (Windows Git Bash bez WSL?)."
+        echo "Użyj: ./restart-app.sh   albo: python app.py w venv"
+        exit 1
+    fi
 
     if [ "$ACTION" = "stop" ] || [ "$1" = "--stop" ]; then
         echo "Zatrzymuję usługę użytkownika..."
@@ -117,9 +135,12 @@ fi
 
 # 3. Sprawdzenie środowiska
 echo ""
-if [ ! -f "venv/bin/python" ]; then
-    echo "BŁĄD: Nie znaleziono środowiska wirtualnego (venv/bin/python)"
-    echo "Najpierw utwórz je poleceniem:"
+if [ -z "$VENV_PYTHON" ] || [ ! -f "$VENV_PYTHON" ]; then
+    echo "BŁĄD: Nie znaleziono środowiska wirtualnego (venv)"
+    echo "Utwórz je (Windows Git Bash):"
+    echo "  python -m venv venv"
+    echo "  source venv/Scripts/activate && pip install -r requirements.txt"
+    echo "Linux / macOS:"
     echo "  python3 -m venv venv && ./venv/bin/pip install -r requirements.txt"
     exit 1
 fi
@@ -127,7 +148,7 @@ fi
 # 4. Uruchom aplikację w tle
 echo "[3/4] Uruchamiam aplikację w tle..."
 
-nohup ./venv/bin/python app.py > app.log 2>&1 &
+nohup "$VENV_PYTHON" app.py > app.log 2>&1 &
 PID=$!
 
 sleep 3
