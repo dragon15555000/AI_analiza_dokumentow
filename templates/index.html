@@ -6391,7 +6391,7 @@ document.querySelectorAll('.swarm-mode-card').forEach(card => {
 });
 
 function stopSwarm() {
-    if (_swarmSSE) { _swarmSSE.close(); _swarmSSE = null; }
+    if (_swarmSSE) { _swarmSSE.abort(); _swarmSSE = null; }
     document.getElementById('swarmBtn').disabled = false;
     document.getElementById('swarmStopBtn').classList.add('d-none');
 }
@@ -6409,6 +6409,7 @@ function runSwarm() {
 
     // Reset UI
     stopSwarm();
+    _swarmSSE = new AbortController();
     document.getElementById('swarmPlaceholder').style.display = 'none';
     document.getElementById('swarmDashboard').style.display = 'block';
     document.getElementById('swarmResult').style.display = 'none';
@@ -6434,8 +6435,8 @@ function runSwarm() {
     const headers = {'Content-Type': 'application/json'};
     if (window.API_KEY && window.API_KEY_REQUIRED) headers['X-API-Key'] = window.API_KEY;
 
-    // Use fetch + ReadableStream for POST SSE
-    fetch('/agents/swarm/stream', {method:'POST', headers, body})
+    // Use fetch + ReadableStream for POST SSE; AbortController pozwala przerwać przez stopSwarm()
+    fetch('/agents/swarm/stream', {method:'POST', headers, body, signal: _swarmSSE.signal})
     .then(resp => {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const reader = resp.body.getReader();

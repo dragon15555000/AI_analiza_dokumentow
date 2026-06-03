@@ -13,6 +13,7 @@ import subprocess
 import platform
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 import io
 import logging
@@ -721,16 +722,17 @@ def _ensure_swarm_reports_dir() -> None:
 
 # ---- Provider Pool (wiele kluczy / adresów serwerów) ----
 _PROVIDERS_FILE = Path(__file__).parent / ".providers.json"
-_provider_pool_lock = threading.Lock()
+_provider_pool_lock = threading.RLock()
 
 def _load_provider_pool() -> dict:
     """Wczytuje pulę dostawców z pliku JSON."""
-    try:
-        if _PROVIDERS_FILE.exists():
-            return json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
+    with _provider_pool_lock:
+        try:
+            if _PROVIDERS_FILE.exists():
+                return json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
 
 def _save_provider_pool(pool: dict) -> None:
     with _provider_pool_lock:
@@ -763,6 +765,10 @@ APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
 # Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
 # który nadpisuje X-Forwarded-For — NIGDY nie włączaj gdy app jest dostępna z zewnątrz bez proxy
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
+
+if TRUST_PROXY:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # Wersja aplikacji — automatycznie odczytywana z git tagów w trybie deweloperskim
 # (git describe --tags --dirty). W releasach produkcyjnych wraca do stałej.
@@ -1289,19 +1295,10 @@ def _require_api_key():
 
 def _is_local_request() -> bool:
     """Sprawdza czy żądanie pochodzi z localhost.
-    Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true w .env
-    (używaj wyłącznie za zaufanym reverse proxy).
+    Gdy TRUST_PROXY=true, ProxyFix middleware (skonfigurowane przy starcie)
+    ustawia request.remote_addr na poprawny adres klienta z X-Forwarded-For.
     """
-    remote = request.remote_addr or ""
-    if remote in ("127.0.0.1", "::1", "localhost"):
-        return True
-    if TRUST_PROXY:
-        forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
-        if forwarded:
-            first = forwarded.split(",")[0].strip()
-            if first in ("127.0.0.1", "::1", "localhost"):
-                return True
-    return False
+    return (request.remote_addr or "").strip() in ("127.0.0.1", "::1", "localhost")
 
 
 def _require_config_access():
@@ -1746,7 +1743,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
             yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
             logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
             # Przepuść przez ścieżkę Ollama
-            ollama_url = OLLAMA_URL + "/api/generate"
+            ollama_url = _pick_ollama_url() + "/api/generate"
             ollama_payload = {
                 "model": LLM_MODEL,
                 "prompt": prompt,
@@ -1782,7 +1779,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
     else:
         # Ollama streaming
-        url = OLLAMA_URL + "/api/generate"
+        url = _pick_ollama_url() + "/api/generate"
         payload = {
             "model": effective_model,
             "prompt": prompt,
@@ -1810,7 +1807,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
 
 def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
-    url = OLLAMA_URL + "/api/generate"
+    url = _pick_ollama_url() + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -2015,7 +2012,7 @@ def get_embedding(text: str) -> list:
         logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
     # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
-    url = OLLAMA_URL + "/api/embeddings"
+    url = _pick_ollama_url() + "/api/embeddings"
     payload = {"model": EMBED_MODEL, "prompt": text[:1500]}
 
     for attempt in range(4):  # max 4 próby
@@ -2198,7 +2195,7 @@ def _model_score(model_id: str) -> float:
     if live.get("ping_ok") is False:
         return 0.0
     quality = (reg.get("quality_tier", 1) - 1) / 2 * 40
-    speed   = (4 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej
+    speed   = (3 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej; tier 1..3 → max 30
     if live.get("ping_ok") is True:
         ms = live.get("avg_ms") or live.get("ping_ms") or 15000
         avail = max(0.0, 30.0 - ms / 500.0)
@@ -6691,16 +6688,9 @@ def api_update_restart():
 
 def _localhost_only() -> bool:
     """True gdy żądanie pochodzi z localhost (self-update / service API).
-    Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true.
+    Gdy TRUST_PROXY=true, ProxyFix middleware koryguje remote_addr.
     """
-    addr = (request.remote_addr or "").strip()
-    if addr in ("127.0.0.1", "::1", "localhost"):
-        return True
-    if TRUST_PROXY:
-        fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-        if fwd in ("127.0.0.1", "::1", "localhost"):
-            return True
-    return False
+    return (request.remote_addr or "").strip() in ("127.0.0.1", "::1", "localhost")
 
 
 def _systemd_service_state() -> str:
