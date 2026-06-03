@@ -13,6 +13,49 @@ System RAG (Retrieval-Augmented Generation) do inteligentnej analizy i przeszuki
 
 *A RAG (Retrieval-Augmented Generation) system for intelligent document analysis and search. Upload your files, ask questions in natural language — the system retrieves relevant passages and synthesizes a precise, source-cited answer.*
 
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python)](https://www.python.org/)
+[![Flask](https://img.shields.io/badge/Flask-3.x-000000?logo=flask)](https://flask.palletsprojects.com/)
+[![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-DC244C)](https://qdrant.tech/)
+[![LLM](https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenRouter-412991)](https://ollama.ai/)
+
+---
+
+## For technical recruiters (EN)
+
+**Role fit:** Python backend engineer · RAG / LLM application developer · document intelligence · optional full-stack (Bootstrap + D3).
+
+| Skill area | What this repo shows |
+|------------|----------------------|
+| **RAG pipeline** | Chunking, embeddings (`nomic-embed-text`, 768-dim), Qdrant retrieval, grounded answers with citations |
+| **Multi-agent LLM** | Generator + Critic verification loop; detective briefing mode with structured tags |
+| **Production ops** | Waitress WSGI, systemd user services, health endpoint, self-update from GitHub releases |
+| **Data integration** | Hybrid RAG + SQL (Text-to-SQL), multi-format ingest (PDF, Office, OCR) |
+| **Visualization** | D3.js force-directed network graph with SSE-backed batch processing |
+| **Security mindset** | Optional API key, `SEARCH_ROOTS` path sandbox, localhost-only update APIs |
+
+### Architecture at a glance
+
+```text
+Import (SSE) → extractors → chunk → Ollama embeddings → Qdrant
+User query → vector search (+ optional SQL) → LLM (OpenRouter/Ollama/Groq)
+           → Critic pass → streamed UI (Bootstrap + D3)
+```
+
+### Repository layout
+
+```text
+app.py                 # Flask monolith — all API routes & RAG orchestration
+templates/index.html   # UI (Bootstrap 5, D3.js, SSE clients)
+core/ · extractors/ · llm/ · services/ · utils/   # supporting modules
+scripts/setup-local-dev.sh   # one-shot dev bootstrap (venv, Qdrant, models)
+wsgi.py                # Waitress entry for production
+AGENTS.md              # contributor / Cloud Agent runbook
+```
+
+**Quick demo (after setup):** `curl -s http://127.0.0.1:5000/health` · UI at `http://localhost:5000` · see [Installation](#instalacja--installation) below.
+
+*Dla rekruterów PL: ten projekt to produkcyjny system RAG z weryfikacją 2× LLM, Qdrant, wieloma trybami analizy i grafem powiązań — nie tutorial.*
+
 ---
 
 ## Jak to działa / How it works
