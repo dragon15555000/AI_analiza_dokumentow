@@ -254,6 +254,84 @@ PY
   note_pass "POST /search/stream (SSE)"
 }
 
+test_swarm_stream_sse() {
+  if [[ "$RETRIEVAL_AVAILABLE" -ne 1 ]]; then
+    note_skip "POST /agents/swarm (SSE) skipped: Qdrant unavailable"
+    return
+  fi
+  local headers="$TMP_DIR/swarm_stream.headers"
+  local body="$TMP_DIR/swarm_stream.body"
+  local code
+  if ! code="$(curl_with_retry "sse" "$BASE_URL/agents/swarm" "$body" "$headers" \
+    "${AUTH_ARGS[@]}" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"test","limit":2,"swarm_mode":"B","mask_pii":false,"strict_incognito":false,"llm_provider":"ollama"}')"; then
+    note_fail "POST /agents/swarm transport error"
+    return
+  fi
+  if [[ "$code" != "200" ]]; then
+    note_fail "POST /agents/swarm -> HTTP $code"
+    return
+  fi
+  if ! grep -qi "content-type: text/event-stream" "$headers"; then
+    note_fail "POST /agents/swarm missing text/event-stream content-type"
+    return
+  fi
+  if ! grep -Eq '"event"\s*:\s*"(start|done|error)"|event:\s*(start|done|error)' "$body"; then
+    note_fail "POST /agents/swarm missing start/done/error event"
+    return
+  fi
+  if ! python3 - "$body" <<'PY'
+import json, sys
+from pathlib import Path
+
+raw = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+done_payload = None
+error_text = ""
+current_event = None
+for line in raw.splitlines():
+    if line.startswith("event: "):
+        current_event = line[7:].strip()
+    elif line.startswith("data: ") and current_event:
+        if current_event == "done":
+            try:
+                done_payload = json.loads(line[6:])
+            except Exception:
+                done_payload = None
+            break
+        if current_event == "error":
+            try:
+                error_text = json.loads(line[6:]).get("error", "")
+            except Exception:
+                error_text = line[6:]
+            break
+
+if error_text and "Brak dokumentów" in error_text:
+    sys.exit(2)
+
+if not isinstance(done_payload, dict):
+    sys.exit(1)
+
+usage = done_payload.get("usage")
+if not isinstance(usage, dict):
+    sys.exit(1)
+
+if any(k in usage for k in ("prompt_tokens", "completion_tokens", "total_tokens")):
+    sys.exit(0)
+sys.exit(1)
+PY
+  then
+    rc=$?
+    if [[ "$rc" == "2" ]]; then
+      note_skip "POST /agents/swarm (SSE) skipped: Brak dokumentów"
+      return
+    fi
+    note_fail "POST /agents/swarm missing done.usage payload"
+    return
+  fi
+  note_pass "POST /agents/swarm (SSE)"
+}
+
 test_get_context_validation() {
   local body="$TMP_DIR/get_context_bad.json"
   local code
@@ -358,6 +436,7 @@ echo "Running smoke API tests against: $BASE_URL"
 test_preflight_health
 test_search_empty_query
 test_search_stream_sse
+test_swarm_stream_sse
 test_get_context_validation
 test_sql_config_redaction
 test_network_stream_sse
