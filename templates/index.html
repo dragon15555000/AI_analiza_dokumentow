@@ -1096,6 +1096,24 @@ table { margin: 0; }
     </div>
   </div>
 </div>
+
+<!-- Zapisane wyniki roju -->
+<div class="row g-3 mt-2">
+  <div class="col-12">
+    <div class="search-card" id="swarmReportsSection" style="display:none;">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <div>
+          <h5 style="margin:0;font-weight:700;">🤖 Zapisane wyniki roju agentów</h5>
+          <p class="small text-muted mb-0">Wyniki zapisane przyciskiem "Zapisz jako raport" w zakładce Rój.</p>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadSwarmReports()">↺ Odśwież</button>
+      </div>
+      <div id="swarmReportsList">
+        <p class="text-muted small text-center py-3">Brak zapisanych wyników.</p>
+      </div>
+    </div>
+  </div>
+</div>
 </div>
 
 <!-- TAB: SQL -->
@@ -1644,8 +1662,9 @@ table { margin: 0; }
           <h5>🤖 Wynik roju agentów</h5>
           <div id="swarmAnswer" style="white-space:pre-wrap;line-height:1.7;font-size:0.92rem;"></div>
         </div>
-        <div class="d-flex gap-2 mt-2">
+        <div class="d-flex gap-2 mt-2 flex-wrap">
           <button class="btn btn-sm btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('swarmAnswer').textContent)">📋 Kopiuj</button>
+          <button id="swarmSaveBtn" class="btn btn-sm btn-success" style="display:none" onclick="swarmSaveReport()">💾 Zapisz jako raport</button>
           <button class="btn btn-sm btn-outline-primary" onclick="runSwarm()">↺ Uruchom ponownie</button>
         </div>
       </div>
@@ -6253,6 +6272,73 @@ function loadReports() {
             <h6 class="mt-2 mb-1">${r.title}</h6><p class="small text-muted mb-0">${r.desc}</p></div></div>`;
         container.appendChild(col);
     });
+    loadSwarmReports();
+}
+
+function loadSwarmReports() {
+    fetch('/api/swarm/reports').then(r => r.json()).then(data => {
+        const section = document.getElementById('swarmReportsSection');
+        const list = document.getElementById('swarmReportsList');
+        if (!section || !list) return;
+        const reports = data.reports || [];
+        section.style.display = reports.length ? '' : 'none';
+        if (!reports.length) return;
+        list.innerHTML = `<table class="table table-sm mb-0">
+            <thead><tr><th>Data</th><th>Tryb</th><th>Zapytanie</th><th>Workery</th><th></th></tr></thead>
+            <tbody>${reports.map(r => `<tr>
+                <td class="small text-muted" style="white-space:nowrap">${escapeHtml((r.saved_at || '').replace('T',' ').slice(0,16))}</td>
+                <td class="small">${escapeHtml(r.mode_label || r.mode || '')}</td>
+                <td class="small">${escapeHtml(r.title || r.query || '')}</td>
+                <td class="small text-center">${r.n_workers || ''}</td>
+                <td class="text-end" style="white-space:nowrap">
+                    <button class="btn btn-outline-primary btn-sm py-0 px-2 me-1" style="font-size:0.75rem"
+                        onclick="swarmReportPreview('${escapeHtml(r.id)}')">Podgląd</button>
+                    <button class="btn btn-outline-danger btn-sm py-0 px-2" style="font-size:0.75rem"
+                        onclick="swarmReportDelete('${escapeHtml(r.id)}', this)">✕</button>
+                </td>
+            </tr>`).join('')}</tbody>
+        </table>`;
+    }).catch(() => {});
+}
+
+function swarmSaveReport() {
+    if (!_swarmLastResult) return;
+    fetch('/api/swarm/reports', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(_swarmLastResult)
+    }).then(r => r.json()).then(d => {
+        const btn = document.getElementById('swarmSaveBtn');
+        if (d.success) {
+            btn.textContent = '✅ Zapisano';
+            btn.disabled = true;
+        } else {
+            alert('Błąd zapisu: ' + (d.error || 'nieznany'));
+        }
+    });
+}
+
+function swarmReportPreview(id) {
+    fetch(`/api/swarm/reports/${encodeURIComponent(id)}`).then(r => r.json()).then(d => {
+        if (!d.success) { alert('Błąd: ' + d.error); return; }
+        const rep = d.report;
+        const resDiv = document.getElementById('reportResult');
+        document.getElementById('reportTitle').textContent = '🤖 ' + (rep.title || rep.query || 'Wynik roju');
+        document.getElementById('reportContent').innerHTML =
+            `<div class="small text-muted mb-2">${escapeHtml(rep.mode_label || '')} · ${rep.n_workers} workerów · ${(rep.saved_at || '').replace('T',' ')}</div>` +
+            `<div style="white-space:pre-wrap">${escapeHtml(rep.answer || '')}</div>`;
+        document.getElementById('reportMeta').textContent = '';
+        resDiv.classList.remove('d-none');
+        resDiv.scrollIntoView({behavior: 'smooth', block: 'start'});
+    });
+}
+
+function swarmReportDelete(id, btn) {
+    if (!confirm('Usunąć ten raport?')) return;
+    fetch(`/api/swarm/reports/${encodeURIComponent(id)}`, {method: 'DELETE'})
+        .then(r => r.json()).then(d => {
+            if (d.success) loadSwarmReports();
+            else alert('Błąd: ' + (d.error || 'nieznany'));
+        });
 }
 
 function runReadyReport(id) {
@@ -6293,6 +6379,8 @@ window.onload = function() {
 let _swarmSSE = null;
 let _swarmWorkerCount = 0;
 let _swarmDone = 0;
+let _swarmLastResult = null;
+let _swarmQuery = '';
 
 document.querySelectorAll('.swarm-mode-card').forEach(card => {
     card.addEventListener('click', () => {
@@ -6313,6 +6401,11 @@ function runSwarm() {
     if (!query) { alert('Wpisz pytanie dla roju.'); return; }
     const mode = document.querySelector('input[name="swarmMode"]:checked')?.value || 'quality';
     const fileFilter = document.getElementById('swarmFileFilter').value.trim() || null;
+
+    _swarmQuery = query;
+    _swarmLastResult = null;
+    const saveBtn = document.getElementById('swarmSaveBtn');
+    if (saveBtn) { saveBtn.style.display = 'none'; saveBtn.textContent = '💾 Zapisz jako raport'; saveBtn.disabled = false; }
 
     // Reset UI
     stopSwarm();
@@ -6434,6 +6527,15 @@ function _swarmHandleEvent(ev) {
             document.getElementById('swarmSynthesisLabel').textContent = '✅ Synteza zakończona';
             document.getElementById('swarmResult').style.display = 'block';
             document.getElementById('swarmAnswer').textContent = data.answer || '';
+            _swarmLastResult = {
+                query: _swarmQuery,
+                mode: data.mode || 'quality',
+                mode_label: data.mode_label || '',
+                n_workers: data.n_workers || 0,
+                answer: data.answer || '',
+            };
+            const saveBtn = document.getElementById('swarmSaveBtn');
+            if (saveBtn) saveBtn.style.display = '';
             stopSwarm();
             break;
         }

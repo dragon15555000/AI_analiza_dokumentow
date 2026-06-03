@@ -713,6 +713,12 @@ DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # 
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
+# ---- Swarm Reports (persystencja wyników roju) ----
+_SWARM_REPORTS_DIR = Path(__file__).parent / ".swarm_reports"
+
+def _ensure_swarm_reports_dir() -> None:
+    _SWARM_REPORTS_DIR.mkdir(exist_ok=True)
+
 # ---- Provider Pool (wiele kluczy / adresów serwerów) ----
 _PROVIDERS_FILE = Path(__file__).parent / ".providers.json"
 _provider_pool_lock = threading.Lock()
@@ -3936,6 +3942,10 @@ def agents_swarm_stream():
     cfg = SWARM_MODES.get(swarm_mode, SWARM_MODES['quality'])
 
     def generate():
+        def sse(event, d):
+            import json as _j
+            return f"event: {event}\ndata: {_j.dumps(d, ensure_ascii=False)}\n\n"
+
         try:
             yield sse('progress', {'msg': 'Pobieranie fragmentów z bazy wektorowej…', 'step': 1})
 
@@ -4331,6 +4341,94 @@ def providers_test(entry_id: str):
     except Exception as exc:
         ms = int((time.time() - t0) * 1000)
         return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
+
+
+# ===== SWARM REPORTS API =====
+
+@app.route('/api/swarm/reports', methods=['POST'])
+def swarm_reports_save():
+    """Zapisuje wynik roju agentów jako raport JSON."""
+    data = request.get_json() or {}
+    query   = (data.get('query') or '').strip()
+    mode    = (data.get('mode') or 'quality').strip()
+    mode_label = (data.get('mode_label') or mode).strip()
+    n_workers  = int(data.get('n_workers') or 0)
+    answer  = (data.get('answer') or '').strip()
+
+    if not query or not answer:
+        return jsonify({"success": False, "error": "Wymagane query i answer"})
+
+    _ensure_swarm_reports_dir()
+    import uuid
+    report_id = str(uuid.uuid4())[:8]
+    title = (query[:57] + '…') if len(query) > 60 else query
+    report = {
+        "id": report_id,
+        "title": title,
+        "query": query,
+        "mode": mode,
+        "mode_label": mode_label,
+        "n_workers": n_workers,
+        "answer": answer,
+        "saved_at": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
+    }
+    (_SWARM_REPORTS_DIR / f"{report_id}.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return jsonify({"success": True, "id": report_id})
+
+
+@app.route('/api/swarm/reports', methods=['GET'])
+def swarm_reports_list():
+    """Lista zapisanych raportów roju, posortowana od najnowszego."""
+    _ensure_swarm_reports_dir()
+    reports = []
+    for p in _SWARM_REPORTS_DIR.glob("*.json"):
+        try:
+            r = json.loads(p.read_text(encoding="utf-8"))
+            # Bezpieczny widok — answer może być długi, zwróć tylko preview
+            reports.append({
+                "id": r.get("id"),
+                "title": r.get("title"),
+                "query": r.get("query"),
+                "mode": r.get("mode"),
+                "mode_label": r.get("mode_label"),
+                "n_workers": r.get("n_workers"),
+                "saved_at": r.get("saved_at"),
+                "answer_preview": (r.get("answer") or "")[:300],
+            })
+        except Exception:
+            continue
+    reports.sort(key=lambda x: x.get("saved_at", ""), reverse=True)
+    return jsonify({"success": True, "reports": reports})
+
+
+@app.route('/api/swarm/reports/<report_id>', methods=['GET'])
+def swarm_reports_get(report_id: str):
+    """Pełny raport roju (z pełną treścią answer)."""
+    if not re.match(r'^[a-f0-9]{8}$', report_id):
+        return jsonify({"success": False, "error": "Nieprawidłowe ID"}), 400
+    p = _SWARM_REPORTS_DIR / f"{report_id}.json"
+    if not p.exists():
+        return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+    try:
+        return jsonify({"success": True, "report": json.loads(p.read_text(encoding="utf-8"))})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/swarm/reports/<report_id>', methods=['DELETE'])
+def swarm_reports_delete(report_id: str):
+    """Usuwa zapisany raport roju."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    if not re.match(r'^[a-f0-9]{8}$', report_id):
+        return jsonify({"success": False, "error": "Nieprawidłowe ID"}), 400
+    p = _SWARM_REPORTS_DIR / f"{report_id}.json"
+    if not p.exists():
+        return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+    p.unlink()
+    return jsonify({"success": True})
 
 
 @app.route('/suggestions', methods=['GET'])
