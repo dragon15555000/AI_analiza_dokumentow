@@ -20,7 +20,7 @@ Testy integracyjne (wymaga działającej aplikacji na :5000):
   - GET /api/config/llm
   - GET /api/swarm/modes + walidacja POST /agents/swarm (bez pełnego LLM)
   - GET /api/llm/fleet (cache, bez sondy)
-  - POST /search/stream (SSE: results, token, done) — opcjonalnie
+  - POST /search/stream (SSE: results, token, done + done.usage) — opcjonalnie
 
 Opcje:
   --skip-e2e      Pomiń test /search/stream (wolniejszy)
@@ -335,6 +335,7 @@ if not SKIP_E2E:
     import time
 
     events: list[str] = []
+    done_payload = None
     err = None
     stream_ok = False
     hdr = {**headers(), "Content-Type": "application/json"}
@@ -370,6 +371,11 @@ if not SKIP_E2E:
                         current_event = raw[7:].strip()
                     elif raw.startswith("data: ") and current_event:
                         events.append(current_event)
+                        if current_event == "done":
+                            try:
+                                done_payload = json.loads(raw[6:])
+                            except Exception:
+                                done_payload = None
                         if current_event == "error":
                             try:
                                 err = json.loads(raw[6:]).get("error", raw[6:][:80])
@@ -395,6 +401,15 @@ if not SKIP_E2E:
         check("  SSE: results", "results" in events)
         check("  SSE: token", "token" in events, safe_detail(str(err or "")))
         check("  SSE: done", "done" in events, safe_detail(str(err or "")))
+        if isinstance(done_payload, dict):
+            usage = done_payload.get("usage")
+            check(
+                "  SSE: done.usage",
+                isinstance(usage, dict) and any(k in usage for k in ("prompt_tokens", "completion_tokens", "total_tokens")),
+                safe_detail(str(usage or done_payload), 80),
+            )
+        else:
+            check("  SSE: done.usage", False, "brak payloadu done")
 else:
     print("SKIP: /search/stream (--skip-e2e)")
 

@@ -4678,6 +4678,7 @@ def hybrid_stream():
             # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
             full_answer = ""
             usage_meta = {}
+            streamed_chunks = 0
 
             try:
                 for token in stream_llm_tokens(
@@ -4696,14 +4697,19 @@ def hybrid_stream():
                         yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
                         return
                     full_answer += token
+                    streamed_chunks += 1
                     yield sse("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error: {e}")
                 yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
 
+            usage = usage_meta.get("usage")
+            if not usage and streamed_chunks > 0:
+                usage = {"completion_tokens": streamed_chunks, "total_tokens": streamed_chunks}
+
             yield sse("done", {
                 "ai_answer": full_answer,
-                "usage": usage_meta.get("usage"),
+                "usage": usage,
             })
 
         except Exception as e:
@@ -4759,6 +4765,7 @@ def search_stream():
             openrouter_model = _model_from_request(data, data.get("llm_provider"))
             resolved_prov = get_llm_provider(llm_provider, task=fleet_task)
             usage_meta = {}
+            streamed_chunks = 0
 
             try:
                 for token in stream_llm_tokens(
@@ -4786,16 +4793,21 @@ def search_stream():
                         yield sse("error", err_payload)
                         return
                     full_answer += token
+                    streamed_chunks += 1
                     yield sse("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error w search_stream: {e}")
                 yield sse("error", _sse_error_from_exc(e, provider=get_llm_provider(llm_provider)))
 
+            usage = usage_meta.get("usage")
+            if not usage and streamed_chunks > 0:
+                usage = {"completion_tokens": streamed_chunks, "total_tokens": streamed_chunks}
+
             yield sse("done", {
                 "ai_answer": full_answer,
                 "llm_provider_used": resolved_prov,
                 "fleet_auto_route": FLEET_AUTO_ROUTE,
-                "usage": usage_meta.get("usage"),
+                "usage": usage,
             })
 
         except Exception as e:
