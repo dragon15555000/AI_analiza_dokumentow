@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import json
-import html
 import urllib.request
 import re
 import os
@@ -71,8 +70,8 @@ def _is_sql_safe(sql_query: str, allowed_first_words: tuple) -> tuple[bool, str 
     if first_token not in allowed_first_words:
         return False, f"Niedozwolone polecenie: {first_token}"
 
-    if ";" in sql_query:
-        return False, "Wykryto średnik w SQL (potencjalne SQL Injection)"
+    if sql_upper.count(";") > 0:
+        return False, "Wykryto średnik w zapytaniu SQL (potencjalne SQL Injection)"
 
     for dangerous in DANGEROUS_SQL_KEYWORDS:
         if dangerous in sql_upper:
@@ -655,94 +654,8 @@ def _save_sql_config(cfg: dict) -> None:
 
 def _llm_response_text(result) -> str:
     if isinstance(result, dict):
-        direct = (result.get("response") or "").strip()
-        if direct:
-            return direct
-        choices = result.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0] if isinstance(choices[0], dict) else {}
-            msg = first.get("message") if isinstance(first.get("message"), dict) else {}
-            content = (msg.get("content") or first.get("text") or "").strip()
-            if content:
-                return content
-        return ""
+        return (result.get("response") or "").strip()
     return str(result).strip()
-
-
-def _safe_llm_int(value):
-    try:
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, (int, float)):
-            return max(0, int(value))
-        text = str(value).strip()
-        if not text:
-            return None
-        return max(0, int(float(text)))
-    except Exception:
-        return None
-
-
-def _normalize_llm_usage(raw) -> dict:
-    """Ujednolica liczniki tokenów z różnych providerów i formatów odpowiedzi."""
-    if not isinstance(raw, dict):
-        return {}
-
-    usage_src = raw.get("usage")
-    if isinstance(usage_src, dict):
-        src = usage_src
-    else:
-        src = raw
-
-    prompt = _safe_llm_int(
-        src.get("prompt_tokens")
-        or src.get("input_tokens")
-        or src.get("prompt_eval_count")
-    )
-    completion = _safe_llm_int(
-        src.get("completion_tokens")
-        or src.get("output_tokens")
-        or src.get("eval_count")
-    )
-    total = _safe_llm_int(src.get("total_tokens"))
-
-    if total is None and prompt is not None and completion is not None:
-        total = prompt + completion
-
-    usage = {}
-    if prompt is not None:
-        usage["prompt_tokens"] = prompt
-    if completion is not None:
-        usage["completion_tokens"] = completion
-    if total is not None:
-        usage["total_tokens"] = total
-    return usage
-
-
-def _extract_first_json_value(raw_text: str):
-    """Wyciąga pierwszy poprawny obiekt albo tablicę JSON z odpowiedzi LLM."""
-    text = (raw_text or "").strip()
-    if not text:
-        raise ValueError("Pusta odpowiedź LLM")
-
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-
-    decoder = json.JSONDecoder()
-    candidates = [m.start() for m in re.finditer(r"[\{\[]", text)]
-    for start in candidates:
-        try:
-            value, _end = decoder.raw_decode(text[start:])
-            return value
-        except Exception:
-            continue
-    raise ValueError("Nie udało się odczytać JSON z odpowiedzi LLM")
-
-
-def _escape_html_text(text: str) -> str:
-    return html.escape(text or "", quote=False)
 
 
 def _clean_llm_sql(raw: str) -> str:
@@ -794,22 +707,62 @@ try:
     OPENROUTER_MAX_RETRIES = max(1, int(os.environ.get("OPENROUTER_MAX_RETRIES", "3")))
 except ValueError:
     logger.warning("Nieprawidłowa wartość OPENROUTER_MAX_RETRIES w .env, używam domyślnej: 3")
+    OPENROUTER_MAX_RETRIES = 3
 
-TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
-
-# Groq (OpenAI-compatible API — szybkie testy)
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_MODEL_VERIFY = os.environ.get("GROQ_MODEL_VERIFY", "llama-3.1-8b-instant")
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter | groq | ollama
-FLEET_AUTO_ROUTE = os.environ.get("FLEET_AUTO_ROUTE", "").lower() in ("1", "true", "yes")
+DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter (domyślnie dla LLM) | ollama (tylko dla importu/embeddings)
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
+# ---- Swarm Reports (persystencja wyników roju) ----
+_SWARM_REPORTS_DIR = Path(__file__).parent / ".swarm_reports"
+
+def _ensure_swarm_reports_dir() -> None:
+    _SWARM_REPORTS_DIR.mkdir(exist_ok=True)
+
+# ---- Provider Pool (wiele kluczy / adresów serwerów) ----
+_PROVIDERS_FILE = Path(__file__).parent / ".providers.json"
+_provider_pool_lock = threading.Lock()
+
+def _load_provider_pool() -> dict:
+    """Wczytuje pulę dostawców z pliku JSON."""
+    try:
+        if _PROVIDERS_FILE.exists():
+            return json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
+
+def _save_provider_pool(pool: dict) -> None:
+    with _provider_pool_lock:
+        _PROVIDERS_FILE.write_text(json.dumps(pool, indent=2, ensure_ascii=False), encoding="utf-8")
+
+# Wskaźnik rotacji round-robin (klucze OpenRouter)
+_provider_rr_idx: int = 0
+
+def _pick_openrouter_key() -> str:
+    """Zwraca kolejny aktywny klucz OpenRouter z puli (round-robin).
+    Jeśli pula pusta — używa głównego OPENROUTER_API_KEY z .env."""
+    global _provider_rr_idx
+    pool = _load_provider_pool()
+    active = [e for e in pool.get("openrouter_keys", []) if e.get("active") and e.get("key")]
+    if not active:
+        return OPENROUTER_API_KEY
+    with _provider_pool_lock:
+        idx = _provider_rr_idx % len(active)
+        _provider_rr_idx = (idx + 1) % len(active)
+    return active[idx]["key"]
+
+def _pick_ollama_url() -> str:
+    """Zwraca pierwszy aktywny adres Ollama z puli, albo domyślny OLLAMA_URL."""
+    pool = _load_provider_pool()
+    active = [e for e in pool.get("ollama_urls", []) if e.get("active") and e.get("url")]
+    return active[0]["url"] if active else OLLAMA_URL
+
 APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
+# Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
+# który nadpisuje X-Forwarded-For — NIGDY nie włączaj gdy app jest dostępna z zewnątrz bez proxy
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
 
 # Wersja aplikacji — automatycznie odczytywana z git tagów w trybie deweloperskim
 # (git describe --tags --dirty). W releasach produkcyjnych wraca do stałej.
@@ -1335,12 +1288,14 @@ def _require_api_key():
 
 
 def _is_local_request() -> bool:
-    """Sprawdza czy żądanie pochodzi z localhost (bezpieczne dla tras konfiguracyjnych)."""
+    """Sprawdza czy żądanie pochodzi z localhost.
+    Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true w .env
+    (używaj wyłącznie za zaufanym reverse proxy).
+    """
     remote = request.remote_addr or ""
     if remote in ("127.0.0.1", "::1", "localhost"):
         return True
     if TRUST_PROXY:
-        # Trust forwarded headers only when explicitly enabled.
         forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("X-Real-IP", "")
         if forwarded:
             first = forwarded.split(",")[0].strip()
@@ -1392,7 +1347,6 @@ def _apply_llm_config(cfg: dict):
     """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
-    global GROQ_API_KEY, GROQ_MODEL, GROQ_MODEL_VERIFY
     global OLLAMA_URL, LLM_MODEL, APP_API_KEY
 
     if cfg.get("provider"):
@@ -1405,12 +1359,6 @@ def _apply_llm_config(cfg: dict):
         OPENROUTER_MODEL_VERIFY = cfg["openrouter_model_verify"]
     if "openrouter_fallback" in cfg:
         OPENROUTER_FALLBACK_TO_OLLAMA = bool(cfg["openrouter_fallback"])
-    if cfg.get("groq_key"):
-        GROQ_API_KEY = cfg["groq_key"]
-    if cfg.get("groq_model"):
-        GROQ_MODEL = cfg["groq_model"]
-    if cfg.get("groq_model_verify"):
-        GROQ_MODEL_VERIFY = cfg["groq_model_verify"]
     if cfg.get("ollama_url"):
         OLLAMA_URL = cfg["ollama_url"]
     if cfg.get("llm_model"):
@@ -1423,14 +1371,8 @@ def _apply_llm_config(cfg: dict):
         # Pozwól wyczyścić klucz przez UI
         APP_API_KEY = ""
 
-    global FLEET_AUTO_ROUTE
-    if "fleet_auto_route" in cfg:
-        FLEET_AUTO_ROUTE = bool(cfg["fleet_auto_route"])
 
-    _rebuild_provider_pools(cfg)
-
-
-# (początkowe _apply_llm_config — wywołane po definicji pul, na końcu sekcji pool)
+_apply_llm_config(_load_llm_config())
 
 
 # ============================================================
@@ -1454,23 +1396,10 @@ def get_llm_config():
         "openrouter_model": cfg.get("openrouter_model", OPENROUTER_MODEL),
         "openrouter_model_verify": cfg.get("openrouter_model_verify", OPENROUTER_MODEL_VERIFY),
         "openrouter_fallback": cfg.get("openrouter_fallback", OPENROUTER_FALLBACK_TO_OLLAMA),
-        "groq_model": cfg.get("groq_model", GROQ_MODEL),
-        "groq_model_verify": cfg.get("groq_model_verify", GROQ_MODEL_VERIFY),
 
         # Bezpieczne flagi zamiast podglądów kluczy
-        "openrouter_key_set": bool(cfg.get("openrouter_key") or cfg.get("openrouter_keys") or OPENROUTER_API_KEY),
-        "groq_key_set": bool(cfg.get("groq_key") or cfg.get("groq_keys") or GROQ_API_KEY),
+        "openrouter_key_set": bool(cfg.get("openrouter_key")),
         "app_api_key_set": bool(cfg.get("app_api_key")),
-
-        "groq_keys_count": GROQ_KEY_POOL.count(),
-        "openrouter_keys_count": OPENROUTER_KEY_POOL.count(),
-        "ollama_urls_count": OLLAMA_URL_POOL.count(),
-        "fleet_auto_route": cfg.get("fleet_auto_route", FLEET_AUTO_ROUTE),
-        "pools": {
-            "groq": GROQ_KEY_POOL.stats(),
-            "openrouter": OPENROUTER_KEY_POOL.stats(),
-            "ollama": OLLAMA_URL_POOL.stats(),
-        },
     })
 
 
@@ -1486,8 +1415,7 @@ def save_llm_config():
 
     # Aktualizuj tylko dozwolone pola
     allowed = ["provider", "ollama_url", "llm_model", "openrouter_model",
-               "openrouter_model_verify", "openrouter_fallback",
-               "groq_model", "groq_model_verify", "fleet_auto_route"]
+               "openrouter_model_verify", "openrouter_fallback"]
 
     for k in allowed:
         if k in data:
@@ -1496,14 +1424,6 @@ def save_llm_config():
     # Klucze — zapisujemy tylko jeśli użytkownik je podał (nie nadpisujemy pustymi)
     if data.get("openrouter_key"):
         current["openrouter_key"] = data["openrouter_key"]
-    if data.get("groq_key"):
-        current["groq_key"] = data["groq_key"]
-    if isinstance(data.get("openrouter_keys"), list):
-        current["openrouter_keys"] = [k.strip() for k in data["openrouter_keys"] if k and str(k).strip()]
-    if isinstance(data.get("groq_keys"), list):
-        current["groq_keys"] = [k.strip() for k in data["groq_keys"] if k and str(k).strip()]
-    if isinstance(data.get("ollama_urls"), list):
-        current["ollama_urls"] = [u.strip().rstrip("/") for u in data["ollama_urls"] if u and str(u).strip()]
     if "app_api_key" in data:
         current["app_api_key"] = data["app_api_key"] or ""
 
@@ -1514,675 +1434,16 @@ def save_llm_config():
 
 
 # ============================================================
-# POOL KLUCZY / SERWERÓW (rotacja round-robin + cooldown)
+# LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
 # ============================================================
 
-class EndpointPool:
-    """Thread-safe round-robin z cooldownem po błędach (429, auth, connection)."""
-
-    def __init__(self, label: str = "pool"):
-        self.label = label
-        self._lock = threading.Lock()
-        self._items: list[str] = []
-        self._idx = 0
-        self._cooldown: dict[str, float] = {}
-
-    def set_items(self, items: list[str]):
-        with self._lock:
-            clean: list[str] = []
-            seen: set[str] = set()
-            for x in items:
-                s = (x or "").strip()
-                if s and s not in seen:
-                    seen.add(s)
-                    clean.append(s)
-            self._items = clean
-            if self._idx >= len(self._items):
-                self._idx = 0
-            stale = set(self._cooldown) - seen
-            for k in stale:
-                del self._cooldown[k]
-
-    def count(self) -> int:
-        with self._lock:
-            return len(self._items)
-
-    def stats(self) -> dict:
-        with self._lock:
-            now = time.monotonic()
-            available = sum(1 for i in self._items if self._cooldown.get(i, 0) <= now)
-            return {
-                "total": len(self._items),
-                "available": available,
-                "in_cooldown": len(self._items) - available,
-            }
-
-    def peek_primary(self) -> str | None:
-        with self._lock:
-            return self._items[0] if self._items else None
-
-    def acquire(self) -> str | None:
-        with self._lock:
-            if not self._items:
-                return None
-            now = time.monotonic()
-            n = len(self._items)
-            for _ in range(n):
-                item = self._items[self._idx]
-                self._idx = (self._idx + 1) % n
-                if self._cooldown.get(item, 0) <= now:
-                    return item
-            return min(self._items, key=lambda i: self._cooldown.get(i, 0))
-
-    def mark_failure(self, item: str, *, cooldown_sec: float = 60.0):
-        if not item:
-            return
-        with self._lock:
-            self._cooldown[item] = time.monotonic() + max(1.0, cooldown_sec)
-
-    def mark_success(self, item: str):
-        if not item:
-            return
-        with self._lock:
-            self._cooldown.pop(item, None)
-
-
-GROQ_KEY_POOL = EndpointPool("groq_keys")
-OPENROUTER_KEY_POOL = EndpointPool("openrouter_keys")
-OLLAMA_URL_POOL = EndpointPool("ollama_urls")
-
-
-def _parse_env_list(*names: str) -> list[str]:
-    out: list[str] = []
-    for name in names:
-        val = os.environ.get(name, "").strip()
-        if not val:
-            continue
-        for part in re.split(r"[,;\n\r]+", val):
-            p = part.strip()
-            if p:
-                out.append(p)
-    return out
-
-
-def _merge_unique(*lists) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for lst in lists:
-        for x in lst or []:
-            s = (x or "").strip()
-            if s and s not in seen:
-                seen.add(s)
-                out.append(s)
-    return out
-
-
-def _normalize_key_list(cfg: dict, single_key: str, plural_key: str) -> list[str]:
-    items: list[str] = []
-    raw = cfg.get(plural_key)
-    if isinstance(raw, list):
-        items.extend(raw)
-    elif cfg.get(single_key):
-        items.append(cfg[single_key])
-    return items
-
-
-def _normalize_url_list(cfg: dict) -> list[str]:
-    urls: list[str] = []
-    raw = cfg.get("ollama_urls")
-    if isinstance(raw, list):
-        urls.extend(raw)
-    elif cfg.get("ollama_url"):
-        urls.append(cfg["ollama_url"])
-    return [u.rstrip("/") for u in urls if u and str(u).strip()]
-
-
-def _rebuild_provider_pools(cfg: dict | None = None):
-    """Buduje pule z .llm_config.json + zmiennych środowiskowych."""
-    global GROQ_API_KEY, OPENROUTER_API_KEY, OLLAMA_URL
-    cfg = cfg or {}
-
-    groq_keys = _merge_unique(
-        _normalize_key_list(cfg, "groq_key", "groq_keys"),
-        _parse_env_list("GROQ_API_KEYS", "GROQ_API_KEY"),
-    )
-    if not groq_keys and GROQ_API_KEY:
-        groq_keys = [GROQ_API_KEY.strip()]
-    GROQ_KEY_POOL.set_items(groq_keys)
-    if groq_keys:
-        GROQ_API_KEY = groq_keys[0]
-
-    or_keys = _merge_unique(
-        _normalize_key_list(cfg, "openrouter_key", "openrouter_keys"),
-        _parse_env_list("OPENROUTER_API_KEYS", "OPENROUTER_API_KEY"),
-    )
-    if not or_keys and OPENROUTER_API_KEY:
-        or_keys = [OPENROUTER_API_KEY.strip()]
-    OPENROUTER_KEY_POOL.set_items(or_keys)
-    if or_keys:
-        OPENROUTER_API_KEY = or_keys[0]
-
-    ollama_urls = _merge_unique(
-        _normalize_url_list(cfg),
-        _parse_env_list("OLLAMA_URLS", "OLLAMA_URL"),
-    )
-    if not ollama_urls and OLLAMA_URL:
-        ollama_urls = [OLLAMA_URL.rstrip("/")]
-    OLLAMA_URL_POOL.set_items(ollama_urls)
-    if ollama_urls:
-        OLLAMA_URL = ollama_urls[0]
-
-
-def _ollama_bases() -> list[str]:
-    """Kolejność serwerów Ollama do próby (round-robin z puli)."""
-    if OLLAMA_URL_POOL.count():
-        bases: list[str] = []
-        seen: set[str] = set()
-        for _ in range(OLLAMA_URL_POOL.count()):
-            u = OLLAMA_URL_POOL.acquire()
-            if u:
-                u = u.rstrip("/")
-                if u not in seen:
-                    seen.add(u)
-                    bases.append(u)
-        if bases:
-            return bases
-    return [OLLAMA_URL.rstrip("/")]
-
-
-def _cloud_headers(cloud_cfg: dict, api_key: str) -> dict:
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        **cloud_cfg.get("extra_headers", {}),
-    }
-
-
-def _next_cloud_key(cloud_cfg: dict, exclude: set[str] | None = None) -> str | None:
-    exclude = exclude or set()
-    pool = cloud_cfg.get("pool")
-    if pool and pool.count():
-        for _ in range(pool.count()):
-            k = pool.acquire()
-            if k and k not in exclude:
-                return k
-    k = cloud_cfg.get("api_key")
-    return k if k and k not in exclude else None
-
-
-def _should_rotate_pool(exc: Exception) -> bool:
-    return _is_rate_limit_error(exc) or _is_auth_error(exc) or _is_transient_llm_error(exc)
-
-
-_apply_llm_config(_load_llm_config())
-
-
-# ============================================================
-# FLOTA LLM — sondowanie, ranking, auto-routing
-# ============================================================
-
-LLM_FLEET_STATS_PATH = Path(__file__).parent / ".llm_fleet_stats.json"
-_fleet_stats_lock = threading.Lock()
-
-LLM_FLEET_CATALOG = {
-    "ollama": {
-        "label": "Ollama (lokalny)",
-        "cost": "darmowy (lokalnie)",
-        "limits_hint": "Brak limitów API — zależy od RAM/GPU i modelu.",
-        "context_hint": "Zależy od modelu (np. 8k–128k).",
-        "agents": ["embedding", "chat", "fallback"],
-        "free_models": [],
-        "default_model": lambda: LLM_MODEL,
-    },
-    "openrouter": {
-        "label": "OpenRouter (chmura)",
-        "cost": "modele :free — bez opłat (limity dzienne)",
-        "limits_hint": "Limity per model free; rotacja kluczy przy 429.",
-        "context_hint": "Do ~128k (model zależny).",
-        "agents": ["chat", "synteza", "weryfikacja", "sieć", "timeline"],
-        "free_models": [
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "google/gemini-2.0-flash-exp:free",
-            "mistralai/mistral-7b-instruct:free",
-            "qwen/qwen-2.5-7b-instruct:free",
-            "meta-llama/llama-3.1-8b-instruct:free",
-        ],
-        "default_model": lambda: OPENROUTER_MODEL,
-    },
-    "groq": {
-        "label": "Groq (chmura)",
-        "cost": "darmowy tier z limitami RPM/TPM",
-        "limits_hint": "https://console.groq.com/settings/limits — RPM/TPM per model.",
-        "context_hint": "Do ~128k (model zależny).",
-        "agents": ["chat", "szybki agent", "weryfikacja"],
-        "free_models": [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "groq/compound-mini",
-            "groq/compound",
-        ],
-        "default_model": lambda: GROQ_MODEL,
-    },
-}
-
-FLEET_TASK_HINTS = {
-    "general": {"prefer": ["openrouter", "groq", "ollama"], "note": "Domyślny chat"},
-    "search": {"prefer": ["openrouter", "groq", "ollama"], "note": "Szybka synteza wyszukiwania"},
-    "ai": {"prefer": ["openrouter", "groq", "ollama"], "note": "Analiza z bazy"},
-    "compare": {"prefer": ["openrouter", "ollama", "groq"], "note": "Duży kontekst — modele 70B"},
-    "network": {"prefer": ["openrouter", "ollama", "groq"], "note": "Ekstrakcja JSON / relacji"},
-    "timeline": {"prefer": ["openrouter", "groq", "ollama"], "note": "Ekstrakcja dat z JSON"},
-    "swarm": {"prefer": ["openrouter", "groq", "ollama"], "note": "Równoległe workery"},
-    "verify": {"prefer": ["openrouter", "groq", "ollama"], "note": "Drugi pass LLM"},
-}
-
-
-def _fleet_default_stats() -> dict:
-    return {
-        "calls_total": 0,
-        "calls_ok": 0,
-        "calls_fail": 0,
-        "latency_ema_ms": None,
-        "last_ok_at": None,
-        "last_error": None,
-        "last_error_kind": None,
-        "last_probe_at": None,
-        "last_probe_ms": None,
-        "last_probe_ok": None,
-        "score": 50.0,
-    }
-
-
-def _fleet_load_all_stats() -> dict:
-    if not LLM_FLEET_STATS_PATH.exists():
-        return {}
-    try:
-        return json.loads(LLM_FLEET_STATS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _fleet_save_all_stats(data: dict):
-    try:
-        LLM_FLEET_STATS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception as e:
-        logger.warning("fleet stats save: %s", e)
-
-
-def _fleet_get_stats(prov: str) -> dict:
-    with _fleet_stats_lock:
-        all_s = _fleet_load_all_stats()
-        base = _fleet_default_stats()
-        base.update(all_s.get(prov) or {})
-        return base
-
-
-def _fleet_compute_score(stats: dict, probe: dict | None, health: dict | None) -> float:
-    score = 0.0
-    probe_ok = (probe or {}).get("ok")
-    health_ok = (health or {}).get("ok")
-    if probe_ok is True or (probe_ok is None and health_ok):
-        score += 35.0
-    elif probe_ok is False or health_ok is False:
-        score += 5.0
-    else:
-        score += 15.0
-
-    lat = (probe or {}).get("latency_ms") or stats.get("last_probe_ms") or stats.get("latency_ema_ms")
-    if lat is not None:
-        score += max(0.0, 30.0 - min(float(lat), 3000.0) / 100.0)
-
-    total = int(stats.get("calls_total") or 0)
-    ok = int(stats.get("calls_ok") or 0)
-    if total > 0:
-        score += 25.0 * (ok / total)
-    else:
-        score += 12.0
-
-    kind = (probe or {}).get("kind") or stats.get("last_error_kind")
-    if kind in ("rate_limit", "auth", "org_blocked", "no_key"):
-        score -= 20.0
-
-    return round(max(0.0, min(100.0, score)), 1)
-
-
-def _fleet_record_outcome(prov: str, ok: bool, latency_ms: float | None = None,
-                          error_kind: str | None = None, error_msg: str | None = None,
-                          count_call: bool = True):
-    with _fleet_stats_lock:
-        all_s = _fleet_load_all_stats()
-        st = _fleet_default_stats()
-        st.update(all_s.get(prov) or {})
-        if count_call:
-            st["calls_total"] = int(st["calls_total"]) + 1
-            if ok:
-                st["calls_ok"] = int(st["calls_ok"]) + 1
-            else:
-                st["calls_fail"] = int(st["calls_fail"]) + 1
-        if ok:
-            st["last_ok_at"] = int(time.time())
-        elif error_kind or error_msg:
-            if error_kind:
-                st["last_error_kind"] = error_kind
-            if error_msg:
-                st["last_error"] = str(error_msg)[:200]
-        if latency_ms is not None:
-            prev = st.get("latency_ema_ms")
-            st["latency_ema_ms"] = (
-                float(latency_ms) if prev is None
-                else 0.25 * float(latency_ms) + 0.75 * float(prev)
-            )
-        all_s[prov] = st
-        _fleet_save_all_stats(all_s)
-
-
-def _fleet_probe_provider(prov: str) -> dict:
-    """Lekkie ping — mierzy opóźnienie i dostępność."""
-    t0 = time.monotonic()
-    meta = LLM_FLEET_CATALOG.get(prov, {})
-    try:
-        if prov == "ollama":
-            h = _check_ollama_health()
-            ok = h.get("ok", False)
-            kind = None if ok else "network"
-            err = h.get("error")
-        elif prov == "openrouter":
-            h = _check_openrouter_health()
-            ok = h.get("ok", False)
-            kind = "no_key" if "Brak" in str(h.get("error") or "") else ("rate_limit" if "429" in str(h.get("error") or "") else None)
-            err = h.get("error")
-        elif prov == "groq":
-            api_key = GROQ_KEY_POOL.peek_primary() or GROQ_API_KEY
-            if not api_key:
-                h = {"ok": False, "kind": "no_key", "error": "Brak GROQ_API_KEY"}
-                ok, kind, err = False, "no_key", h["error"]
-            else:
-                try:
-                    r = requests.get(
-                        "https://api.groq.com/openai/v1/models",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        timeout=8,
-                    )
-                    if r.status_code == 401:
-                        h = {"ok": False, "kind": "auth", "error": "Nieprawidłowy GROQ_API_KEY"}
-                    elif r.status_code == 429:
-                        h = {"ok": False, "kind": "rate_limit", "error": "Groq rate limit (429)"}
-                    else:
-                        r.raise_for_status()
-                        h = {
-                            "ok": True,
-                            "models_available": len(r.json().get("data", [])),
-                            "model_tested": GROQ_MODEL,
-                        }
-                    ok = h.get("ok", False)
-                    kind = h.get("kind")
-                    err = h.get("error")
-                except Exception as ex:
-                    err = _format_cloud_api_error(ex, "Groq")[:200]
-                    kind = "network"
-                    ok = False
-                    h = {"ok": False, "kind": kind, "error": err}
-        else:
-            return {"ok": False, "kind": "unknown", "error": "Nieznany provider"}
-        latency_ms = round((time.monotonic() - t0) * 1000, 1)
-        out = {
-            "ok": ok,
-            "latency_ms": latency_ms,
-            "kind": kind,
-            "error": err,
-            "health": h,
-        }
-        with _fleet_stats_lock:
-            all_s = _fleet_load_all_stats()
-            st = _fleet_default_stats()
-            st.update(all_s.get(prov) or {})
-            st["last_probe_at"] = int(time.time())
-            st["last_probe_ms"] = latency_ms
-            st["last_probe_ok"] = ok
-            if not ok and err:
-                st["last_error"] = str(err)[:200]
-                st["last_error_kind"] = kind
-            st["score"] = _fleet_compute_score(st, out, h)
-            all_s[prov] = st
-            _fleet_save_all_stats(all_s)
-        _fleet_record_outcome(prov, ok, latency_ms, error_kind=kind, error_msg=err, count_call=False)
-        return out
-    except Exception as e:
-        latency_ms = round((time.monotonic() - t0) * 1000, 1)
-        out = {"ok": False, "latency_ms": latency_ms, "kind": "network", "error": str(e)[:200]}
-        _fleet_record_outcome(prov, False, latency_ms, error_kind="network", error_msg=str(e))
-        return out
-
-
-def _fleet_health_from_cache(prov: str, stats: dict) -> dict:
-    """Szybki status z ostatniej sondy — bez ponownego chat ping (Groq bywa >5 s)."""
-    if stats.get("last_probe_at"):
-        return {
-            "ok": bool(stats.get("last_probe_ok")),
-            "cached": True,
-            "last_probe_at": stats.get("last_probe_at"),
-            "error": stats.get("last_error"),
-            "kind": stats.get("last_error_kind"),
-        }
-    if prov == "ollama":
-        return _check_ollama_health()
-    if prov == "openrouter":
-        api_key = OPENROUTER_KEY_POOL.peek_primary() or OPENROUTER_API_KEY
-        if not api_key:
-            return {"ok": False, "error": "Brak OPENROUTER_API_KEY", "kind": "no_key"}
-        return {"ok": True, "cached": False, "note": "Klucz ustawiony — uruchom sondę dla latencji"}
-    api_key = GROQ_KEY_POOL.peek_primary() or GROQ_API_KEY
-    if not api_key:
-        return {"ok": False, "error": "Brak GROQ_API_KEY", "kind": "no_key"}
-    return {"ok": True, "cached": False, "note": "Klucz ustawiony — uruchom sondę dla latencji"}
-
-
-def _fleet_provider_row(prov: str, *, probe: bool = False) -> dict:
-    meta = LLM_FLEET_CATALOG[prov]
-    stats = _fleet_get_stats(prov)
-    probe_res = _fleet_probe_provider(prov) if probe else None
-    if prov == "ollama":
-        pool = OLLAMA_URL_POOL.stats()
-        key_set = True
-    elif prov == "openrouter":
-        pool = OPENROUTER_KEY_POOL.stats()
-        key_set = bool(OPENROUTER_KEY_POOL.peek_primary() or OPENROUTER_API_KEY)
-    else:
-        pool = GROQ_KEY_POOL.stats()
-        key_set = bool(GROQ_KEY_POOL.peek_primary() or GROQ_API_KEY)
-
-    if probe_res is not None:
-        health = probe_res.get("health") or {"ok": probe_res.get("ok"), "error": probe_res.get("error")}
-        stats = _fleet_get_stats(prov)
-    else:
-        health = _fleet_health_from_cache(prov, stats)
-
-    score = _fleet_compute_score(stats, probe_res, health)
-    return {
-        "id": prov,
-        "label": meta["label"],
-        "ok": health.get("ok", False),
-        "key_configured": key_set,
-        "score": score,
-        "latency_ms": (probe_res or {}).get("latency_ms") or stats.get("last_probe_ms") or stats.get("latency_ema_ms"),
-        "limits_hint": meta["limits_hint"],
-        "context_hint": meta["context_hint"],
-        "cost": meta["cost"],
-        "agents": meta["agents"],
-        "free_models": meta.get("free_models") or [],
-        "default_model": meta["default_model"](),
-        "pool": pool,
-        "health": health,
-        "stats": {
-            "calls_total": stats.get("calls_total", 0),
-            "calls_ok": stats.get("calls_ok", 0),
-            "calls_fail": stats.get("calls_fail", 0),
-            "last_probe_at": stats.get("last_probe_at"),
-            "last_error": stats.get("last_error"),
-            "last_error_kind": stats.get("last_error_kind"),
-        },
-        "probe": probe_res,
-    }
-
-
-def _fleet_rank_providers(task: str | None = None) -> list[dict]:
-    task = (task or "general").lower()
-    hint = FLEET_TASK_HINTS.get(task, FLEET_TASK_HINTS["general"])
-    prefer = hint["prefer"]
-    rows = [_fleet_provider_row(p, probe=False) for p in LLM_FLEET_CATALOG]
-    order = {p: i for i, p in enumerate(prefer)}
-    rows.sort(key=lambda r: (-r["score"], order.get(r["id"], 99)))
-    return rows
-
-
-def _fleet_pick_provider(task: str | None = None) -> str | None:
-    ranked = _fleet_rank_providers(task)
-    for row in ranked:
-        if row.get("ok") and row.get("key_configured", True):
-            return row["id"]
-    for row in ranked:
-        if row.get("ok"):
-            return row["id"]
-    return ranked[0]["id"] if ranked else None
-
-
-def _fleet_effective_provider(task: str | None = None) -> str:
-    """Provider faktycznie używany przez LLM gdy auto-route włączone."""
-    task_key = (task or "general").strip().lower()
-    if FLEET_AUTO_ROUTE:
-        picked = _fleet_pick_provider(task_key)
-        if picked:
-            return picked
-    return DEFAULT_LLM_PROVIDER
-
-
-@app.route('/api/llm/fleet', methods=['GET'])
-def api_llm_fleet():
-    auth = _require_config_access()
-    if auth:
-        return auth
-    task = (request.args.get("task") or "general").strip().lower()
-    ranked = _fleet_rank_providers(task)
-    hint = FLEET_TASK_HINTS.get(task, FLEET_TASK_HINTS["general"])
-    recommended = ranked[0]["id"] if ranked else DEFAULT_LLM_PROVIDER
-    active = _fleet_effective_provider(task)
-    return jsonify({
-        "success": True,
-        "auto_route": FLEET_AUTO_ROUTE,
-        "active_provider": active,
-        "configured_provider": DEFAULT_LLM_PROVIDER,
-        "recommended_provider": recommended,
-        "recommended_for_task": task,
-        "task_hint": hint,
-        "providers": ranked,
-        "timestamp": int(time.time()),
-    })
-
-
-@app.route('/api/llm/fleet/probe', methods=['POST'])
-def api_llm_fleet_probe():
-    auth = _require_config_access()
-    if auth:
-        return auth
-    data = request.get_json() or {}
-    only = (data.get("provider") or "").strip().lower()
-    providers = [only] if only in LLM_FLEET_CATALOG else list(LLM_FLEET_CATALOG.keys())
-    results = {p: _fleet_probe_provider(p) for p in providers}
-    ranked = _fleet_rank_providers(data.get("task") or "general")
-    return jsonify({
-        "success": True,
-        "probed": providers,
-        "results": results,
-        "providers": ranked,
-        "timestamp": int(time.time()),
-    })
-
-
-@app.route('/api/llm/fleet/auto-route', methods=['POST'])
-def api_llm_fleet_auto_route():
-    auth = _require_config_access()
-    if auth:
-        return auth
-    global FLEET_AUTO_ROUTE
-    data = request.get_json() or {}
-    enabled = bool(data.get("enabled"))
-    FLEET_AUTO_ROUTE = enabled
-    cfg = _load_llm_config()
-    cfg["fleet_auto_route"] = enabled
-    _save_llm_config(cfg)
-    return jsonify({
-        "success": True,
-        "auto_route": FLEET_AUTO_ROUTE,
-        "recommended_provider": _fleet_pick_provider("general"),
-    })
-
-
-# ============================================================
-# LLM PROVIDER ABSTRACTION (Ollama / OpenRouter / Groq)
-# ============================================================
-
-def _fleet_task_from_data(data: dict | None, default: str = "general") -> str:
-    if not data:
-        return default
-    return (data.get("fleet_task") or data.get("task") or default).strip().lower()
-
-
-def get_llm_provider(request_provider: str | None = None, task: str | None = None) -> str:
-    """Zwraca aktywny provider: 'ollama', 'openrouter' lub 'groq'."""
+def get_llm_provider(request_provider: str | None = None) -> str:
+    """Zwraca aktywny provider: 'ollama' lub 'openrouter'."""
     if request_provider:
         p = request_provider.lower()
-        if p == "auto" and FLEET_AUTO_ROUTE:
-            picked = _fleet_pick_provider(task or "general")
-            if picked:
-                return picked
-        if p in ("ollama", "openrouter", "groq"):
+        if p in ("ollama", "openrouter"):
             return p
-    if FLEET_AUTO_ROUTE:
-        picked = _fleet_pick_provider(task or "general")
-        if picked:
-            return picked
     return DEFAULT_LLM_PROVIDER
-
-
-def _model_from_request(data: dict, provider: str | None = None) -> str | None:
-    """Model z body requestu (groq_model / openrouter_model)."""
-    prov = get_llm_provider(provider or data.get("llm_provider"))
-    if prov == "groq":
-        return data.get("groq_model") or data.get("openrouter_model")
-    if prov == "openrouter":
-        return data.get("openrouter_model")
-    return None
-
-
-def _cloud_llm_settings(prov: str) -> dict:
-    """Ustawienia chmurowego providera (OpenAI-compatible chat/completions)."""
-    if prov == "groq":
-        pool = GROQ_KEY_POOL
-        fallback_key = GROQ_API_KEY
-        return {
-            "api_key": pool.acquire() or fallback_key,
-            "url": GROQ_API_URL,
-            "default_model": GROQ_MODEL,
-            "verify_model": GROQ_MODEL_VERIFY,
-            "label": "Groq",
-            "key_env": "GROQ_API_KEY",
-            "extra_headers": {},
-            "pool": pool,
-        }
-    pool = OPENROUTER_KEY_POOL
-    return {
-        "api_key": pool.acquire() or OPENROUTER_API_KEY,
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "default_model": OPENROUTER_MODEL,
-        "verify_model": OPENROUTER_MODEL_VERIFY,
-        "label": "OpenRouter",
-        "key_env": "OPENROUTER_API_KEY",
-        "extra_headers": {
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "AI Analiza Dokumentów",
-        },
-        "pool": pool,
-    }
 
 
 # ---- Rate limit helpers (OpenRouter) ----
@@ -2193,9 +1454,8 @@ def _cloud_llm_settings(prov: str) -> dict:
 
 def _check_ollama_health() -> dict:
     """Sprawdza czy Ollama działa i czy modele są dostępne."""
-    base = (_ollama_bases()[0] if _ollama_bases() else OLLAMA_URL).rstrip("/")
     try:
-        url = base + "/api/tags"
+        url = OLLAMA_URL + "/api/tags"
         with urllib.request.urlopen(url, timeout=4) as r:
             data = json.loads(r.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
@@ -2203,175 +1463,35 @@ def _check_ollama_health() -> dict:
             has_embed = any(EMBED_MODEL in m for m in models)
             return {
                 "ok": True,
-                "url": base,
-                "pool": OLLAMA_URL_POOL.stats(),
+                "url": OLLAMA_URL,
                 "models_available": len(models),
                 "has_llm": has_llm,
                 "has_embedding": has_embed,
                 "error": None
             }
     except Exception as e:
-        return {"ok": False, "url": base, "pool": OLLAMA_URL_POOL.stats(), "error": str(e)[:120]}
+        return {"ok": False, "url": OLLAMA_URL, "error": str(e)[:120]}
 
 
 def _check_openrouter_health() -> dict:
     """Lekkie sprawdzenie OpenRouter (czy klucz działa)."""
-    api_key = OPENROUTER_KEY_POOL.peek_primary() or OPENROUTER_API_KEY
-    pool_stats = OPENROUTER_KEY_POOL.stats()
-    if not api_key:
-        return {"ok": False, "error": "Brak OPENROUTER_API_KEY", "pool": pool_stats}
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "Brak OPENROUTER_API_KEY"}
 
     try:
+        # Używamy lekkiego endpointu (list models jest darmowy i szybki)
         url = "https://openrouter.ai/api/v1/models"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
         req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode("utf-8"))
             return {
                 "ok": True,
                 "models_available": len(data.get("data", [])),
-                "pool": pool_stats,
                 "error": None
             }
     except Exception as e:
-        return {"ok": False, "pool": pool_stats, "error": str(e)[:120]}
-
-
-def _format_cloud_api_error(exc: Exception, label: str = "API") -> str:
-    """Wyciąga czytelny komunikat z odpowiedzi OpenAI-compatible API (Groq/OpenRouter)."""
-    try:
-        if hasattr(exc, "response") and exc.response is not None:
-            body = exc.response.json()
-            msg = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else None
-            if msg:
-                if "blocked at the organization" in msg.lower():
-                    return (
-                        f"{msg} Włącz model w panelu organizacji: "
-                        "https://console.groq.com/settings/limits"
-                    )
-                return msg
-    except Exception:
-        pass
-    return str(exc)[:300]
-
-
-def _classify_api_error(exc: Exception, *, label: str = "Operacja") -> dict:
-    """Czytelny błąd API/SSE: error, kind, hint, retryable."""
-    if isinstance(exc, EmbeddingError):
-        msg = str(exc)[:300]
-        return {
-            "error": msg,
-            "kind": "embedding",
-            "hint": "Embedding wymaga Ollama (nomic-embed-text). Uruchom: ollama serve && ollama pull nomic-embed-text",
-            "retryable": True,
-        }
-
-    msg = _format_cloud_api_error(exc, label)[:300]
-    low = msg.lower()
-    kind = "unknown"
-    hint: str | None = None
-    retryable = False
-
-    if _is_rate_limit_error(exc):
-        kind = "rate_limit"
-        hint = "Poczekaj chwilę, przełącz provider na Ollama lub ustaw OPENROUTER_FALLBACK_TO_OLLAMA=true w .env"
-        retryable = True
-    elif _is_auth_error(exc):
-        kind = "auth"
-        hint = "Sprawdź klucz API w .env lub w panelu Konfiguracja LLM (⚙️)"
-    elif _is_transient_llm_error(exc):
-        kind = "network"
-        hint = "Problem połączenia z modelem — spróbuj ponownie za chwilę"
-        retryable = True
-    elif "qdrant" in low or ("6333" in low and "connection" in low):
-        kind = "qdrant"
-        hint = "Uruchom Qdrant (.local/qdrant) lub sprawdź QDRANT_URL / QDRANT_KEY w .env"
-        retryable = True
-    elif any(x in low for x in ("connection refused", "connection reset", "timed out", "timeout", "name or service not known")):
-        kind = "network"
-        hint = "Sprawdź czy Ollama, Qdrant i sieć działają (GET /health)"
-        retryable = True
-    elif "brak" in low and ("klucz" in low or "api_key" in low or "_api_key" in low):
-        kind = "auth"
-        hint = "Uzupełnij klucz providera w .env lub panelu Konfiguracja LLM"
-
-    return {"error": msg, "kind": kind, "hint": hint, "retryable": retryable}
-
-
-def _json_error_from_exc(exc: Exception, status: int = 500, **extra):
-    payload = {"success": False, **_classify_api_error(exc), **extra}
-    return jsonify(payload), status
-
-
-def _sse_error_from_exc(exc: Exception, **extra) -> dict:
-    return {**_classify_api_error(exc), **extra}
-
-
-def _check_groq_health() -> dict:
-    """Sprawdza Groq: klucz + czy chat na domyślnym modelu nie jest zablokowany w org."""
-    api_key = GROQ_KEY_POOL.peek_primary() or GROQ_API_KEY
-    pool_stats = GROQ_KEY_POOL.stats()
-    if not api_key:
-        return {"ok": False, "kind": "no_key", "error": "Brak GROQ_API_KEY", "pool": pool_stats}
-
-    try:
-        r = requests.post(
-            GROQ_API_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 5,
-            },
-            timeout=15,
-        )
-        if r.status_code == 403:
-            err = (r.json().get("error") or {}).get("message", r.text)
-            err_lower = str(err).lower()
-            kind = "forbidden"
-            if "blocked at the organization" in err_lower or "console.groq.com" in err_lower:
-                kind = "org_blocked"
-            return {
-                "ok": False,
-                "kind": kind,
-                "error": str(err)[:200],
-                "hint": "https://console.groq.com/settings/limits",
-                "pool": pool_stats,
-            }
-        if r.status_code == 401:
-            return {"ok": False, "kind": "auth", "error": "Nieprawidłowy GROQ_API_KEY", "pool": pool_stats}
-        if r.status_code == 404:
-            return {"ok": False, "kind": "model_not_found", "error": f"Model '{GROQ_MODEL}' nie jest dostępny w Groq", "pool": pool_stats}
-        if r.status_code == 429:
-            return {"ok": False, "kind": "rate_limit", "error": "Groq rate limit (429)", "pool": pool_stats}
-        r.raise_for_status()
-        models_r = requests.get(
-            "https://api.groq.com/openai/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=6,
-        )
-        models_count = len(models_r.json().get("data", [])) if models_r.ok else 0
-        return {
-            "ok": True,
-            "kind": "ok",
-            "models_available": models_count,
-            "model_tested": GROQ_MODEL,
-            "pool": pool_stats,
-            "error": None,
-        }
-    except Exception as e:
-        err = _format_cloud_api_error(e, "Groq")[:200]
-        err_lower = err.lower()
-        kind = "network"
-        if "429" in err_lower or "rate limit" in err_lower:
-            kind = "rate_limit"
-        elif "unauthorized" in err_lower or "401" in err_lower or "invalid api key" in err_lower:
-            kind = "auth"
-        elif "blocked at the organization" in err_lower or "console.groq.com" in err_lower:
-            kind = "org_blocked"
-        elif "model" in err_lower and "not found" in err_lower:
-            kind = "model_not_found"
-        return {"ok": False, "kind": kind, "error": err, "pool": pool_stats}
+        return {"ok": False, "error": str(e)[:120]}
 
 
 def _sanitize_for_prompt(text: str, max_len: int = 1400) -> str:
@@ -2406,42 +1526,6 @@ def _sanitize_for_prompt(text: str, max_len: int = 1400) -> str:
         text = text[:max_len] + " [TRUNCATED]"
 
     return text
-
-
-def _mask_pii(text: str) -> tuple[str, dict[str, int]]:
-    """Redaguje typowe PII przed wysyłką fragmentów do chmury LLM."""
-    if not text:
-        return "", {}
-    out = str(text)
-    stats: dict[str, int] = {}
-
-    def _sub(pattern: str, repl: str, key: str) -> None:
-        nonlocal out
-        out, count = re.subn(pattern, repl, out)
-        if count:
-            stats[key] = stats.get(key, 0) + count
-
-    _sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[EMAIL]", "email")
-    _sub(r"\bPL\s?\d{2}(?:\s?\d{4}){5,7}\b", "[IBAN]", "iban")
-    _sub(r"\bPL\d{26}\b", "[IBAN]", "iban")
-    _sub(r"(?<!\d)(?:\+48|0048|48)[\s-]?(?:\d{3}[\s-]?){2}\d{3}(?!\d)", "[TEL]", "phone")
-    _sub(r"\b\d{11}\b", "[PESEL]", "pesel")
-    _sub(r"\b\d{3}[-\s]?\d{2,3}[-\s]?\d{2}[-\s]?\d{2,3}\b", "[NIP]", "nip")
-    _sub(r"\b\d{26}\b", "[RACHUNEK]", "account")
-    return out, stats
-
-
-def _swarm_prepare_text(text: str, *, max_len: int = 1200, mask_pii: bool = False) -> tuple[str, dict[str, int]]:
-    cleaned = _sanitize_for_prompt(text or "", max_len)
-    if not mask_pii:
-        return cleaned, {}
-    masked, stats = _mask_pii(cleaned)
-    return masked, stats
-
-
-def _merge_pii_stats(total: dict[str, int], part: dict[str, int]) -> None:
-    for key, val in (part or {}).items():
-        total[key] = total.get(key, 0) + int(val or 0)
 
 
 def _check_qdrant_health() -> dict:
@@ -2554,41 +1638,6 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
-def _is_transient_llm_error(exc: Exception) -> bool:
-    """Sprawdza chwilowe błędy transportowe, które warto ponowić."""
-    msg = str(exc).lower()
-    transient_markers = (
-        "connection reset by peer",
-        "connection aborted",
-        "remote disconnected",
-        "incomplete read",
-        "broken pipe",
-        "timed out",
-        "timeout",
-        "104",
-        "connection reset",
-    )
-    return any(marker in msg for marker in transient_markers)
-
-
-def _is_auth_error(exc: Exception) -> bool:
-    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
-        try:
-            return exc.response.status_code in (401, 403)
-        except Exception:
-            pass
-    msg = str(exc).lower()
-    return "401" in msg or "403" in msg or "unauthorized" in msg or "invalid api key" in msg
-
-
-def _failure_cooldown(exc: Exception) -> float:
-    if _is_rate_limit_error(exc):
-        return min(_get_retry_after(exc) or 60.0, 120.0)
-    if _is_auth_error(exc):
-        return 300.0
-    return 30.0
-
-
 def _get_retry_after(exc: Exception) -> float | None:
     """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
     try:
@@ -2603,62 +1652,41 @@ def _get_retry_after(exc: Exception) -> float | None:
 
 def call_llm(prompt: str, system: str = "", stream: bool = False,
              provider: str | None = None, model: str | None = None,
-             max_tokens: int = 2000, temperature: float = 0.2,
-             task: str | None = None) -> dict | requests.Response:
+             max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
     """
     Uniwersalna funkcja do wywoływania LLM.
     Zwraca dict dla non-stream lub Response dla stream.
     """
-    prov = get_llm_provider(provider, task=task)
-    t0 = time.monotonic()
+    prov = get_llm_provider(provider)
 
-    try:
-        if prov in ("openrouter", "groq"):
-            cfg = _cloud_llm_settings(prov)
-            if not cfg["api_key"]:
-                raise RuntimeError(f"Brak {cfg['key_env']} w .env")
-            result = _call_cloud_chat(
-                cfg, prompt, system, stream, model or cfg["default_model"], max_tokens, temperature
-            )
-        else:
-            result = _call_ollama(prompt, system, stream, model or LLM_MODEL)
-        if not stream:
-            _fleet_record_outcome(prov, True, (time.monotonic() - t0) * 1000)
-        return result
-    except Exception as e:
-        kind = None
-        err_s = str(e).lower()
-        if _is_rate_limit_error(e):
-            kind = "rate_limit"
-        elif _is_auth_error(e):
-            kind = "auth"
-        elif "blocked at the organization" in err_s:
-            kind = "org_blocked"
-        _fleet_record_outcome(prov, False, (time.monotonic() - t0) * 1000, error_kind=kind, error_msg=str(e))
-        raise
+    if prov == "openrouter":
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
+        return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
+    else:
+        return _call_ollama(prompt, system, stream, model or LLM_MODEL)
 
 
 def stream_llm_tokens(prompt: str, system: str = "",
                       provider: str | None = None, model: str | None = None,
-                      max_tokens: int = 2000, temperature: float = 0.2,
-                      task: str | None = None,
-                      usage_sink: dict | None = None):
+                      max_tokens: int = 2000, temperature: float = 0.2):
     """
     Generator zwracający kolejne tokeny tekstu z LLM (działa dla Ollama i OpenRouter).
     Używany w streamingowych endpointach.
     """
-    prov = get_llm_provider(provider, task=task)
-    cloud_cfg = _cloud_llm_settings(prov) if prov in ("openrouter", "groq") else None
-    effective_model = model or (cloud_cfg["default_model"] if cloud_cfg else LLM_MODEL)
+    prov = get_llm_provider(provider)
+    effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
 
-    if prov in ("openrouter", "groq"):
-        if not cloud_cfg["api_key"]:
-            yield f"Błąd: Brak klucza {cloud_cfg['key_env']}"
+    if prov == "openrouter":
+        if not OPENROUTER_API_KEY:
+            yield "Błąd: Brak klucza OPENROUTER_API_KEY"
             return
 
-        url = cloud_cfg["url"]
-        cloud_label = cloud_cfg["label"]
-        pool = cloud_cfg.get("pool")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {_pick_openrouter_key()}",
+            "Content-Type": "application/json"
+        }
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -2672,21 +1700,11 @@ def stream_llm_tokens(prompt: str, system: str = "",
             "temperature": temperature
         }
 
-        pool_size = max(1, pool.count()) if pool else 1
-        max_attempts = OPENROUTER_MAX_RETRIES * pool_size
-        current_key = cloud_cfg["api_key"]
-        keys_tried: set[str] = set()
         last_error = None
-
-        for attempt in range(max_attempts):
-            if not current_key:
-                break
-            headers = _cloud_headers(cloud_cfg, current_key)
+        for attempt in range(OPENROUTER_MAX_RETRIES):
             try:
                 with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
                     r.raise_for_status()
-                    if pool:
-                        pool.mark_success(current_key)
                     for line in r.iter_lines():
                         if not line:
                             continue
@@ -2700,136 +1718,71 @@ def stream_llm_tokens(prompt: str, system: str = "",
                                 choice = chunk.get("choices", [{}])[0]
                                 delta = choice.get("delta", {})
                                 token = delta.get("content", "")
-                                usage = _normalize_llm_usage(chunk)
-                                if usage and usage_sink is not None:
-                                    usage_sink["usage"] = usage
                                 if token:
                                     yield token
                                 if choice.get("finish_reason"):
                                     return
                             except Exception:
                                 continue
-                return
+                return  # sukces
             except Exception as e:
                 last_error = e
-                if _should_rotate_pool(e) and pool and pool.count() > 1:
-                    pool.mark_failure(current_key, cooldown_sec=_failure_cooldown(e))
-                    keys_tried.add(current_key)
-                    next_key = _next_cloud_key(cloud_cfg, exclude=keys_tried)
-                    if next_key:
-                        logger.warning(
-                            "%s stream: rotacja klucza (%d/%d) — %s",
-                            cloud_label, attempt + 1, max_attempts, type(e).__name__,
-                        )
-                        current_key = next_key
-                        continue
                 if _is_rate_limit_error(e):
-                    if attempt < max_attempts - 1:
-                        wait = _get_retry_after(e) or (1.5 ** (attempt % OPENROUTER_MAX_RETRIES))
+                    if attempt < OPENROUTER_MAX_RETRIES - 1:
+                        wait = _get_retry_after(e) or (1.5 ** attempt)
                         wait = min(wait, 12.0)
-                        logger.warning(f"{cloud_label} 429 (próba {attempt+1}/{max_attempts}) — czekam {wait:.1f}s")
+                        logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
                         time.sleep(wait)
                     continue
-                break
+                else:
+                    # Inny błąd — nie retry'ujemy
+                    break
 
         # Po wyczerpaniu prób
         err_msg = str(last_error) if last_error else "nieznany błąd"
 
-        # Fallback po błędzie 400, podobnie jak w non-stream
-        if (
-            prov in ("openrouter", "groq")
-            and OPENROUTER_FALLBACK_TO_OLLAMA
-            and getattr(last_error, "response", None) is not None
-        ):
+        # Opcjonalny automatyczny fallback na Ollama przy rate limitach OpenRouter
+        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            yield "[FALLBACK] Limit OpenRouter — przełączam na lokalny Ollama...\n\n"
+            logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+            # Przepuść przez ścieżkę Ollama
+            ollama_url = OLLAMA_URL + "/api/generate"
+            ollama_payload = {
+                "model": LLM_MODEL,
+                "prompt": prompt,
+                "system": system,
+                "stream": True,
+                "options": {"temperature": temperature if temperature is not None else 0.2}
+            }
             try:
-                status = last_error.response.status_code
-            except Exception:
-                status = None
-            if status == 400:
-                yield f"[FALLBACK] {cloud_label} zwrócił 400 — przełączam na lokalny Ollama...\n\n"
-                logger.warning("%s stream 400 → fallback do Ollama", cloud_label)
-                for base in _ollama_bases():
-                    ollama_url = base + "/api/generate"
-                    ollama_payload = {
-                        "model": LLM_MODEL,
-                        "prompt": prompt,
-                        "system": system,
-                        "stream": True,
-                        "options": {"temperature": temperature if temperature is not None else 0.2}
-                    }
-                    try:
-                        with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
-                            r.raise_for_status()
-                            OLLAMA_URL_POOL.mark_success(base)
-                            for line in r.iter_lines():
-                                if not line:
-                                    continue
-                                try:
-                                    data = json.loads(line)
-                                    tok = data.get("response", "")
-                                    if tok:
-                                        yield tok
-                                    if data.get("done", False):
-                                        return
-                                except Exception:
-                                    continue
-                        return
-                    except Exception as fb_err:
-                        OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
-                        last_error = fb_err
-                        continue
-                yield f"[Błąd fallback na Ollama: {last_error}]"
+                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            tok = data.get("response", "")
+                            if tok:
+                                yield tok
+                            if data.get("done", False):
+                                return
+                        except Exception:
+                            continue
+                return
+            except Exception as fb_err:
+                yield f"[Błąd fallback na Ollama: {fb_err}]"
                 return
 
-        # Opcjonalny automatyczny fallback na Ollama przy rate limitach chmury
-        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            yield f"[FALLBACK] Limit {cloud_label} — przełączam na lokalny Ollama...\n\n"
-            logger.info(f"{cloud_label} rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
-            for base in _ollama_bases():
-                ollama_url = base + "/api/generate"
-                ollama_payload = {
-                    "model": LLM_MODEL,
-                    "prompt": prompt,
-                    "system": system,
-                    "stream": True,
-                    "options": {"temperature": temperature if temperature is not None else 0.2}
-                }
-                try:
-                    with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
-                        r.raise_for_status()
-                        OLLAMA_URL_POOL.mark_success(base)
-                        for line in r.iter_lines():
-                            if not line:
-                                continue
-                            try:
-                                data = json.loads(line)
-                                tok = data.get("response", "")
-                                usage = _normalize_llm_usage(data)
-                                if usage and usage_sink is not None:
-                                    usage_sink["usage"] = usage
-                                if tok:
-                                    yield tok
-                                if data.get("done", False):
-                                    return
-                            except Exception:
-                                continue
-                    return
-                except Exception as fb_err:
-                    OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
-                    last_error = fb_err
-                    continue
-            yield f"[Błąd fallback na Ollama: {last_error}]"
-            return
-
         if _is_rate_limit_error(last_error):
-            friendly = f"[RATE_LIMIT] Przekroczono limit zapytań {cloud_label}. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
+            friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
             yield friendly
         else:
-            detail = _format_cloud_api_error(last_error, cloud_label) if last_error else err_msg
-            yield f"[Błąd {cloud_label} streaming: {detail}]"
+            yield f"[Błąd OpenRouter streaming: {err_msg}]"
 
     else:
-        # Ollama streaming — rotacja serwerów z puli
+        # Ollama streaming
+        url = OLLAMA_URL + "/api/generate"
         payload = {
             "model": effective_model,
             "prompt": prompt,
@@ -2837,37 +1790,27 @@ def stream_llm_tokens(prompt: str, system: str = "",
             "stream": True,
             "options": {"temperature": temperature}
         }
-        last_error = None
-        for base in _ollama_bases():
-            url = base + "/api/generate"
-            try:
-                with requests.post(url, json=payload, stream=True, timeout=300) as r:
-                    r.raise_for_status()
-                    OLLAMA_URL_POOL.mark_success(base)
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            token = data.get("response", "")
-                            usage = _normalize_llm_usage(data)
-                            if usage and usage_sink is not None:
-                                usage_sink["usage"] = usage
-                            if token:
-                                yield token
-                            if data.get("done", False):
-                                return
-                        except Exception:
-                            continue
-                    return
-            except Exception as e:
-                last_error = e
-                OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
-                logger.warning("Ollama stream (%s): %s — próba następnego serwera", base, e)
-        yield f"[Błąd Ollama streaming: {last_error}]"
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            yield f"[Błąd Ollama streaming: {str(e)}]"
 
 
 def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | requests.Response:
+    url = OLLAMA_URL + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -2875,45 +1818,22 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str) -> dict | r
         "stream": stream,
         "options": {"temperature": 0.2}
     }
-    last_error = None
-    for base in _ollama_bases():
-        url = base + "/api/generate"
-        if stream:
-            try:
-                r = requests.post(url, json=payload, stream=True, timeout=300)
-                r.raise_for_status()
-                OLLAMA_URL_POOL.mark_success(base)
-                return r
-            except Exception as e:
-                last_error = e
-                OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
-                logger.warning("Ollama stream call (%s): %s — następny serwer", base, e)
-                continue
-        for attempt in range(3):
-            try:
-                r = requests.post(url, json=payload, timeout=180)
-                r.raise_for_status()
-                OLLAMA_URL_POOL.mark_success(base)
-                data = r.json()
-                return {"response": _llm_response_text(data), "raw": data, "usage": _normalize_llm_usage(data)}
-            except Exception as e:
-                last_error = e
-                if _is_transient_llm_error(e) and attempt < 2:
-                    wait = min(6.0, 0.5 * (2 ** attempt))
-                    logger.warning(f"Ollama LLM transient error (próba {attempt+1}/3) — czekam {wait:.1f}s: {e}")
-                    time.sleep(wait)
-                    continue
-                break
-        OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
-
-    raise last_error if last_error else RuntimeError("Ollama call failed")
+    if stream:
+        return requests.post(url, json=payload, stream=True, timeout=300)
+    else:
+        r = requests.post(url, json=payload, timeout=180)
+        r.raise_for_status()
+        return r.json()
 
 
-def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, model: str,
+def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                      max_tokens: int, temperature: float) -> dict | requests.Response:
-    url = cloud_cfg["url"]
-    cloud_label = cloud_cfg["label"]
-    pool = cloud_cfg.get("pool")
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {_pick_openrouter_key()}",
+        "HTTP-Referer": "http://localhost",  # opcjonalnie
+        "X-Title": "AI Analiza Dokumentów"
+    }
 
     messages = []
     if system:
@@ -2928,55 +1848,27 @@ def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, mo
         "temperature": temperature
     }
 
-    pool_size = max(1, pool.count()) if pool else 1
-    max_attempts = OPENROUTER_MAX_RETRIES * pool_size
-    current_key = cloud_cfg["api_key"]
-    keys_tried: set[str] = set()
-
     if stream:
-        headers = _cloud_headers(cloud_cfg, current_key)
         return requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
 
+    # Non-streaming with retry on 429
     last_error = None
-    for attempt in range(max_attempts):
-        if not current_key:
-            break
-        headers = _cloud_headers(cloud_cfg, current_key)
+    for attempt in range(OPENROUTER_MAX_RETRIES):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=180)
             r.raise_for_status()
             data = r.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if pool:
-                pool.mark_success(current_key)
-            return {"response": content, "raw": data, "usage": _normalize_llm_usage(data)}
+            return {"response": content, "raw": data}
         except Exception as e:
             last_error = e
-            if _should_rotate_pool(e) and pool and pool.count() > 1:
-                pool.mark_failure(current_key, cooldown_sec=_failure_cooldown(e))
-                keys_tried.add(current_key)
-                next_key = _next_cloud_key(cloud_cfg, exclude=keys_tried)
-                if next_key:
-                    logger.warning(
-                        "%s: rotacja klucza (%d/%d) — %s",
-                        cloud_label, attempt + 1, max_attempts, type(e).__name__,
-                    )
-                    current_key = next_key
-                    continue
             if _is_rate_limit_error(e):
-                if attempt < max_attempts - 1:
-                    wait = _get_retry_after(e) or (1.5 ** (attempt % OPENROUTER_MAX_RETRIES))
+                if attempt < OPENROUTER_MAX_RETRIES - 1:
+                    wait = _get_retry_after(e) or (1.5 ** attempt)
                     wait = min(wait, 12.0)
-                    logger.warning(f"{cloud_label} 429 (non-stream, próba {attempt+1}/{max_attempts}) — czekam {wait:.1f}s")
+                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
                     time.sleep(wait)
                 continue
-            if _is_transient_llm_error(e):
-                if attempt < max_attempts - 1:
-                    wait = min(6.0, 0.5 * (2 ** (attempt % OPENROUTER_MAX_RETRIES)))
-                    logger.warning(f"{cloud_label} transient error (non-stream, próba {attempt+1}/{max_attempts}) — czekam {wait:.1f}s: {e}")
-                    time.sleep(wait)
-                    continue
-                break
             else:
                 # 400 (zły model/ payload) — opcjonalny fallback na Ollama
                 if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
@@ -2985,7 +1877,7 @@ def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, mo
                     except Exception:
                         status = None
                     if status == 400:
-                        logger.warning(f"{cloud_label} 400 → fallback do Ollama")
+                        logger.warning("OpenRouter 400 → fallback do Ollama")
                         result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
                         if isinstance(result, dict):
                             return result
@@ -2994,50 +1886,28 @@ def _call_cloud_chat(cloud_cfg: dict, prompt: str, system: str, stream: bool, mo
 
     # Final failure — optional fallback na Ollama (np. generowanie SQL / synteza)
     if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info(f"{cloud_label} rate limit (non-stream) → fallback do Ollama")
+        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
         result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
         if isinstance(result, dict):
             return result
         return {"response": str(result)}
 
-    if last_error:
-        raise RuntimeError(_format_cloud_api_error(last_error, cloud_label)) from last_error
-    raise RuntimeError(f"{cloud_label} call failed")
+    raise last_error if last_error else RuntimeError("OpenRouter call failed")
 
 
 # ---- Qdrant Client (reuse connection) ----
 _qdrant_client = None
 _qdrant_lock = threading.Lock()
 
-
-def _is_local_qdrant_url(url: str | None = None) -> bool:
-    """Lokalny Qdrant (HTTP dev) — bez api_key i bez check_compatibility (mniej warningów w logach)."""
-    raw = (url or QDRANT_URL or "").strip().rstrip("/")
-    if not raw:
-        return False
-    if raw == QDRANT_LOCAL_URL.strip().rstrip("/"):
-        return True
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(raw)
-        if parsed.scheme != "http":
-            return False
-        return (parsed.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
-    except Exception:
-        return False
-
-
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     with _qdrant_lock:
         if _qdrant_client is None:
             from httpx import Limits
-            is_local = _is_local_qdrant_url()
             _qdrant_client = QdrantClient(
                 url=QDRANT_URL,
-                api_key=None if is_local else QDRANT_KEY,
+                api_key=QDRANT_KEY,
                 timeout=30.0,
-                check_compatibility=not is_local,
                 limits=Limits(
                     max_keepalive_connections=5,
                     max_connections=20,
@@ -3051,6 +1921,50 @@ _docs_cache = {"data": None, "ts": 0}
 DOCS_CACHE_TTL = 300  # 5 minut
 _suggestions_cache = {"data": None, "ts": 0}
 SUGGESTIONS_TTL = 1800  # 30 minut
+
+# ---- Multi-agent Swarm ----
+FREE_MODELS_LIST = [
+    ("meta-llama/llama-3.3-70b-instruct:free",  "Llama 3.3 70B ★"),
+    ("google/gemini-2.0-flash-exp:free",         "Gemini 2.0 Flash"),
+    ("mistralai/mistral-7b-instruct:free",       "Mistral 7B"),
+    ("qwen/qwen-2.5-7b-instruct:free",           "Qwen 2.5 7B"),
+    ("meta-llama/llama-3.1-8b-instruct:free",    "Llama 3.1 8B"),
+]
+
+SWARM_MODES = {
+    "privacy": {
+        "label": "🔒 Incognito",
+        "desc": "Każdy worker dostaje losowy model i potasowane fragmenty. Żaden LLM nie widzi >20% dokumentu.",
+        "workers": 5,
+        "shuffle_chunks": True,
+        "use_random_models": True,
+        "max_chunks_per_worker": 4,
+        "synthesis_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "hierarchical": False,
+    },
+    "speed": {
+        "label": "⚡ Szybkość",
+        "desc": "Maksymalny paralelizm z najszybszym modelem. Wyniki streamowane na bieżąco.",
+        "workers": 4,
+        "shuffle_chunks": False,
+        "use_random_models": False,
+        "preferred_model": ("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash"),
+        "max_chunks_per_worker": 5,
+        "synthesis_model": "google/gemini-2.0-flash-exp:free",
+        "hierarchical": False,
+    },
+    "quality": {
+        "label": "🎯 Jakość",
+        "desc": "Hierarchiczna synteza: workery → meta-analiza → finalny wynik z najlepszym modelem.",
+        "workers": 3,
+        "shuffle_chunks": False,
+        "use_random_models": False,
+        "preferred_model": ("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B ★"),
+        "max_chunks_per_worker": 6,
+        "synthesis_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "hierarchical": True,
+    },
+}
 
 # ---- Cache embeddingów (SQLite) ----
 _CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
@@ -3100,44 +2014,39 @@ def get_embedding(text: str) -> list:
     except Exception as e:
         logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
-    # 2. Jeśli nie ma w cache, odpytaj Ollamę (rotacja serwerów + retry przy Connection reset)
+    # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
+    url = OLLAMA_URL + "/api/embeddings"
     payload = {"model": EMBED_MODEL, "prompt": text[:1500]}
-    last_error = None
 
-    for base in _ollama_bases():
-        url = base + "/api/embeddings"
-        for attempt in range(4):
+    for attempt in range(4):  # max 4 próby
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=45) as r:
+                vec = json.loads(r.read().decode("utf-8"))["embedding"]
+
+            # 3. Zapisz nowy wektor natychmiast do bazy SQLite
             try:
-                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                             headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=45) as r:
-                    vec = json.loads(r.read().decode("utf-8"))["embedding"]
-
-                try:
-                    with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
-                        conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
-                                     (key, json.dumps(vec)))
-                except Exception as e:
-                    logger.warning(f"Błąd zapisu cache embeddingów: {e}")
-
-                OLLAMA_URL_POOL.mark_success(base)
-                return vec
-
+                with sqlite3.connect(_CACHE_DB_PATH, timeout=10) as conn:
+                    conn.execute("INSERT OR REPLACE INTO embeddings (hash, vector) VALUES (?, ?)",
+                                 (key, json.dumps(vec)))
             except Exception as e:
-                last_error = e
-                if "Connection reset by peer" in str(e) or "104" in str(e) or _is_transient_llm_error(e):
-                    wait = (2 ** attempt) * 0.4
-                    logger.warning(f"Ollama embedding ({base}, próba {attempt+1}/4) — czekam {wait:.1f}s...")
-                    time.sleep(wait)
-                    continue
-                logger.error(f"Ollama Embedding Error ({base}): {e}")
-                break
-        OLLAMA_URL_POOL.mark_failure(base, cooldown_sec=30)
+                logger.warning(f"Błąd zapisu cache embeddingów: {e}")
 
-    if last_error and ("Connection reset" in str(last_error) or "104" in str(last_error)):
-        logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
-        raise EmbeddingError("Embedding niedostępny — Ollama nie odpowiada (connection reset)")
-    raise EmbeddingError(f"Błąd embeddingu Ollama: {last_error}") from last_error
+            return vec
+
+        except Exception as e:
+            if "Connection reset by peer" in str(e) or "104" in str(e):
+                wait = (2 ** attempt) * 0.4   # 0.4s, 0.8s, 1.6s, 3.2s
+                logger.warning(f"Ollama embedding reset (próba {attempt+1}/4) — czekam {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            else:
+                logger.error(f"Ollama Embedding Error: {e}")
+                raise EmbeddingError(f"Błąd embeddingu Ollama: {e}") from e
+
+    logger.error("Ollama Embedding Error: wszystkie próby nieudane (Connection reset)")
+    raise EmbeddingError("Embedding niedostępny — Ollama nie odpowiada (connection reset)")
 
 def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
     """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
@@ -3227,6 +2136,76 @@ SEARCH_MODES = {
         "prompt_suffix": "Wyciągnij ustrukturyzowane dane z dokumentów jako tabela Markdown:"
     }
 }
+
+# ---- Model Registry ----
+MODEL_REGISTRY: dict = {
+    "meta-llama/llama-3.3-70b-instruct:free": {
+        "name": "Llama 3.3 70B", "short": "Llama 70B", "provider": "Meta",
+        "icon": "🌟", "context_k": 128, "speed_tier": 2, "quality_tier": 3,
+        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "tags": ["analiza", "prawo", "długi_kontekst", "raporty", "rozumowanie"],
+    },
+    "google/gemini-2.0-flash-exp:free": {
+        "name": "Gemini 2.0 Flash", "short": "Gemini Flash", "provider": "Google",
+        "icon": "⚡", "context_k": 1000, "speed_tier": 1, "quality_tier": 2,
+        "free": True, "rate_rpm": 15, "rate_day": 1500,
+        "tags": ["szybkość", "bardzo_długi_kontekst", "podsumowania"],
+    },
+    "mistralai/mistral-7b-instruct:free": {
+        "name": "Mistral 7B", "short": "Mistral 7B", "provider": "Mistral AI",
+        "icon": "🎯", "context_k": 32, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 30, "rate_day": 500,
+        "tags": ["szybkość", "krótkie_pytania", "klasyfikacja"],
+    },
+    "qwen/qwen-2.5-7b-instruct:free": {
+        "name": "Qwen 2.5 7B", "short": "Qwen 7B", "provider": "Alibaba",
+        "icon": "🔷", "context_k": 128, "speed_tier": 1, "quality_tier": 2,
+        "free": True, "rate_rpm": 20, "rate_day": 300,
+        "tags": ["dane_strukturalne", "tabele", "kod", "ekstrakcja"],
+    },
+    "meta-llama/llama-3.1-8b-instruct:free": {
+        "name": "Llama 3.1 8B", "short": "Llama 8B", "provider": "Meta",
+        "icon": "🏃", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "tags": ["szybkość", "klasyfikacja", "ekstrakcja", "fragmenty"],
+    },
+    "deepseek/deepseek-r1:free": {
+        "name": "DeepSeek R1", "short": "DeepSeek R1", "provider": "DeepSeek",
+        "icon": "🧠", "context_k": 64, "speed_tier": 3, "quality_tier": 3,
+        "free": True, "rate_rpm": 10, "rate_day": 100,
+        "tags": ["rozumowanie", "matematyka", "analiza_krok_po_kroku"],
+    },
+    "microsoft/phi-3-mini-128k-instruct:free": {
+        "name": "Phi-3 Mini 128k", "short": "Phi-3 Mini", "provider": "Microsoft",
+        "icon": "🔬", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "tags": ["szybkość", "długi_kontekst", "fragmenty"],
+    },
+}
+
+# Statystyki live (reset przy restarcie)
+_model_live: dict = {
+    mid: {"ping_ok": None, "ping_ms": None, "ping_ts": None,
+          "err_count": 0, "ok_count": 0, "avg_ms": None}
+    for mid in MODEL_REGISTRY
+}
+
+
+def _model_score(model_id: str) -> float:
+    """Ranking 0–100. Jakość 40% + szybkość 30% + dostępność 30%."""
+    reg = MODEL_REGISTRY.get(model_id, {})
+    live = _model_live.get(model_id, {})
+    if live.get("ping_ok") is False:
+        return 0.0
+    quality = (reg.get("quality_tier", 1) - 1) / 2 * 40
+    speed   = (4 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej
+    if live.get("ping_ok") is True:
+        ms = live.get("avg_ms") or live.get("ping_ms") or 15000
+        avail = max(0.0, 30.0 - ms / 500.0)
+    else:
+        avail = 12.0  # nieznany — neutralny
+    return round(quality + speed + avail, 1)
+
 
 def _embedding_query_for_mode(query_text: str, mode: str) -> str:
     """Zapytanie do embeddingu — bez historii rozmowy; detective lekko poszerza semantykę."""
@@ -3413,10 +2392,10 @@ def generate_answer(
         return str(result)
     except Exception as e:
         prov = get_llm_provider(provider)
-        if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov in ("openrouter", "groq"):
-            logger.warning(f"generate_answer: {prov} 429 → fallback do Ollama")
+        if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov == "openrouter":
+            logger.warning("generate_answer: OpenRouter 429 → fallback do Ollama")
             try:
-                result = call_llm(prompt, system, stream=False, provider="ollama", model=LLM_MODEL)
+                result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
                 if isinstance(result, dict):
                     return result.get("response", str(result))
                 return str(result)
@@ -3424,7 +2403,7 @@ def generate_answer(
                 return f"[RATE_LIMIT + Błąd fallback] {fb_e}"
         logger.error(f"LLM error in generate_answer ({prov}): {e}")
         if _is_rate_limit_error(e):
-            return "[RATE_LIMIT] Przekroczono limit API chmury. Spróbuj później lub użyj Ollama."
+            return "[RATE_LIMIT] Przekroczono limit OpenRouter. Spróbuj później lub użyj Ollama."
         return f"Błąd syntezy LLM ({prov}): {e}"
 
 def verify_answer(answer: str, contexts: list, query: str, provider: str | None = None, model: str | None = None) -> dict:
@@ -3459,9 +2438,8 @@ def verify_answer(answer: str, contexts: list, query: str, provider: str | None 
     try:
         # Używamy dedykowanego modelu do weryfikacji (jeśli ustawiony), żeby nie dobić limitu tego samego modelu co główna odpowiedź
         effective_verify_model = model
-        prov_verify = get_llm_provider(provider)
-        if not effective_verify_model and prov_verify in ("openrouter", "groq"):
-            effective_verify_model = _cloud_llm_settings(prov_verify)["verify_model"]
+        if not effective_verify_model and get_llm_provider(provider) == "openrouter":
+            effective_verify_model = OPENROUTER_MODEL_VERIFY
         result = call_llm(prompt=prompt, system=system, stream=False, provider=provider, model=effective_verify_model)
         raw = result.get("response", str(result)) if isinstance(result, dict) else str(result)
 
@@ -3505,7 +2483,7 @@ def verify_endpoint():
     query    = data.get('query', '').strip()
     contexts = data.get('contexts', [])
     llm_provider = data.get('llm_provider')
-    openrouter_model = _model_from_request(data, data.get('llm_provider'))
+    openrouter_model = data.get('openrouter_model')
     if not answer or not query or not contexts:
         return jsonify({"success": False, "error": "Brak danych do weryfikacji"})
     # Przekazujemy provider, żeby weryfikacja też szła przez wybrany model (w tym osobny model_verify)
@@ -3520,10 +2498,11 @@ def _safe_int_clamp(val, lo: int, hi: int, default: int = 1) -> int:
 
 
 def highlight_backend(text: str, query: str) -> str:
-    if not query: return text
-    words = [w.strip() for w in query.split() if len(w.strip()) > 2]
-    if not words: return text
     escaped = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    if not query:
+        return escaped
+    words = [w.strip() for w in query.split() if len(w.strip()) > 2]
+    if not words: return escaped
     for word in words:
         clean_word = re.sub(r'[.,\/#!$%\^&\*;:{}=\-_`~()]', '', word)
         root = clean_word[:-2] if len(clean_word) > 4 else clean_word
@@ -4275,93 +3254,6 @@ def api_drives():
         return jsonify({"success": False, "error": str(e)})
 
 
-# ============================================================
-# CIĘŻKIE OPERACJE — mutex + /tasks
-# ============================================================
-
-_heavy_tasks_lock = threading.Lock()
-_active_heavy_task: dict | None = None
-_heavy_task_history: list[dict] = []
-_HEAVY_TASK_HISTORY_MAX = 8
-
-
-def _heavy_task_snapshot() -> dict:
-    with _heavy_tasks_lock:
-        active = dict(_active_heavy_task) if _active_heavy_task else None
-        history = [dict(t) for t in _heavy_task_history]
-    return {"active": active, "history": history}
-
-
-def _heavy_task_try_start(kind: str, label: str = "") -> tuple[bool, str | None, str | None]:
-    """Zwraca (ok, task_id, komunikat_blokady)."""
-    global _active_heavy_task
-    task_id = hashlib.md5(f"{kind}:{time.time()}:{label}".encode()).hexdigest()[:12]
-    with _heavy_tasks_lock:
-        if _active_heavy_task and not _active_heavy_task.get("done"):
-            busy = _active_heavy_task
-            msg = (
-                f"Inna operacja w toku: {busy.get('kind')} "
-                f"({busy.get('label') or busy.get('id')}). Poczekaj na zakończenie."
-            )
-            return False, None, msg
-        _active_heavy_task = {
-            "id": task_id,
-            "kind": kind,
-            "label": (label or kind)[:200],
-            "started_at": int(time.time()),
-            "updated_at": int(time.time()),
-            "progress": 0,
-            "total": 0,
-            "message": "start",
-            "done": False,
-            "error": None,
-        }
-    return True, task_id, None
-
-
-def _heavy_task_update(task_id: str | None, **fields):
-    if not task_id:
-        return
-    with _heavy_tasks_lock:
-        if not _active_heavy_task or _active_heavy_task.get("id") != task_id:
-            return
-        _active_heavy_task.update(fields)
-        _active_heavy_task["updated_at"] = int(time.time())
-
-
-def _heavy_task_finish(task_id: str | None, *, error: str | None = None):
-    global _active_heavy_task
-    if not task_id:
-        return
-    with _heavy_tasks_lock:
-        if not _active_heavy_task or _active_heavy_task.get("id") != task_id:
-            return
-        _active_heavy_task["done"] = True
-        _active_heavy_task["error"] = error
-        _active_heavy_task["updated_at"] = int(time.time())
-        finished = dict(_active_heavy_task)
-        _heavy_task_history.insert(0, finished)
-        del _heavy_task_history[_HEAVY_TASK_HISTORY_MAX:]
-        _active_heavy_task = None
-
-
-def _default_chat_model(provider: str | None = None) -> str:
-    prov = get_llm_provider(provider)
-    if prov == "groq":
-        return GROQ_MODEL
-    if prov == "openrouter":
-        return OPENROUTER_MODEL
-    return LLM_MODEL
-
-
-@app.route('/tasks', methods=['GET'])
-def tasks_status():
-    """Status bieżącej ciężkiej operacji (import / wektoryzacja SQL)."""
-    snap = _heavy_task_snapshot()
-    busy = snap["active"] is not None and not snap["active"].get("done")
-    return jsonify({"success": True, "busy": busy, **snap})
-
-
 @app.route('/import/stream')
 def import_stream():
     folder = request.args.get('folder', '').strip()
@@ -4388,109 +3280,98 @@ def import_stream():
             yield sse("done", {"count": 0, "chunks": 0, "skipped": 0, "msg": "Brak kompatybilnych plików."})
             return
 
-        ok, task_id, block_msg = _heavy_task_try_start("import", str(folder_path))
-        if not ok:
-            yield sse("error", {"msg": block_msg, "blocked": True})
-            return
+        yield sse("start", {"total": len(files)})
 
-        task_error = None
-        try:
-            yield sse("start", {"total": len(files), "task_id": task_id})
+        qdrant = get_qdrant_client()
+        imported = 0
+        skipped = 0
+        total_chunks = 0
+        new_chunks = 0
 
-            qdrant = get_qdrant_client()
-            imported = 0
-            skipped = 0
-            total_chunks = 0
-            new_chunks = 0
-
-            for i, f_path in enumerate(files):
-                _heavy_task_update(task_id, progress=i + 1, total=len(files), message=f_path.name)
-                try:
-                    text = extract_text(f_path)
-                    if not text or len(text.strip()) < 10:
-                        skipped += 1
-                        yield sse("skip", {"file": f_path.name, "reason": "pusty", "i": i+1, "total": len(files)})
-                        continue
-
-                    chunks = make_chunks(text)
-                    file_new = 0
-
-                    file_meta = extract_file_metadata(f_path)
-
-                    chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
-                    existing_ids = set()
-                    for batch_start in range(0, len(chunk_ids), 100):
-                        batch = chunk_ids[batch_start:batch_start+100]
-                        found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
-                                               with_payload=False, with_vectors=False)
-                        existing_ids.update(p.id for p in found)
-
-                    new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
-                                       if cid not in existing_ids]
-                    total_chunks += len(chunks)
-
-                    BATCH = 6
-                    embed_failed = False
-                    for b in range(0, len(new_chunks_data), BATCH):
-                        batch_items = new_chunks_data[b:b+BATCH]
-                        batch_texts  = [item[1] for item in batch_items]
-                        batch_ids    = [item[0] for item in batch_items]
-                        try:
-                            vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
-                        except EmbeddingError as e:
-                            skipped += 1
-                            embed_failed = True
-                            yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
-                            break
-
-                        points  = [
-                            PointStruct(
-                                id=cid,
-                                vector=vec,
-                                payload={
-                                    "file": f_path.name,
-                                    "text": txt,
-                                    "full_path": str(f_path),
-                                    "metadata": file_meta
-                                }
-                            )
-                            for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
-                            if vec and any(v != 0.0 for v in vec)
-                        ]
-                        if points:
-                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
-                        new_chunks += len(points)
-                        file_new  += len(points)
-
-                    if embed_failed:
-                        continue
-
-                    imported += 1
-                    yield sse("file", {
-                        "file": f_path.name,
-                        "chunks": len(chunks),
-                        "new": file_new,
-                        "i": i+1,
-                        "total": len(files)
-                    })
-                    time.sleep(0.02)
-                except Exception as e:
+        for i, f_path in enumerate(files):
+            try:
+                text = extract_text(f_path)
+                if not text or len(text.strip()) < 10:
                     skipped += 1
-                    yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                    yield sse("skip", {"file": f_path.name, "reason": "pusty", "i": i+1, "total": len(files)})
+                    continue
 
-            yield sse("done", {
-                "count": imported,
-                "chunks": total_chunks,
-                "new_chunks": new_chunks,
-                "skipped": skipped,
-                "msg": f"Przetworzono {imported} plików · {new_chunks} nowych chunków · {total_chunks - new_chunks} duplikatów pominiętych"
-            })
-        except Exception as e:
-            task_error = str(e)
-            logger.exception("import_stream error")
-            yield sse("error", {"msg": task_error})
-        finally:
-            _heavy_task_finish(task_id, error=task_error)
+                chunks = make_chunks(text)
+                file_new = 0
+
+                # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
+                file_meta = extract_file_metadata(f_path)
+
+                # Deduplikacja — sprawdź które chunki już są w bazie
+                chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
+                existing_ids = set()
+                for batch_start in range(0, len(chunk_ids), 100):
+                    batch = chunk_ids[batch_start:batch_start+100]
+                    found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
+                                           with_payload=False, with_vectors=False)
+                    existing_ids.update(p.id for p in found)
+
+                new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
+                                   if cid not in existing_ids]
+                total_chunks += len(chunks)
+
+                # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
+                BATCH = 6
+                embed_failed = False
+                for b in range(0, len(new_chunks_data), BATCH):
+                    batch_items = new_chunks_data[b:b+BATCH]
+                    batch_texts  = [item[1] for item in batch_items]
+                    batch_ids    = [item[0] for item in batch_items]
+                    try:
+                        vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                    except EmbeddingError as e:
+                        skipped += 1
+                        embed_failed = True
+                        yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                        break
+
+                    points  = [
+                        PointStruct(
+                            id=cid,
+                            vector=vec,
+                            payload={
+                                "file": f_path.name,
+                                "text": txt,
+                                "full_path": str(f_path),
+                                "metadata": file_meta
+                            }
+                        )
+                        for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
+                        if vec and any(v != 0.0 for v in vec)
+                    ]
+                    if points:
+                        qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                    new_chunks += len(points)
+                    file_new  += len(points)
+
+                if embed_failed:
+                    continue
+
+                imported += 1
+                yield sse("file", {
+                    "file": f_path.name,
+                    "chunks": len(chunks),
+                    "new": file_new,
+                    "i": i+1,
+                    "total": len(files)
+                })
+                time.sleep(0.02)
+            except Exception as e:
+                skipped += 1
+                yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+
+        yield sse("done", {
+            "count": imported,
+            "chunks": total_chunks,
+            "new_chunks": new_chunks,
+            "skipped": skipped,
+            "msg": f"Przetworzono {imported} plików · {new_chunks} nowych chunków · {total_chunks - new_chunks} duplikatów pominiętych"
+        })
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -4593,7 +3474,7 @@ def hybrid_stream():
         mode = 'normal'
     file_filter= data.get('file_filter', None)
     llm_provider = data.get('llm_provider')
-    openrouter_model = _model_from_request(data, data.get('llm_provider'))
+    openrouter_model = data.get('openrouter_model')
 
     if not query_text:
         return jsonify({"success": False, "error": "Zapytanie puste"}), 400
@@ -4677,40 +3558,25 @@ def hybrid_stream():
 
             # Streaming odpowiedzi LLM (obsługuje zarówno Ollama jak i OpenRouter)
             full_answer = ""
-            usage_meta = {}
-            streamed_chunks = 0
 
             try:
                 for token in stream_llm_tokens(
                     prompt=prompt,
                     system=system,
                     provider=llm_provider,
-                    model=openrouter_model,
-                    task="search",
-                    usage_sink=usage_meta,
+                    model=openrouter_model
                 ):
-                    if isinstance(token, str) and token.startswith("[FALLBACK]"):
-                        logger.info("LLM fallback (hybrid): %s", token[:120])
-                        continue
-                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
                         logger.warning(f"LLM stream error (hybrid): {token[:120]}")
                         yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
                         return
                     full_answer += token
-                    streamed_chunks += 1
                     yield sse("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error: {e}")
                 yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
 
-            usage = usage_meta.get("usage")
-            if not usage and streamed_chunks > 0:
-                usage = {"completion_tokens": streamed_chunks, "total_tokens": streamed_chunks}
-
-            yield sse("done", {
-                "ai_answer": full_answer,
-                "usage": usage,
-            })
+            yield sse("done", {"ai_answer": full_answer})
 
         except Exception as e:
             yield sse("error", {"error": str(e)})
@@ -4730,7 +3596,6 @@ def search_stream():
     file_filter = data.get('file_filter', None)
     mode        = data.get('mode', 'normal')
     llm_provider = data.get('llm_provider')
-    fleet_task = _fleet_task_from_data(data, "search")
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -4745,7 +3610,7 @@ def search_stream():
                     client, query_text, limit, file_filter, mode
                 )
             except EmbeddingError as e:
-                yield sse("error", _sse_error_from_exc(e))
+                yield sse("error", {"error": str(e)})
                 return
 
             # Wyślij wyniki od razu
@@ -4762,57 +3627,30 @@ def search_stream():
 
             # Streaming LLM — obsługuje Ollama i OpenRouter
             full_answer = ""
-            openrouter_model = _model_from_request(data, data.get("llm_provider"))
-            resolved_prov = get_llm_provider(llm_provider, task=fleet_task)
-            usage_meta = {}
-            streamed_chunks = 0
+            openrouter_model = data.get("openrouter_model")
 
             try:
                 for token in stream_llm_tokens(
                     prompt=prompt,
                     system=system,
                     provider=llm_provider,
-                    model=openrouter_model,
-                    task=fleet_task,
-                    usage_sink=usage_meta,
+                    model=openrouter_model
                 ):
-                    if isinstance(token, str) and token.startswith("[FALLBACK]"):
-                        logger.info("LLM fallback (search): %s", token[:120])
-                        continue
-                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")):
+                    if isinstance(token, str) and (token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]") or token.startswith("[FALLBACK]")):
+                        # Czysty błąd zamiast zaśmiecania odpowiedzi
                         logger.warning(f"LLM stream error (search): {token[:120]}")
-                        err_payload = {"error": token, "provider": get_llm_provider(llm_provider)}
-                        if token.startswith("[RATE_LIMIT]"):
-                            err_payload.update({
-                                "kind": "rate_limit",
-                                "hint": "Przełącz na Ollama lub poczekaj przed ponowną próbą.",
-                                "retryable": True,
-                            })
-                        elif token.startswith("[Błąd"):
-                            err_payload.update({"kind": "llm", "retryable": True})
-                        yield sse("error", err_payload)
+                        yield sse("error", {"error": token, "provider": get_llm_provider(llm_provider)})
                         return
                     full_answer += token
-                    streamed_chunks += 1
                     yield sse("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error w search_stream: {e}")
-                yield sse("error", _sse_error_from_exc(e, provider=get_llm_provider(llm_provider)))
+                yield sse("error", {"error": "Błąd streamingu modelu językowego."})
 
-            usage = usage_meta.get("usage")
-            if not usage and streamed_chunks > 0:
-                usage = {"completion_tokens": streamed_chunks, "total_tokens": streamed_chunks}
-
-            yield sse("done", {
-                "ai_answer": full_answer,
-                "llm_provider_used": resolved_prov,
-                "fleet_auto_route": FLEET_AUTO_ROUTE,
-                "usage": usage,
-            })
+            yield sse("done", {"ai_answer": full_answer})
 
         except Exception as e:
-            logger.exception("search_stream")
-            yield sse("error", _sse_error_from_exc(e))
+            yield sse("error", {"error": str(e)})
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -4842,7 +3680,7 @@ def search():
         if file_filter and not raw_contexts:
             return jsonify({"success": True, "results": [], "ai_answer": "Brak dokumentów dla wybranego pliku."})
 
-        openrouter_model = _model_from_request(data, data.get("llm_provider"))
+        openrouter_model = data.get("openrouter_model")
         ai_answer = (
             generate_answer(
                 query_text,
@@ -4878,7 +3716,7 @@ def analyze():
     file_filter = data.get('file_filter')
     mode = data.get('mode', 'normal')
     llm_provider = data.get('llm_provider')
-    openrouter_model = _model_from_request(data, data.get('llm_provider'))
+    openrouter_model = data.get('openrouter_model')
     if mode not in SEARCH_MODES:
         mode = 'normal'
 
@@ -4915,6 +3753,713 @@ def analyze():
         return jsonify({"success": False, "error": str(e)})
 
 
+@app.route('/compare', methods=['POST'])
+def compare_documents():
+    """SSE: porównanie dwóch dokumentów — streaming wyników porównania przez LLM."""
+    _require_api_key()
+    data = request.get_json() or {}
+    file_a = (data.get('file_a') or '').strip()
+    file_b = (data.get('file_b') or '').strip()
+    focus  = (data.get('focus') or 'general').strip()
+
+    if not file_a or not file_b:
+        def _err():
+            yield sse('error', {'error': 'Wymagane file_a i file_b'})
+        return Response(stream_with_context(_err()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    if file_a == file_b:
+        def _err():
+            yield sse('error', {'error': 'Wybierz dwa różne pliki'})
+        return Response(stream_with_context(_err()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+    def generate():
+        def sse(event, d):
+            import json as _j
+            return f"event: {event}\ndata: {_j.dumps(d, ensure_ascii=False)}\n\n"
+
+        try:
+            client = get_qdrant_client()
+
+            def _fetch_chunks(fname: str) -> list[str]:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                qfilter = Filter(must=[FieldCondition(key="file", match=MatchValue(value=fname))])
+                records, _ = client.scroll(
+                    collection_name=ACTIVE_COLLECTION,
+                    scroll_filter=qfilter,
+                    limit=30,
+                    with_payload=["text"],
+                    with_vectors=False,
+                )
+                return [r.payload.get("text", "") for r in records if r.payload.get("text")]
+
+            chunks_a = _fetch_chunks(file_a)
+            chunks_b = _fetch_chunks(file_b)
+
+            if not chunks_a:
+                yield sse('error', {'error': f'Brak chunków dla pliku: {file_a}'})
+                return
+            if not chunks_b:
+                yield sse('error', {'error': f'Brak chunków dla pliku: {file_b}'})
+                return
+
+            MAX_CHARS = 8000
+            text_a = "\n\n".join(chunks_a)[:MAX_CHARS]
+            text_b = "\n\n".join(chunks_b)[:MAX_CHARS]
+
+            focus_labels = {
+                'general':    'ogólne porównanie treści i struktury',
+                'dates':      'daty, terminy i harmonogram',
+                'parties':    'strony, sygnatury i upoważnienia',
+                'financial':  'kwoty, wartości i warunki finansowe',
+                'legal':      'zobowiązania prawne i klauzule umowne',
+                'technical':  'wymagania techniczne i specyfikacje',
+            }
+            focus_desc = focus_labels.get(focus, focus_labels['general'])
+
+            system = (
+                "Jesteś ekspertem ds. analizy dokumentów. Porównaj dwa dokumenty skupiając się na: "
+                f"{focus_desc}. "
+                "Wskaż kluczowe podobieństwa, różnice i rozbieżności. "
+                "Odpowiadaj po polsku, używaj punktów i tabel gdzie to pomocne."
+            )
+            prompt = (
+                f"=== DOKUMENT A: {file_a} ===\n{text_a}\n\n"
+                f"=== DOKUMENT B: {file_b} ===\n{text_b}\n\n"
+                f"Przeprowadź szczegółowe porównanie tych dwóch dokumentów "
+                f"z uwzględnieniem: {focus_desc}."
+            )
+
+            yield sse('start', {
+                'file_a': file_a,
+                'file_b': file_b,
+                'chunks_a': len(chunks_a),
+                'chunks_b': len(chunks_b),
+                'focus': focus_desc,
+            })
+
+            comparison_text = ""
+            for token in stream_llm_tokens(prompt=prompt, system=system, max_tokens=2000, temperature=0.2):
+                comparison_text += token
+                yield sse('chunk', {'token': token})
+
+            yield sse('done', {
+                'file_a': file_a,
+                'file_b': file_b,
+                'chunks_a': len(chunks_a),
+                'chunks_b': len(chunks_b),
+                'comparison': comparison_text,
+            })
+        except Exception as e:
+            logger.exception("compare_documents error")
+            yield sse('error', {'error': str(e)[:300]})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/collection/profile', methods=['GET'])
+def collection_profile():
+    """Profiluje kolekcję wg typów plików i sugeruje tryb wyszukiwania."""
+    try:
+        client = get_qdrant_client()
+        records, _ = client.scroll(
+            collection_name=ACTIVE_COLLECTION,
+            limit=500,
+            with_payload=["file"],
+            with_vectors=False,
+        )
+        if not records:
+            return jsonify({"success": True, "profile": "empty", "suggestion_text": "", "suggestion_mode": "normal"})
+
+        from collections import Counter
+        ext_counts: Counter = Counter()
+        for r in records:
+            fname = r.payload.get("file", "")
+            if fname:
+                ext = Path(fname).suffix.lower().lstrip(".")
+                if ext:
+                    ext_counts[ext] += 1
+
+        total = sum(ext_counts.values()) or 1
+        top_ext, top_count = ext_counts.most_common(1)[0] if ext_counts else ("", 0)
+        top_ratio = top_count / total
+
+        # Determine profile
+        financial_exts = {"xlsx", "xls", "csv", "ods"}
+        legal_exts     = {"pdf", "docx", "doc", "odt"}
+        code_exts      = {"py", "js", "ts", "java", "cs", "cpp", "go", "rb"}
+
+        if ext_counts.keys() & financial_exts and top_ratio > 0.5 and top_ext in financial_exts:
+            profile = "financial"
+            suggestion_mode = "normal"
+            suggestion_text = f"Kolekcja zawiera głównie pliki finansowe ({top_ext.upper()}). Rozważ tryb Detektyw do głębokiej analizy."
+            suggestion_mode = "detective"
+        elif ext_counts.keys() & legal_exts and top_ratio > 0.4 and top_ext in legal_exts:
+            profile = "legal"
+            suggestion_mode = "detective"
+            suggestion_text = f"Kolekcja zawiera głównie dokumenty prawne ({top_ext.upper()}). Zalecany tryb: Detektyw."
+        elif ext_counts.keys() & code_exts:
+            profile = "technical"
+            suggestion_mode = "normal"
+            suggestion_text = "Kolekcja zawiera kod źródłowy. Tryb normalny jest odpowiedni."
+        elif top_ratio > 0.7:
+            profile = "homogeneous"
+            suggestion_mode = "normal"
+            suggestion_text = f"Jednorodna kolekcja ({top_ext.upper()}). Tryb normalny jest odpowiedni."
+        else:
+            profile = "mixed"
+            suggestion_mode = "detective"
+            suggestion_text = "Różnorodna kolekcja dokumentów. Tryb Detektyw da lepsze wyniki."
+
+        return jsonify({
+            "success": True,
+            "profile": profile,
+            "suggestion_mode": suggestion_mode,
+            "suggestion_text": suggestion_text,
+            "ext_counts": dict(ext_counts.most_common(5)),
+        })
+    except Exception as e:
+        logger.warning(f"collection_profile error: {e}")
+        return jsonify({"success": False, "error": str(e)[:200]})
+
+
+# ===== MULTI-AGENT SWARM =====
+
+def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
+    """Dzieli chunki na grupy workerów wg trybu."""
+    import random as _rnd
+    n_workers = cfg["workers"]
+    max_per = cfg["max_chunks_per_worker"]
+    data = list(chunks)
+    if cfg.get("shuffle_chunks"):
+        _rnd.shuffle(data)
+    data = data[:n_workers * max_per]
+    n = min(n_workers, len(data))
+    groups: list[list] = [[] for _ in range(n)]
+    for i, chunk in enumerate(data):
+        groups[i % n].append(chunk)
+    return [g for g in groups if g]
+
+
+def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
+    """Zwraca listę (model_id, model_name) dla każdego workera."""
+    import random as _rnd
+    if cfg.get("use_random_models"):
+        pool = list(FREE_MODELS_LIST)
+        _rnd.shuffle(pool)
+        return [pool[i % len(pool)] for i in range(n_workers)]
+    preferred = cfg.get("preferred_model", FREE_MODELS_LIST[0])
+    return [preferred] * n_workers
+
+
+@app.route('/agents/swarm/stream', methods=['POST'])
+def agents_swarm_stream():
+    """SSE: równoległa analiza dokumentów przez N niezależnych agentów LLM."""
+    _require_api_key()
+    data = request.get_json() or {}
+    query = (data.get('query') or '').strip()
+    swarm_mode = data.get('swarm_mode', 'quality')
+    file_filter = data.get('file_filter') or None
+
+    if not query:
+        def _err():
+            yield sse('error', {'error': 'Zapytanie jest puste'})
+        return Response(stream_with_context(_err()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+    cfg = SWARM_MODES.get(swarm_mode, SWARM_MODES['quality'])
+
+    def generate():
+        def sse(event, d):
+            import json as _j
+            return f"event: {event}\ndata: {_j.dumps(d, ensure_ascii=False)}\n\n"
+
+        try:
+            yield sse('progress', {'msg': 'Pobieranie fragmentów z bazy wektorowej…', 'step': 1})
+
+            client = get_qdrant_client()
+            try:
+                raw_contexts, _ = _retrieve_search_contexts(client, query, 20, file_filter, 'detective')
+            except EmbeddingError as e:
+                yield sse('error', {'error': str(e)})
+                return
+
+            if not raw_contexts:
+                yield sse('error', {'error': 'Brak dokumentów w bazie dla tego zapytania.'})
+                return
+
+            groups = _split_chunks_for_swarm(raw_contexts, cfg)
+            n_workers = len(groups)
+            models = _assign_swarm_models(n_workers, cfg)
+
+            yield sse('init', {
+                'n_workers': n_workers,
+                'mode': swarm_mode,
+                'mode_label': cfg['label'],
+                'mode_desc': cfg['desc'],
+                'total_chunks': len(raw_contexts),
+            })
+
+            for i, ((model_id, model_name), group) in enumerate(zip(models, groups)):
+                yield sse('worker_start', {
+                    'worker_id': i,
+                    'model': model_name,
+                    'chunks': len(group),
+                    'files': list({c['file'] for c in group})[:3],
+                })
+
+            # Równoległe wywołania LLM przez ThreadPoolExecutor
+            import queue as _q
+            result_queue: _q.Queue = _q.Queue()
+
+            def _run_worker(worker_id: int, context_chunks: list, model_id: str, model_name: str):
+                try:
+                    ctx = "\n\n---\n\n".join(
+                        f"[{c['file']}]\n{c['text']}" for c in context_chunks
+                    )
+                    prompt = (
+                        f"Pytanie: {query}\n\n"
+                        f"Przeanalizuj poniższe fragmenty dokumentów i odpowiedz konkretnie.\n\n"
+                        f"{ctx}\n\n"
+                        f"Jeśli w tych fragmentach brakuje odpowiedzi — napisz krótko: "
+                        f"'Brak danych w tym fragmencie.'"
+                    )
+                    result = call_llm(
+                        prompt=prompt,
+                        system="Jesteś analitykiem dokumentów. Odpowiadaj po polsku, zwięźle i konkretnie.",
+                        stream=False,
+                        provider='openrouter',
+                        model=model_id,
+                    )
+                    text = _llm_response_text(result)
+                    result_queue.put(('done', worker_id, text, model_name, None))
+                except Exception as exc:
+                    result_queue.put(('error', worker_id, None, model_name, str(exc)[:200]))
+
+            threads = []
+            for i, ((model_id, model_name), group) in enumerate(zip(models, groups)):
+                t = threading.Thread(target=_run_worker, args=(i, group, model_id, model_name), daemon=True)
+                t.start()
+                threads.append(t)
+
+            partial: dict[int, str] = {}
+            completed = 0
+            while completed < n_workers:
+                try:
+                    kind, wid, text, model_name, err = result_queue.get(timeout=120)
+                except Exception:
+                    yield sse('error', {'error': 'Timeout — workery nie odpowiedziały w czasie 120 s.'})
+                    return
+                if kind == 'done':
+                    partial[wid] = text
+                    yield sse('worker_done', {
+                        'worker_id': wid,
+                        'model': model_name,
+                        'preview': text[:240] + ('…' if len(text) > 240 else ''),
+                    })
+                else:
+                    partial[wid] = ''
+                    yield sse('worker_error', {'worker_id': wid, 'model': model_name, 'error': err})
+                completed += 1
+
+            # Synteza
+            yield sse('synthesis_start', {'msg': 'Synteza wyników przez orkiestratora…'})
+
+            parts = "\n\n===\n\n".join(
+                f"Agent {i + 1} ({models[i][1]}):\n{partial.get(i, '[brak]')}"
+                for i in range(n_workers)
+            )
+            if cfg.get('hierarchical'):
+                synthesis_prompt = (
+                    f"Masz wyniki {n_workers} niezależnych agentów analizujących różne fragmenty dokumentów.\n\n"
+                    f"Pytanie użytkownika: {query}\n\n"
+                    f"Wyniki agentów:\n{parts}\n\n"
+                    f"Zadanie: pomiń powtórzenia, połącz kluczowe ustalenia ze wszystkich agentów, "
+                    f"wskaż ewentualne sprzeczności, i podaj finalną, wyczerpującą odpowiedź."
+                )
+            else:
+                synthesis_prompt = (
+                    f"Pytanie: {query}\n\n"
+                    f"Odpowiedzi cząstkowe agentów:\n{parts}\n\n"
+                    f"Podaj zwięzłą, kompletną odpowiedź łącząc wszystkie ustalenia."
+                )
+
+            synth_model = cfg['synthesis_model']
+            final = call_llm(
+                prompt=synthesis_prompt,
+                system="Jesteś ekspertem od syntezy informacji z dokumentów. Odpowiadaj po polsku.",
+                stream=False,
+                provider='openrouter',
+                model=synth_model,
+            )
+            final_text = _llm_response_text(final)
+
+            yield sse('done', {
+                'answer': final_text,
+                'n_workers': n_workers,
+                'mode': swarm_mode,
+                'mode_label': cfg['label'],
+            })
+
+        except Exception as e:
+            logger.exception("agents_swarm_stream error")
+            yield sse('error', {'error': str(e)[:300]})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@app.route('/agents/swarm/modes', methods=['GET'])
+def agents_swarm_modes():
+    """Zwraca definicje trybów swarm do UI."""
+    return jsonify({
+        "success": True,
+        "modes": {k: {"label": v["label"], "desc": v["desc"]} for k, v in SWARM_MODES.items()},
+    })
+
+
+# ===== MODEL FLEET =====
+
+@app.route('/api/models/registry', methods=['GET'])
+def models_registry_endpoint():
+    """Zwraca rejestr modeli + live statystyki."""
+    out = {}
+    for mid, info in MODEL_REGISTRY.items():
+        live = _model_live.get(mid, {})
+        out[mid] = {**info, "live": live, "score": _model_score(mid)}
+    return jsonify({"success": True, "models": out})
+
+
+@app.route('/api/models/ping/all', methods=['POST'])
+def models_ping_all():
+    """SSE: pinguje wszystkie modele równolegle i streamuje wyniki."""
+    _require_api_key()
+    TEST = "Odpowiedz jednym słowem: OK"
+
+    def generate():
+        import queue as _q
+        import json as _json
+
+        def sse(event, data):
+            payload = {"event": event, "data": data}
+            return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        rq: _q.Queue = _q.Queue()
+        yield sse('start', {'count': len(MODEL_REGISTRY)})
+
+        def _ping(mid: str):
+            t0 = time.time()
+            try:
+                res = call_llm(prompt=TEST, system="", stream=False,
+                               provider='openrouter', model=mid)
+                txt = _llm_response_text(res)
+                ms  = int((time.time() - t0) * 1000)
+                ok  = bool(txt and not txt.startswith('[') )
+                rq.put((mid, ok, ms, None))
+            except Exception as exc:
+                rq.put((mid, False, int((time.time() - t0) * 1000), str(exc)[:120]))
+
+        threads = [threading.Thread(target=_ping, args=(mid,), daemon=True)
+                   for mid in MODEL_REGISTRY]
+        for t in threads: t.start()
+
+        done = 0
+        while done < len(MODEL_REGISTRY):
+            try:
+                mid, ok, ms, err = rq.get(timeout=90)
+            except Exception:
+                yield sse('timeout', {}); break
+            live = _model_live[mid]
+            live['ping_ok'] = ok; live['ping_ms'] = ms
+            live['ping_ts'] = time.time()
+            if ok:
+                live['ok_count'] += 1
+                prev = live.get('avg_ms')
+                live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
+            else:
+                live['err_count'] += 1
+            score = _model_score(mid)
+            live_copy = dict(live)
+            yield sse('result', {
+                'model_id': mid,
+                'ok': ok, 'ms': ms, 'err': err,
+                'score': score,
+                'avg_ms': live_copy.get('avg_ms'),
+            })
+            done += 1
+
+        yield sse('done', {'pinged': done})
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/models/recommend', methods=['GET'])
+def models_recommend():
+    """Zwraca ranking modeli dla zadanego typu zadania i min. kontekstu."""
+    task  = request.args.get('task', 'analysis')
+    ctx_k = int(request.args.get('context_k', 8))
+    task_tags = {
+        'analysis': ['analiza', 'prawo', 'raporty', 'rozumowanie'],
+        'speed':    ['szybkość', 'krótkie_pytania', 'klasyfikacja'],
+        'data':     ['dane_strukturalne', 'tabele', 'ekstrakcja'],
+        'long':     ['bardzo_długi_kontekst', 'długi_kontekst'],
+    }.get(task, [])
+    ranked = []
+    for mid, info in MODEL_REGISTRY.items():
+        if info.get('context_k', 0) < ctx_k:
+            continue
+        base  = _model_score(mid)
+        bonus = sum(4 for t in info.get('tags', []) if t in task_tags)
+        ranked.append({'model_id': mid, 'name': info['name'], 'icon': info['icon'],
+                       'score': round(base + bonus, 1)})
+    ranked.sort(key=lambda x: x['score'], reverse=True)
+    return jsonify({"success": True, "ranked": ranked[:5], "task": task})
+
+
+# ===== PROVIDER POOL API =====
+
+@app.route('/api/providers', methods=['GET'])
+def providers_list():
+    """Lista wszystkich skonfigurowanych dostawców."""
+    pool = _load_provider_pool()
+    # Maskuj klucze API — pokaż tylko ostatnie 6 znaków
+    safe = json.loads(json.dumps(pool))
+    for entry in safe.get("openrouter_keys", []):
+        k = entry.get("key", "")
+        entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
+        del entry["key"]
+    for entry in safe.get("custom_endpoints", []):
+        k = entry.get("key", "")
+        entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
+        if "key" in entry:
+            del entry["key"]
+    # Dodaj domyślne (z .env) jako informację
+    safe["defaults"] = {
+        "openrouter_key_set": bool(OPENROUTER_API_KEY),
+        "ollama_url": OLLAMA_URL,
+        "active_keys": len([e for e in pool.get("openrouter_keys", []) if e.get("active")]),
+        "active_ollamas": len([e for e in pool.get("ollama_urls", []) if e.get("active")]),
+    }
+    return jsonify({"success": True, "pool": safe})
+
+
+@app.route('/api/providers', methods=['POST'])
+def providers_add():
+    """Dodaje nowego dostawcę do puli."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    data = request.get_json() or {}
+    ptype = data.get("type")  # openrouter_key | ollama_url | custom_endpoint
+    if ptype not in ("openrouter_key", "ollama_url", "custom_endpoint"):
+        return jsonify({"success": False, "error": "Nieznany typ dostawcy"})
+
+    import uuid
+    pool = _load_provider_pool()
+    entry_id = str(uuid.uuid4())[:8]
+
+    if ptype == "openrouter_key":
+        key = (data.get("key") or "").strip()
+        if not key:
+            return jsonify({"success": False, "error": "Brak klucza API"})
+        pool.setdefault("openrouter_keys", []).append({
+            "id": entry_id, "name": data.get("name", f"Konto {entry_id}"),
+            "key": key, "active": True,
+        })
+    elif ptype == "ollama_url":
+        url = (data.get("url") or "").strip().rstrip("/")
+        if not url:
+            return jsonify({"success": False, "error": "Brak adresu URL"})
+        pool.setdefault("ollama_urls", []).append({
+            "id": entry_id, "name": data.get("name", url),
+            "url": url, "active": True,
+        })
+    elif ptype == "custom_endpoint":
+        url = (data.get("url") or "").strip().rstrip("/")
+        if not url:
+            return jsonify({"success": False, "error": "Brak adresu URL"})
+        pool.setdefault("custom_endpoints", []).append({
+            "id": entry_id, "name": data.get("name", url),
+            "url": url, "key": data.get("key", ""), "active": True,
+        })
+
+    _save_provider_pool(pool)
+    return jsonify({"success": True, "id": entry_id})
+
+
+@app.route('/api/providers/<entry_id>', methods=['DELETE'])
+def providers_delete(entry_id: str):
+    """Usuwa dostawcę z puli."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    pool = _load_provider_pool()
+    removed = False
+    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+        before = len(pool.get(section, []))
+        pool[section] = [e for e in pool.get(section, []) if e.get("id") != entry_id]
+        if len(pool[section]) < before:
+            removed = True
+    if removed:
+        _save_provider_pool(pool)
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+
+
+@app.route('/api/providers/<entry_id>/toggle', methods=['POST'])
+def providers_toggle(entry_id: str):
+    """Włącza/wyłącza dostawcę."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    pool = _load_provider_pool()
+    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+        for entry in pool.get(section, []):
+            if entry.get("id") == entry_id:
+                entry["active"] = not entry.get("active", True)
+                _save_provider_pool(pool)
+                return jsonify({"success": True, "active": entry["active"]})
+    return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+
+
+@app.route('/api/providers/<entry_id>/test', methods=['POST'])
+def providers_test(entry_id: str):
+    """Testuje połączenie z dostawcą (krótki ping)."""
+    pool = _load_provider_pool()
+    entry = None
+    ptype = None
+    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+        for e in pool.get(section, []):
+            if e.get("id") == entry_id:
+                entry = e; ptype = section; break
+
+    if not entry:
+        # Może to być test domyślnego
+        if entry_id == "default_openrouter":
+            entry = {"key": OPENROUTER_API_KEY}; ptype = "openrouter_keys"
+        elif entry_id == "default_ollama":
+            entry = {"url": OLLAMA_URL}; ptype = "ollama_urls"
+        else:
+            return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+
+    t0 = time.time()
+    try:
+        if ptype == "openrouter_keys":
+            key = entry.get("key", "")
+            if not key:
+                return jsonify({"success": False, "error": "Brak klucza", "ms": 0})
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "meta-llama/llama-3.1-8b-instruct:free",
+                      "messages": [{"role": "user", "content": "Say: OK"}],
+                      "max_tokens": 5},
+                timeout=20,
+            )
+            ms = int((time.time() - t0) * 1000)
+            ok = r.status_code == 200
+            return jsonify({"success": ok, "ms": ms, "status": r.status_code,
+                           "error": None if ok else r.text[:200]})
+        elif ptype in ("ollama_urls", "custom_endpoints"):
+            url = entry.get("url", "").rstrip("/")
+            r = requests.get(f"{url}/api/tags", timeout=8)
+            ms = int((time.time() - t0) * 1000)
+            return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
+    except Exception as exc:
+        ms = int((time.time() - t0) * 1000)
+        return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
+
+
+# ===== SWARM REPORTS API =====
+
+@app.route('/api/swarm/reports', methods=['POST'])
+def swarm_reports_save():
+    """Zapisuje wynik roju agentów jako raport JSON."""
+    data = request.get_json() or {}
+    query   = (data.get('query') or '').strip()
+    mode    = (data.get('mode') or 'quality').strip()
+    mode_label = (data.get('mode_label') or mode).strip()
+    n_workers  = int(data.get('n_workers') or 0)
+    answer  = (data.get('answer') or '').strip()
+
+    if not query or not answer:
+        return jsonify({"success": False, "error": "Wymagane query i answer"})
+
+    _ensure_swarm_reports_dir()
+    import uuid
+    report_id = str(uuid.uuid4())[:8]
+    title = (query[:57] + '…') if len(query) > 60 else query
+    report = {
+        "id": report_id,
+        "title": title,
+        "query": query,
+        "mode": mode,
+        "mode_label": mode_label,
+        "n_workers": n_workers,
+        "answer": answer,
+        "saved_at": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
+    }
+    (_SWARM_REPORTS_DIR / f"{report_id}.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return jsonify({"success": True, "id": report_id})
+
+
+@app.route('/api/swarm/reports', methods=['GET'])
+def swarm_reports_list():
+    """Lista zapisanych raportów roju, posortowana od najnowszego."""
+    _ensure_swarm_reports_dir()
+    reports = []
+    for p in _SWARM_REPORTS_DIR.glob("*.json"):
+        try:
+            r = json.loads(p.read_text(encoding="utf-8"))
+            # Bezpieczny widok — answer może być długi, zwróć tylko preview
+            reports.append({
+                "id": r.get("id"),
+                "title": r.get("title"),
+                "query": r.get("query"),
+                "mode": r.get("mode"),
+                "mode_label": r.get("mode_label"),
+                "n_workers": r.get("n_workers"),
+                "saved_at": r.get("saved_at"),
+                "answer_preview": (r.get("answer") or "")[:300],
+            })
+        except Exception:
+            continue
+    reports.sort(key=lambda x: x.get("saved_at", ""), reverse=True)
+    return jsonify({"success": True, "reports": reports})
+
+
+@app.route('/api/swarm/reports/<report_id>', methods=['GET'])
+def swarm_reports_get(report_id: str):
+    """Pełny raport roju (z pełną treścią answer)."""
+    if not re.match(r'^[a-f0-9]{8}$', report_id):
+        return jsonify({"success": False, "error": "Nieprawidłowe ID"}), 400
+    p = _SWARM_REPORTS_DIR / f"{report_id}.json"
+    if not p.exists():
+        return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+    try:
+        return jsonify({"success": True, "report": json.loads(p.read_text(encoding="utf-8"))})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/swarm/reports/<report_id>', methods=['DELETE'])
+def swarm_reports_delete(report_id: str):
+    """Usuwa zapisany raport roju."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    if not re.match(r'^[a-f0-9]{8}$', report_id):
+        return jsonify({"success": False, "error": "Nieprawidłowe ID"}), 400
+    p = _SWARM_REPORTS_DIR / f"{report_id}.json"
+    if not p.exists():
+        return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+    p.unlink()
+    return jsonify({"success": True})
+
+
 @app.route('/suggestions', methods=['GET'])
 def get_suggestions():
     force = request.args.get('force', '0') == '1'
@@ -4943,9 +4488,6 @@ def get_suggestions():
             if len(sample) >= 25:
                 break
 
-        if not sample:
-            return jsonify({"success": True, "suggestions": [], "cached": False})
-
         context = "\n\n".join([
             f"[{p['file']}]: {p['text'][:600]}" for p in sample
         ])
@@ -4956,12 +4498,8 @@ def get_suggestions():
             f"DOKUMENTY:\n{context}"
         )
         system_msg = "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań."
-        prov = DEFAULT_LLM_PROVIDER
-        result = call_llm(
-            prompt, system_msg, stream=False,
-            provider=prov, model=_default_chat_model(prov), max_tokens=800,
-        )
-        raw = result.get("response", "") if isinstance(result, dict) else str(result)
+        result = _call_ollama(prompt, system_msg, stream=False, model=LLM_MODEL)
+        raw = result.get("response", "") if isinstance(result, dict) else ""
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]
         suggestions = [l for l in lines if len(l) > 10][:8]
@@ -5131,8 +4669,6 @@ def get_context():
                 text = p.get("text", "")
                 if query:
                     text = highlight_backend(text, query)
-                else:
-                    text = _escape_html_text(text)
                 full_path = p.get("full_path", "")
                 return jsonify({
                     "success": True,
@@ -5161,7 +4697,7 @@ def get_context():
                     )
                     if res.points:
                         p = res.points[0].payload or {}
-                        text = highlight_backend(p.get("text", ""), query) if query else _escape_html_text(p.get("text", ""))
+                        text = highlight_backend(p.get("text", ""), query)
                         full_path = p.get("full_path", "")
                         return jsonify({
                             "success": True,
@@ -5188,9 +4724,7 @@ def get_context():
             )
             if records:
                 p = records[0].payload or {}
-                text = highlight_backend(p.get("text", ""), query) if query else p.get("text", "")
-                if not query:
-                    text = _escape_html_text(text)
+                text = highlight_backend(p.get("text", ""), query)
                 full_path = p.get("full_path", "")
                 return jsonify({
                     "success": True,
@@ -5208,8 +4742,6 @@ def get_context():
                 excerpt = extract_text(path)[:12000]
                 if query:
                     excerpt = highlight_backend(excerpt, query)
-                else:
-                    excerpt = _escape_html_text(excerpt)
                 return jsonify({
                     "success": True,
                     "file": file_name,
@@ -5225,247 +4757,6 @@ def get_context():
     except Exception as e:
         logger.exception("get_context")
         return jsonify({"success": False, "error": str(e)}), 500
-
-
-def _load_file_chunks_for_compare(client, file_name: str, limit: int = 6) -> list[dict]:
-    """Pobiera kilka chunków danego pliku z Qdrant do porównania LLM."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-    file_name = (file_name or "").strip()
-    if not file_name:
-        return []
-
-    try:
-        records, _ = client.scroll(
-            collection_name=ACTIVE_COLLECTION,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="file", match=MatchValue(value=file_name))]
-            ),
-            limit=limit,
-            with_payload=["file", "text", "full_path", "metadata"],
-            with_vectors=False,
-        )
-    except Exception:
-        return []
-
-    chunks: list[dict] = []
-    for idx, record in enumerate(records or []):
-        payload = record.payload or {}
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            continue
-        chunks.append({
-            "index": idx + 1,
-            "point_id": str(record.id),
-            "file": payload.get("file", file_name),
-            "text": text,
-            "full_path": payload.get("full_path", ""),
-            "metadata": payload.get("metadata"),
-        })
-    return chunks
-
-
-def _infer_collection_profile() -> dict:
-    """Prosta heurystyka profilu kolekcji na podstawie próbek chunków."""
-    try:
-        client = get_qdrant_client()
-        records: list = []
-        offset = None
-        while len(records) < 400:
-            batch, offset = client.scroll(
-                collection_name=ACTIVE_COLLECTION,
-                limit=100,
-                offset=offset,
-                with_payload=["file", "text"],
-                with_vectors=False,
-            )
-            records.extend(batch or [])
-            if offset is None:
-                break
-        records = records[:400]
-    except Exception as e:
-        return {
-            "success": False,
-            "profile": "empty",
-            "suggestion_mode": "normal",
-            "suggestion_text": "Nie udało się odczytać kolekcji.",
-            "error": str(e)[:200],
-        }
-
-    if not records:
-        return {
-            "success": True,
-            "profile": "empty",
-            "suggestion_mode": "normal",
-            "suggestion_text": "",
-            "points_sampled": 0,
-        }
-
-    total = len(records)
-    numeric_hits = 0
-    legal_hits = 0
-    prose_hits = 0
-    ext_counts: dict[str, int] = defaultdict(int)
-    sample_files: list[str] = []
-
-    legal_markers = (
-        "ustawa", "rozporządzenie", "kodeks", "art.", "§", "paragraf",
-        "zarządzenie", "uchwała", "wyrok", "sygn.", "dziennik ustaw",
-    )
-
-    for record in records:
-        payload = record.payload or {}
-        file_name = str(payload.get("file") or "").strip()
-        text = str(payload.get("text") or "")
-
-        if file_name:
-            ext = Path(file_name).suffix.lower()
-            ext_counts[ext] += 1
-            if len(sample_files) < 6 and file_name not in sample_files:
-                sample_files.append(file_name)
-
-        lower = text.lower()
-        if any(marker in lower for marker in legal_markers):
-            legal_hits += 1
-
-        digit_count = sum(ch.isdigit() for ch in text)
-        if (
-            file_name.lower().endswith((".xlsx", ".xls", ".csv", ".ods", ".tsv"))
-            or digit_count >= max(8, len(text) // 10)
-            or re.search(r"\b\d{1,3}(?:[ .]\d{3})*(?:[,.]\d+)?\b", text)
-            or re.search(r"[%$€zł]", text, re.IGNORECASE)
-        ):
-            numeric_hits += 1
-
-        if len(text) > 160 and re.search(r"\b[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{3,}\b", text):
-            prose_hits += 1
-
-    if legal_hits >= max(3, total // 4) and legal_hits >= numeric_hits:
-        profile = "legal"
-        suggestion_mode = "legal"
-        suggestion_text = "Kolekcja wygląda na prawną lub regulacyjną. Domyślnie zacznij od trybu Prawny."
-    elif numeric_hits >= max(3, total // 3):
-        profile = "numerical"
-        suggestion_mode = "extract"
-        suggestion_text = "Kolekcja wygląda na tabelaryczną / liczbową. Domyślnie lepsza będzie Ekstrakcja danych."
-    elif legal_hits and numeric_hits:
-        profile = "mixed"
-        suggestion_mode = "detective"
-        suggestion_text = "Kolekcja miesza dane liczbowe i tekstowe. Domyślnie zacznij od trybu Detektyw."
-    elif prose_hits >= max(3, total // 3):
-        profile = "textual"
-        suggestion_mode = "normal"
-        suggestion_text = "Kolekcja wygląda na opisową. Domyślnie zacznij od trybu Standardowego."
-    else:
-        profile = "mixed"
-        suggestion_mode = "detective"
-        suggestion_text = "Kolekcja ma mieszany charakter. Domyślnie zacznij od trybu Detektyw."
-
-    return {
-        "success": True,
-        "profile": profile,
-        "suggestion_mode": suggestion_mode,
-        "suggestion_text": suggestion_text,
-        "points_sampled": total,
-        "sample_files": sample_files,
-        "ext_counts": dict(ext_counts),
-        "numeric_hits": numeric_hits,
-        "legal_hits": legal_hits,
-        "prose_hits": prose_hits,
-    }
-
-
-@app.route('/api/collection/profile', methods=['GET'])
-def collection_profile():
-    return jsonify(_infer_collection_profile())
-
-
-@app.route('/compare', methods=['POST'])
-def compare_documents():
-    """Porównuje dwa dokumenty przez LLM na podstawie ich chunków z Qdrant."""
-    data = request.get_json() or {}
-    file_a = (data.get("file_a") or "").strip()
-    file_b = (data.get("file_b") or "").strip()
-    focus = (data.get("focus") or "").strip()
-    llm_provider = data.get("llm_provider")
-    model = _model_from_request(data, llm_provider)
-
-    if not file_a or not file_b:
-        return jsonify({"success": False, "error": "Wybierz dwa pliki do porównania"}), 400
-    if file_a == file_b:
-        return jsonify({"success": False, "error": "Wybierz dwa różne pliki"}), 400
-
-    try:
-        client = get_qdrant_client()
-        chunks_a = _load_file_chunks_for_compare(client, file_a, limit=6)
-        chunks_b = _load_file_chunks_for_compare(client, file_b, limit=6)
-        if not chunks_a:
-            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_a}"}), 404
-        if not chunks_b:
-            return jsonify({"success": False, "error": f"Brak chunków dla pliku: {file_b}"}), 404
-
-        def _ctx(chunks: list[dict]) -> str:
-            parts = []
-            for chunk in chunks:
-                parts.append(
-                    f"[Chunk {chunk['index']}]\n"
-                    f"{_sanitize_for_prompt(chunk['text'], 1200)}"
-                )
-            return "\n\n".join(parts)
-
-        prompt = (
-            f"Dokument A: {file_a}\n"
-            f"{_ctx(chunks_a)}\n\n"
-            f"Dokument B: {file_b}\n"
-            f"{_ctx(chunks_b)}\n\n"
-        )
-        if focus:
-            prompt += f"Skup się szczególnie na: {focus}\n\n"
-        prompt += (
-            "Porównaj dokumenty po polsku. Wypisz najważniejsze różnice i podobieństwa, "
-            "szczególnie: strony, kwoty, daty, obowiązki, terminy, załączniki, sprzeczności i braki. "
-            "Nie wymyślaj faktów. Jeśli czegoś nie ma w tekście, napisz, że brak danych."
-        )
-
-        system = (
-            "Jesteś analitykiem porównawczym dokumentów. "
-            "Odpowiadasz po polsku, konkretnie i bez markdownowych ozdobników. "
-            "Jeśli są rozbieżności, wypisz je punktami."
-        )
-
-        result = call_llm(
-            prompt=prompt,
-            system=system,
-            stream=False,
-            provider=llm_provider,
-            model=model,
-            max_tokens=1800,
-            temperature=0.2,
-        )
-        comparison = _llm_response_text(result)
-        if not (comparison or "").strip():
-            return jsonify({
-                "success": False,
-                "error": "Model zwrócił pustą odpowiedź — spróbuj ponownie lub zmień provider.",
-                "kind": "llm_empty",
-                "hint": "Przełącz na inny model (Ollama/OpenRouter) lub skróć dokumenty.",
-                "retryable": True,
-            }), 502
-
-        return jsonify({
-            "success": True,
-            "file_a": file_a,
-            "file_b": file_b,
-            "chunks_a": len(chunks_a),
-            "chunks_b": len(chunks_b),
-            "focus": focus,
-            "comparison": comparison,
-        })
-    except EmbeddingError as e:
-        return _json_error_from_exc(e, 503)
-    except Exception as e:
-        logger.exception("compare_documents")
-        return _json_error_from_exc(e, 500)
 
 @app.route('/export/metadata_report', methods=['POST'])
 def export_metadata_report_docx():
@@ -5802,7 +5093,7 @@ def build_network():
     query = data.get('query', '').strip()
     limit = min(int(data.get('limit', 10)), 20)
     llm_provider = data.get('llm_provider')
-    openrouter_model = _model_from_request(data, data.get("llm_provider"))
+    openrouter_model = data.get("openrouter_model")
     include_briefing = data.get("include_briefing", True)
     BATCH_SIZE = 5
 
@@ -5874,11 +5165,12 @@ def build_network():
                         model=openrouter_model,
                         max_tokens=2800,
                     )
-                    raw = _llm_response_text(result)
-                    graph = _extract_first_json_value(raw)
-                    if not isinstance(graph, dict):
-                        logger.warning("Network LLM returned non-object JSON: %s", type(graph).__name__)
+                    raw = result.get("response", "") if isinstance(result, dict) else str(result)
+                    json_match = re.search(r'\{[\s\S]*\}', raw)
+                    if not json_match:
                         continue
+
+                    graph = json.loads(json_match.group())
 
                     for n in graph.get("nodes", []):
                         nid = str(n.get("id", "")).strip()
@@ -5942,7 +5234,7 @@ def timeline_endpoint():
     query_text = (data.get('query') or '').strip()
     limit = min(int(data.get('limit', 20)), 50)
     llm_provider = data.get('llm_provider')
-    openrouter_model = _model_from_request(data, data.get('llm_provider'))
+    openrouter_model = data.get('openrouter_model')
 
     def generate():
         def sse(event, payload):
@@ -6038,655 +5330,32 @@ def timeline_endpoint():
                     model=openrouter_model,
                     max_tokens=1500
                 )
-                raw_resp = _llm_response_text(result)
+                raw_resp = result.get("response", str(result)) if isinstance(result, dict) else str(result)
             except Exception as llm_err:
                 logger.exception(f"Timeline LLM error: {llm_err}")
-                if _is_transient_llm_error(llm_err):
-                    yield sse("error", {"error": "Błąd LLM: chwilowa niedostępność modelu. Spróbuj ponownie za chwilę."})
-                else:
-                    yield sse("error", {"error": f"Błąd LLM: {str(llm_err)[:200]}"})
+                yield sse("error", {"error": f"Błąd LLM: {str(llm_err)[:200]}"})
                 return
 
             # Parsowanie JSON'a
-            try:
-                parsed = _extract_first_json_value(raw_resp)
-            except Exception:
+            json_match = re.search(r'\[\s*\{.*\}\s*\]', raw_resp, re.DOTALL)
+            if json_match:
+                parsed_timeline = json.loads(json_match.group(0))
+                # Sortujemy rosnąco po dacie
+                parsed_timeline.sort(key=lambda x: x.get('date', '9999-99-99'))
+                yield sse("done", {
+                    "success": True,
+                    "timeline": parsed_timeline
+                })
+            else:
                 logger.warning(f"Timeline: brak JSON w odpowiedzi LLM: {raw_resp[:200]}")
                 yield sse("error", {
                     "error": "LLM nie zwrócił poprawnego formatu JSON.",
                     "raw": raw_resp[:300]
                 })
-                return
-
-            if isinstance(parsed, dict):
-                parsed_timeline = parsed.get("timeline") or parsed.get("events") or parsed.get("items") or []
-            else:
-                parsed_timeline = parsed
-
-            if not isinstance(parsed_timeline, list):
-                yield sse("error", {
-                    "error": "LLM zwrócił JSON w nieoczekiwanym formacie."
-                })
-                return
-
-            parsed_timeline.sort(key=lambda x: x.get('date', '9999-99-99') if isinstance(x, dict) else '9999-99-99')
-            yield sse("done", {
-                "success": True,
-                "timeline": parsed_timeline
-            })
 
         except Exception as e:
             logger.exception("timeline_endpoint error")
             yield sse("error", {"error": str(e)})
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream',
-        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-    )
-
-
-# ============================================================
-# /agents/swarm — rój LLM z przełącznikiem A/B/C
-# ============================================================
-
-SWARM_CLOUD_MAX_PARALLEL = 3  # limit równoległych workerów w chmurze (429)
-
-SWARM_MODE_CONFIG = {
-    "A": {
-        "label": "A · Incognito",
-        "description": "Każdy worker dostaje potasowane fragmenty i losowy model. Priorytet: prywatność.",
-        "workers": 4,
-        "max_chunks_per_worker": 4,
-        "shuffle_chunks": True,
-        "random_models": True,
-        "mask_pii_default": True,
-        "strict_incognito_default": True,
-    },
-    "B": {
-        "label": "B · Szybkość",
-        "description": "Najmniej narzutu, szybki model i maksymalny paralelizm. Priorytet: czas odpowiedzi.",
-        "workers": 4,
-        "max_chunks_per_worker": 5,
-        "shuffle_chunks": False,
-        "random_models": False,
-        "mask_pii_default": False,
-        "strict_incognito_default": False,
-    },
-    "C": {
-        "label": "C · Jakość",
-        "description": "Mniej workerów, mocniejsza synteza i lepsza zgodność między częściami. Priorytet: jakość.",
-        "workers": 3,
-        "max_chunks_per_worker": 6,
-        "shuffle_chunks": False,
-        "random_models": False,
-        "mask_pii_default": False,
-        "strict_incognito_default": False,
-    },
-}
-
-SWARM_TASK_TEMPLATES = [
-    {
-        "id": "overpayments",
-        "label": "Przepłaty / faktury",
-        "hint": "Duplikaty kwot, rozbieżności NIP–kwota, fragmentacja zamówień",
-        "query": (
-            "Przeanalizuj fragmenty pod kątem przepłat, duplikatów faktur, rozbieżności kwot "
-            "vs terminów płatności oraz podejrzanej fragmentacji zamówień. "
-            "Wypisz konkretne kwoty, daty i kontrahentów z oznaczeniem ryzyka."
-        ),
-        "suggested_mode": "A",
-    },
-    {
-        "id": "thesis",
-        "label": "Praca dyplomowa / rozdział",
-        "hint": "Spójność metodologii, luki w argumentacji, brakujące odwołania",
-        "query": (
-            "Oceń fragmenty pod kątem spójności metodologii, jakości argumentacji, "
-            "brakujących odwołań i powtórzeń. Wskaż mocne strony, luki i sugestie poprawy "
-            "dla recenzenta merytorycznego."
-        ),
-        "suggested_mode": "C",
-    },
-    {
-        "id": "contracts",
-        "label": "Umowy / klauzule",
-        "hint": "Ryzyka prawne, niespójności między załącznikami",
-        "query": (
-            "Przeanalizuj fragmenty umów i aneksów: wskaż klauzule wysokiego ryzyka, "
-            "niespójności między załącznikami, terminy, kary umowne i brakujące elementy. "
-            "Zwróć checklistę ryzyk z priorytetem."
-        ),
-        "suggested_mode": "A",
-    },
-    {
-        "id": "links",
-        "label": "Powiązania osób–firm",
-        "hint": "Kto występuje z kim i w jakim kontekście",
-        "query": (
-            "Na podstawie fragmentów wskaż powiązania między osobami, firmami i kwotami. "
-            "Wypisz role, daty i kontekst współwystępowania. Zaznacz powiązania wymagające weryfikacji."
-        ),
-        "suggested_mode": "B",
-    },
-]
-
-
-def _swarm_config(mode: str | None) -> dict:
-    key = (mode or "A").strip().upper()
-    return SWARM_MODE_CONFIG.get(key, SWARM_MODE_CONFIG["A"]) | {"key": key if key in SWARM_MODE_CONFIG else "A"}
-
-
-def _swarm_assign_worker_models(mode_key: str, model_pool: list[str], worker_idx: int) -> list[str]:
-    """Zwraca listę modeli do wypróbowania dla jednego workera (pierwszy = preferowany)."""
-    pool = [m for m in (model_pool or []) if m] or [LLM_MODEL]
-    key = (mode_key or "A").upper()
-    if key == "A":
-        # Incognito: jeden unikalny model na workera (pula jest już potasowana)
-        return [pool[worker_idx % len(pool)]]
-    if key == "B":
-        return pool[:1]
-    return pool[: min(2, len(pool))]
-
-
-def _swarm_worker_params(mode_key: str) -> tuple[int, float]:
-    key = (mode_key or "A").upper()
-    if key == "B":
-        return 1000, 0.2
-    if key == "C":
-        return 1800, 0.15
-    return 1500, 0.15
-
-
-def _swarm_synthesis_settings(mode_key: str, model_pool: list[str], *, strict_local: bool = False) -> tuple[list[str], int, float, str | None]:
-    if strict_local:
-        local = [m for m in (LLM_MODEL, "llama3", "llama3.1", "mistral", "qwen2.5") if m]
-        return local[:3], 2000, 0.2, "ollama"
-    pool = [m for m in (model_pool or []) if m] or [LLM_MODEL]
-    key = (mode_key or "A").upper()
-    if key == "B":
-        return pool[:1], 1200, 0.2, None
-    if key == "C":
-        return pool[: min(4, len(pool))], 2800, 0.15, None
-    return pool[: min(2, len(pool))], 1800, 0.2, None
-
-
-def _swarm_privacy_flags(data: dict, config: dict, provider: str | None) -> tuple[bool, bool]:
-    prov = get_llm_provider(provider)
-    cloud_workers = prov != "ollama"
-    if data.get("mask_pii") is None:
-        mask_pii = bool(config.get("mask_pii_default")) and cloud_workers
-    else:
-        mask_pii = bool(data.get("mask_pii"))
-    if data.get("strict_incognito") is None:
-        strict_incognito = bool(config.get("strict_incognito_default")) and cloud_workers
-    else:
-        strict_incognito = bool(data.get("strict_incognito"))
-    if strict_incognito and not cloud_workers:
-        strict_incognito = False
-    return mask_pii, strict_incognito
-
-
-def _swarm_model_candidates(provider: str | None) -> list[str]:
-    prov = get_llm_provider(provider)
-    if prov == "groq":
-        models = [
-            GROQ_MODEL,
-            GROQ_MODEL_VERIFY,
-            "llama-3.1-8b-instant",
-            "groq/compound-mini",
-            "groq/compound",
-            "llama-3.3-70b-versatile",
-            "qwen/qwen3-32b",
-            "meta-llama/llama-4-scout-17b-16e-instruct",
-            "openai/gpt-oss-20b",
-            "openai/gpt-oss-120b",
-        ]
-    elif prov == "openrouter":
-        models = [
-            OPENROUTER_MODEL,
-            OPENROUTER_MODEL_VERIFY,
-            "google/gemini-2.0-flash-exp:free",
-            "meta-llama/llama-3.1-8b-instruct:free",
-            "mistralai/mistral-7b-instruct:free",
-            "qwen/qwen-2.5-7b-instruct:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
-        ]
-    else:
-        models = [
-            LLM_MODEL,
-            "llama3",
-            "llama3.1",
-            "mistral",
-            "qwen2.5",
-        ]
-
-    out = []
-    seen = set()
-    for model in models:
-        m = str(model or "").strip()
-        if not m or m in seen:
-            continue
-        seen.add(m)
-        out.append(m)
-    return out or [LLM_MODEL]
-
-
-def _swarm_ranked_models(provider: str | None, mode_key: str) -> list[str]:
-    pool = _swarm_model_candidates(provider)
-    key = (mode_key or "B").upper()
-
-    if key == "A":
-        import random
-        shuffled = pool[:]
-        random.shuffle(shuffled)
-        return shuffled
-
-    if key == "B":
-        fast_order = [
-            "google/gemini-2.0-flash-exp:free",
-            "meta-llama/llama-3.1-8b-instruct:free",
-            "mistralai/mistral-7b-instruct:free",
-            "qwen/qwen-2.5-7b-instruct:free",
-            "llama-3.1-8b-instant",
-            "groq/compound-mini",
-            LLM_MODEL,
-        ]
-        ranked = [m for m in fast_order if m in pool]
-        ranked.extend([m for m in pool if m not in ranked])
-        return ranked
-
-    quality_order = [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "llama-3.3-70b-versatile",
-        OPENROUTER_MODEL,
-        GROQ_MODEL,
-        OPENROUTER_MODEL_VERIFY,
-        GROQ_MODEL_VERIFY,
-        "groq/compound",
-        "google/gemini-2.0-flash-exp:free",
-        "mistralai/mistral-7b-instruct:free",
-        "qwen/qwen-2.5-7b-instruct:free",
-        "llama-3.1-8b-instant",
-        "groq/compound-mini",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
-        LLM_MODEL,
-    ]
-    ranked = [m for m in quality_order if m in pool]
-    ranked.extend([m for m in pool if m not in ranked])
-    return ranked
-
-
-def _swarm_split_contexts(contexts: list[dict], workers: int, max_chunks_per_worker: int, shuffle_chunks: bool) -> list[list[dict]]:
-    items = list(contexts or [])
-    if shuffle_chunks:
-        import random
-        random.shuffle(items)
-    limit = min(len(items), max(1, workers) * max(1, max_chunks_per_worker))
-    items = items[:limit]
-    groups = [[] for _ in range(max(1, workers))]
-    for idx, item in enumerate(items):
-        groups[idx % len(groups)].append(item)
-    return [g for g in groups if g]
-
-
-def _swarm_group_prompt(
-    query: str,
-    group: list[dict],
-    group_idx: int,
-    total_groups: int,
-    mode_label: str,
-    *,
-    mask_pii: bool = False,
-) -> str:
-    parts = []
-    for item in group:
-        file_name = str(item.get("file") or "nieznany").strip()
-        text, _stats = _swarm_prepare_text(str(item.get("text") or ""), max_len=1200, mask_pii=mask_pii)
-        parts.append(f"[{file_name}]\n{text}")
-    context = "\n\n".join(parts)
-    safe_query, _ = _swarm_prepare_text(query, max_len=2000, mask_pii=mask_pii)
-    return (
-        f"TRYB ROJU: {mode_label}\n"
-        f"PODZADANIE: część {group_idx + 1}/{total_groups}\n"
-        f"PYTANIE UŻYTKOWNIKA: {safe_query}\n\n"
-        "Dostajesz tylko wycinek dokumentów. Zwróć zwięzłą analizę w 4 sekcjach:\n"
-        "1) fakty,\n2) osoby/podmioty,\n3) daty/kwoty/liczby,\n4) luki i pytania pomocnicze.\n"
-        "Nie wymyślaj faktów spoza tekstu.\n\n"
-        f"FRAGMENTY:\n{context}"
-    )
-
-
-def _swarm_synthesis_prompt(query: str, worker_outputs: list[dict], mode_label: str, mode_key: str = "A") -> str:
-    blocks = []
-    for out in worker_outputs:
-        blocks.append(
-            f"[Worker {out.get('worker_index') + 1} | {out.get('model')}]\n"
-            f"{out.get('summary', '').strip()}"
-        )
-    joined = "\n\n".join(blocks)
-    quality_hint = ""
-    if (mode_key or "").upper() == "C":
-        quality_hint = (
-            "Tryb JAKOŚĆ: szczegółowo porównaj wnioski workerów, rozstrzygnij sprzeczności, "
-            "wypisz najważniejsze dowody i ocenę wiarygodności.\n"
-        )
-    return (
-        f"TRYB ROJU: {mode_label}\n"
-        f"PYTANIE UŻYTKOWNIKA: {query}\n\n"
-        f"{quality_hint}"
-        "Masz syntezę wyników częściowych od wielu workerów. "
-        "Połącz je w jedną spójną odpowiedź po polsku. "
-        "Jeśli workerzy się różnią, wskaż to wprost i wybierz najbardziej wiarygodny wariant.\n"
-        "Zwróć:\n"
-        "- Krótkie podsumowanie\n"
-        "- Najważniejsze fakty\n"
-        "- Wnioski\n"
-        "- 2-4 pytania dalsze\n\n"
-        f"WYNIKI WORKERÓW:\n{joined}"
-    )
-
-
-def _swarm_call_with_fallback(prompt: str, system: str, provider: str | None, models: list[str],
-                              max_tokens: int, temperature: float,
-                              task: str | None = None) -> tuple[str, str, dict | None]:
-    last_error = None
-    for model in models or [None]:
-        try:
-            result = call_llm(
-                prompt=prompt,
-                system=system,
-                stream=False,
-                provider=provider,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                task=task,
-            )
-            usage = result.get("usage") if isinstance(result, dict) else None
-            return (model or "", _llm_response_text(result), usage)
-        except Exception as e:
-            last_error = e
-            continue
-    raise RuntimeError(str(last_error) if last_error else "Błąd wywołania LLM")
-
-
-def _swarm_run_synthesis(
-    query: str,
-    chat_context: str,
-    worker_outputs: list[dict],
-    config: dict,
-    model_pool: list[str],
-    provider: str | None,
-    *,
-    strict_incognito: bool,
-) -> tuple[str, str, str | None, bool, dict | None]:
-    """Synteza roju. Przy strict_incognito najpierw Ollama; gdy padnie — zapasowo chmura
-    (tylko streszczenia workerów, bez pełnych dokumentów).
-    """
-    synth_models, synth_max_tokens, synth_temp, synth_provider = _swarm_synthesis_settings(
-        config["key"], model_pool, strict_local=strict_incognito,
-    )
-    synth_llm_provider = synth_provider or provider
-    synth_prompt = _swarm_synthesis_prompt(
-        query + (f"\n\nKontekst rozmowy:\n{chat_context}" if chat_context else ""),
-        worker_outputs,
-        config["label"],
-        config["key"],
-    )
-    synth_system = (
-        "Jesteś syntezatorem roju LLM. "
-        "Masz połączyć częściowe analizy w jedną odpowiedź. "
-        "Trzymaj się faktów i jasno zaznaczaj niepewności."
-    )
-    try:
-        used_model, final_answer, usage = _swarm_call_with_fallback(
-            synth_prompt,
-            synth_system,
-            synth_llm_provider,
-            synth_models,
-            synth_max_tokens,
-            synth_temp,
-            task="swarm",
-        )
-        return used_model, final_answer, get_llm_provider(synth_llm_provider), False, usage
-    except Exception as e:
-        if not strict_incognito:
-            raise
-        logger.warning("Swarm strict incognito: synteza Ollama nieudana — fallback chmura: %s", e)
-        cloud_prov = get_llm_provider(provider, task="swarm")
-        if cloud_prov == "ollama":
-            cloud_prov = _fleet_pick_provider("swarm") or DEFAULT_LLM_PROVIDER
-            if cloud_prov == "ollama":
-                cloud_prov = "openrouter"
-        cloud_models = _swarm_model_candidates(cloud_prov)[:3]
-        used_model, final_answer, usage = _swarm_call_with_fallback(
-            synth_prompt,
-            synth_system,
-            cloud_prov,
-            cloud_models,
-            synth_max_tokens,
-            synth_temp,
-            task="swarm",
-        )
-        return used_model, final_answer, get_llm_provider(cloud_prov), True, usage
-
-
-@app.route('/api/swarm/modes', methods=['GET'])
-def swarm_modes():
-    """Opis trybów A/B/C roju LLM (zgodny z SWARM_MODE_CONFIG)."""
-    modes = {}
-    for key, cfg in SWARM_MODE_CONFIG.items():
-        modes[key] = {
-            "label": cfg.get("label"),
-            "description": cfg.get("description"),
-            "workers": cfg.get("workers"),
-            "max_chunks_per_worker": cfg.get("max_chunks_per_worker"),
-            "shuffle_chunks": cfg.get("shuffle_chunks"),
-            "random_models": cfg.get("random_models"),
-            "mask_pii_default": cfg.get("mask_pii_default"),
-            "strict_incognito_default": cfg.get("strict_incognito_default"),
-            "default_limit": cfg.get("workers", 4) * cfg.get("max_chunks_per_worker", 4),
-        }
-    return jsonify({
-        "success": True,
-        "modes": modes,
-        "default": "A",
-        "templates": SWARM_TASK_TEMPLATES,
-    })
-
-
-@app.route('/agents/swarm', methods=['POST'])
-def agents_swarm():
-    """Rój LLM: map-reduce z przełącznikiem A/B/C."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    data = request.get_json() or {}
-    query = (data.get("query") or "").strip()
-    file_filter = data.get("file_filter")
-    chat_context = (data.get("chat_context") or "").strip()
-    provider = data.get("llm_provider")
-    mode = (data.get("swarm_mode") or data.get("mode") or "A").strip().upper()
-    config = _swarm_config(mode)
-    search_limit = min(int(data.get("limit") or (config["workers"] * config["max_chunks_per_worker"])), 20)
-    mask_pii, strict_incognito = _swarm_privacy_flags(data, config, provider)
-
-    if not query:
-        return jsonify({"success": False, "error": "Brak zapytania"}), 400
-
-    def generate():
-        def sse(event, payload):
-            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        try:
-            client = get_qdrant_client()
-            try:
-                raw_contexts, results = _retrieve_search_contexts(
-                    client, query, search_limit, file_filter, "detective"
-                )
-            except EmbeddingError as e:
-                yield sse("error", _sse_error_from_exc(e))
-                return
-
-            if not raw_contexts:
-                yield sse("error", {
-                    "error": "Brak dokumentów do analizy — zaimportuj pliki lub zmień zapytanie.",
-                    "kind": "no_results",
-                    "hint": "Sprawdź aktywną kolekcję i czy zapytanie pasuje do zindeksowanych dokumentów.",
-                    "retryable": False,
-                })
-                return
-
-            groups = _swarm_split_contexts(
-                raw_contexts,
-                config["workers"],
-                config["max_chunks_per_worker"],
-                config["shuffle_chunks"],
-            )
-            if not groups:
-                yield sse("error", {
-                    "error": "Nie udało się podzielić dokumentów na grupy workerów",
-                    "kind": "validation",
-                    "retryable": False,
-                })
-                return
-
-            pii_stats: dict[str, int] = {}
-            if mask_pii:
-                for item in raw_contexts:
-                    _, stats = _swarm_prepare_text(str(item.get("text") or ""), mask_pii=True)
-                    _merge_pii_stats(pii_stats, stats)
-                _, qstats = _swarm_prepare_text(query, max_len=5000, mask_pii=True)
-                _merge_pii_stats(pii_stats, qstats)
-
-            model_pool = _swarm_ranked_models(provider, config["key"])
-            if not model_pool:
-                model_pool = [LLM_MODEL]
-
-            yield sse("start", {
-                "success": True,
-                "mode": config["key"],
-                "mode_label": config["label"],
-                "description": config["description"],
-                "workers": len(groups),
-                "sources": len(raw_contexts),
-                "provider": get_llm_provider(provider),
-                "shuffle_chunks": config.get("shuffle_chunks"),
-                "random_models": config.get("random_models"),
-                "max_chunks_per_worker": config.get("max_chunks_per_worker"),
-                "mask_pii": mask_pii,
-                "strict_incognito": strict_incognito,
-                "pii_redactions": pii_stats,
-            })
-
-            worker_outputs = []
-            worker_max_tokens, worker_temp = _swarm_worker_params(config["key"])
-            worker_prov = get_llm_provider(provider, task="swarm")
-            max_parallel = len(groups)
-            if worker_prov != "ollama":
-                max_parallel = min(len(groups), SWARM_CLOUD_MAX_PARALLEL)
-
-            with ThreadPoolExecutor(max_workers=max_parallel) as ex:
-                futures = []
-                for idx, group in enumerate(groups):
-                    models = _swarm_assign_worker_models(config["key"], model_pool, idx)
-
-                    prompt = _swarm_group_prompt(
-                        query, group, idx, len(groups), config["label"], mask_pii=mask_pii,
-                    )
-                    system = (
-                        "Jesteś jednym z workerów w roju LLM. "
-                        "Analizujesz tylko otrzymany fragment dokumentów. "
-                        "Odpowiadasz po polsku, zwięźle, bez markdownowych ozdobników."
-                    )
-                    futures.append((idx, group, models, ex.submit(
-                        _swarm_call_with_fallback,
-                        prompt,
-                        system,
-                        provider,
-                        models,
-                        worker_max_tokens,
-                        worker_temp,
-                    )))
-
-                for idx, group, models, fut in futures:
-                    try:
-                        used_model, summary, usage = fut.result()
-                        worker_outputs.append({
-                            "worker_index": idx,
-                            "model": used_model or (models[0] if models else ""),
-                            "summary": summary,
-                            "chunks": len(group),
-                            "usage": usage,
-                        })
-                        yield sse("worker", {
-                            "worker_index": idx,
-                            "workers": len(groups),
-                            "model": used_model or (models[0] if models else ""),
-                            "chunks": len(group),
-                            "summary": summary,
-                        })
-                    except Exception as e:
-                        worker_outputs.append({
-                            "worker_index": idx,
-                            "model": models[0] if models else "",
-                            "summary": f"[Błąd workera: {str(e)[:200]}]",
-                            "chunks": len(group),
-                        })
-                        werr = _classify_api_error(e, label="Worker roju")
-                        yield sse("worker", {
-                            "worker_index": idx,
-                            "workers": len(groups),
-                            "model": models[0] if models else "",
-                            "chunks": len(group),
-                            "error": werr["error"],
-                            "kind": werr.get("kind"),
-                            "hint": werr.get("hint"),
-                        })
-
-            worker_outputs.sort(key=lambda x: x["worker_index"])
-            reduce_msg = "Syntezuję odpowiedzi workerów…"
-            if strict_incognito:
-                reduce_msg = "Synteza lokalna (Ollama) — strict incognito…"
-            yield sse("reduce", {
-                "message": reduce_msg,
-                "workers": len(worker_outputs),
-                "strict_incognito": strict_incognito,
-            })
-
-            used_model, final_answer, synth_prov_used, synth_cloud_fallback, synth_usage = _swarm_run_synthesis(
-                query,
-                chat_context,
-                worker_outputs,
-                config,
-                model_pool,
-                provider,
-                strict_incognito=strict_incognito,
-            )
-
-            yield sse("done", {
-                "success": True,
-                "mode": config["key"],
-                "mode_label": config["label"],
-                "provider": get_llm_provider(provider, task="swarm"),
-                "synth_provider": synth_prov_used,
-                "synth_cloud_fallback": synth_cloud_fallback,
-                "parallel_workers": max_parallel,
-                "used_model": used_model,
-                "workers": worker_outputs,
-                "answer": final_answer,
-                "results": results,
-                "sources": len(raw_contexts),
-                "mask_pii": mask_pii,
-                "strict_incognito": strict_incognito,
-                "pii_redactions": pii_stats,
-                "usage": synth_usage,
-            })
-        except Exception as e:
-            logger.exception("agents_swarm error")
-            yield sse("error", _sse_error_from_exc(e))
 
     return Response(
         stream_with_context(generate()),
@@ -7596,23 +6265,31 @@ def sql_write():
         if not confirmed:
             impact_info = ""
             if first_word in ("UPDATE", "DELETE"):
-                try:
-                    conn_check = _get_sql_conn(cfg)
-                    cur_check = conn_check.cursor()
-                    if first_word == "UPDATE":
-                        where_part = re.search(r"\bWHERE\b(.+?)(?:$)", sql_query, re.IGNORECASE | re.DOTALL)
-                        table_part = re.search(r"UPDATE\s+\[?(\w+)\]?", sql_query, re.IGNORECASE)
-                        if where_part and table_part:
-                            count_sql = f"SELECT COUNT(*) FROM [{table_part.group(1)}] WHERE {where_part.group(1)}"
-                            cur_check.execute(count_sql)
-                            impact_info = f"Zmieni {cur_check.fetchone()[0]} wierszy"
-                    elif first_word == "DELETE":
-                        count_sql = sql_query.replace("DELETE", "SELECT COUNT(*)", 1)
-                        cur_check.execute(count_sql)
-                        impact_info = f"Usunie {cur_check.fetchone()[0]} wierszy"
-                    conn_check.close()
-                except Exception:
-                    impact_info = "Nie udało się oszacować wpływu"
+                # Sprawdź bezpieczeństwo zapytania PRZED jakimkolwiek wykonaniem
+                is_safe_pre, _ = _is_sql_safe(sql_query, ("UPDATE", "DELETE"))
+                if is_safe_pre:
+                    try:
+                        conn_check = _get_sql_conn(cfg)
+                        cur_check = conn_check.cursor()
+                        if first_word == "UPDATE":
+                            where_part = re.search(r"\bWHERE\b(.+?)$", sql_query, re.IGNORECASE | re.DOTALL)
+                            table_match = re.search(r"UPDATE\s+\[?(\w+)\]?", sql_query, re.IGNORECASE)
+                            if where_part and table_match:
+                                table_name = table_match.group(1)
+                                # Tylko alphanum/underscore — nie dopuszczamy iniekcji w nazwie tabeli
+                                if re.match(r"^\w+$", table_name):
+                                    count_sql = f"SELECT COUNT(*) FROM [{table_name}] WHERE {where_part.group(1)}"
+                                    cur_check.execute(count_sql)
+                                    impact_info = f"Zmieni {cur_check.fetchone()[0]} wierszy"
+                        elif first_word == "DELETE":
+                            from_match = re.search(r"\bFROM\b(.+)$", sql_query, re.IGNORECASE | re.DOTALL)
+                            if from_match:
+                                count_sql = f"SELECT COUNT(*) FROM {from_match.group(1)}"
+                                cur_check.execute(count_sql)
+                                impact_info = f"Usunie {cur_check.fetchone()[0]} wierszy"
+                        conn_check.close()
+                    except Exception:
+                        impact_info = "Nie udało się oszacować wpływu"
 
             return jsonify({
                 "success": True,
@@ -7661,18 +6338,10 @@ def sql_vectorize():
         def sse(event, payload):
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-        task_id = None
-        task_error = None
         try:
             _require_sql_backend(cfg)
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
-
-            ok, task_id, block_msg = _heavy_task_try_start("sql_vectorize", table)
-            if not ok:
-                yield sse("error", {"error": block_msg, "blocked": True})
-                return
-
             conn = _get_sql_conn(cfg, readonly=True)
             data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
@@ -7685,7 +6354,7 @@ def sql_vectorize():
                 return
 
             total = _sql_table_count(conn, table, dialect)
-            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols, "task_id": task_id})
+            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols})
 
             qdrant = get_qdrant_client()
             done = 0
@@ -7713,7 +6382,6 @@ def sql_vectorize():
                 done += len(rows_buf)
                 rows_buf = []
                 pct = round(done / total * 100) if total else 0
-                _heavy_task_update(task_id, progress=done, total=total, message=table)
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
             if rows_buf:
@@ -7732,18 +6400,14 @@ def sql_vectorize():
                     qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
                 done += len(rows_buf)
                 pct = round(done / total * 100) if total else 0
-                _heavy_task_update(task_id, progress=done, total=total, message=table)
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
             conn.close()
             _docs_cache["data"] = None
             yield sse("done", {"done": True, "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
         except Exception as e:
-            task_error = str(e)
             logger.exception("sql_vectorize error")
-            yield sse("error", {"error": task_error})
-        finally:
-            _heavy_task_finish(task_id, error=task_error)
+            yield sse("error", {"error": str(e)})
 
     return Response(
         stream_with_context(generate()),
@@ -7762,29 +6426,20 @@ def sql_vectorize_all():
         def sse(event, payload):
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-        task_id = None
-        task_error = None
         try:
             _require_sql_backend(cfg)
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
-
-            ok, task_id, block_msg = _heavy_task_try_start("sql_vectorize_all", "all_tables")
-            if not ok:
-                yield sse("error", {"error": block_msg, "blocked": True})
-                return
-
             conn = _get_sql_conn(cfg, readonly=True)
             data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
             tables = [t["name"] for t in _sql_list_tables(conn, dialect)]
-            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables, "task_id": task_id})
+            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables})
 
             qdrant = get_qdrant_client()
             total_rows = 0
 
             for table_idx, table in enumerate(tables):
-                _heavy_task_update(task_id, progress=table_idx + 1, total=len(tables), message=table)
                 try:
                     yield sse("table_start", {
                         "table_start": True,
@@ -7873,11 +6528,8 @@ def sql_vectorize_all():
                 "msg": f"Zwektoryzowano {total_rows} wierszy z {len(tables)} tabel",
             })
         except Exception as e:
-            task_error = str(e)
             logger.exception("sql_vectorize_all error")
-            yield sse("error", {"error": task_error})
-        finally:
-            _heavy_task_finish(task_id, error=task_error)
+            yield sse("error", {"error": str(e)})
 
     return Response(
         stream_with_context(generate()),
@@ -7902,18 +6554,14 @@ def health():
         parsers = _file_parsers_health() if not light else {}
         ollama_h = {"ok": True} if light else _check_ollama_health()
         or_h = {"ok": True} if light else _check_openrouter_health()
-        groq_h = {"ok": True} if light else _check_groq_health()
 
-        # LLM status — według aktywnego providera
+        # LLM status (preferuj OpenRouter jeśli skonfigurowany)
         llm_ok = False
         llm_detail = ""
         if light:
             llm_ok = True
             llm_detail = "light"
-        elif DEFAULT_LLM_PROVIDER == "groq":
-            llm_ok = groq_h.get("ok", False)
-            llm_detail = groq_h.get("error") or "Groq"
-        elif DEFAULT_LLM_PROVIDER == "openrouter":
+        elif OPENROUTER_API_KEY:
             llm_ok = or_h.get("ok", False)
             llm_detail = or_h.get("error") or "OpenRouter"
         else:
@@ -7937,12 +6585,8 @@ def health():
             pass
 
         # Ogólny status
-        if not q.get("ok", False):
-            overall = "degraded"
-        elif llm_ok:
-            overall = "ok"
-        else:
-            overall = "warn"
+        critical_ok = q.get("ok", False) and (llm_ok or True)  # LLM fallbacki istnieją
+        overall = "ok" if critical_ok else "degraded"
 
         # Wersja (z git describe lub stałej)
         try:
@@ -7954,30 +6598,13 @@ def health():
             "success": True,
             "overall": overall,
             "version": ver,
-            "llm_model": (
-                GROQ_MODEL if DEFAULT_LLM_PROVIDER == "groq"
-                else OPENROUTER_MODEL if DEFAULT_LLM_PROVIDER == "openrouter"
-                else LLM_MODEL
-            ),
             "timestamp": int(time.time()),
 
             # Połączenia (dla kropek i tabeli w modalu)
             "qdrant": q,
             "qdrant_status": "ok" if q.get("ok") else "error",
-            "llm": {
-                "ok": llm_ok,
-                "detail": llm_detail,
-                "kind": groq_h.get("kind") if DEFAULT_LLM_PROVIDER == "groq" else (
-                    or_h.get("kind") if DEFAULT_LLM_PROVIDER == "openrouter" else (
-                        ollama_h.get("kind") if DEFAULT_LLM_PROVIDER == "ollama" else None
-                    )
-                ),
-            },
+            "llm": {"ok": llm_ok, "detail": llm_detail},
             "llm_status": "ok" if llm_ok else "warn",
-            "llm_error": llm_detail if not llm_ok else None,
-            "llm_provider": DEFAULT_LLM_PROVIDER,
-            "fleet_auto_route": FLEET_AUTO_ROUTE,
-            "fleet_effective_provider": _fleet_effective_provider("general"),
             "embedding": {
                 "ok": ollama_h.get("ok", False),  # embeddingi idą przez Ollama
                 "model": "nomic-embed-text"
@@ -8001,11 +6628,6 @@ def health():
             # Inne przydatne dla UI
             "provider": DEFAULT_LLM_PROVIDER,
             "app_api_key_set": bool(APP_API_KEY),
-            "pools": {
-                "groq": GROQ_KEY_POOL.stats(),
-                "openrouter": OPENROUTER_KEY_POOL.stats(),
-                "ollama": OLLAMA_URL_POOL.stats(),
-            },
         })
     except Exception as e:
         logger.exception("health endpoint error")
@@ -8097,14 +6719,16 @@ def api_update_restart():
 
 
 def _localhost_only() -> bool:
-    """True gdy żądanie pochodzi z localhost (self-update / service API)."""
+    """True gdy żądanie pochodzi z localhost (self-update / service API).
+    Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true.
+    """
     addr = (request.remote_addr or "").strip()
     if addr in ("127.0.0.1", "::1", "localhost"):
         return True
     if TRUST_PROXY:
-        # Trust forwarded headers only when explicitly enabled.
         fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-        return fwd in ("127.0.0.1", "::1", "localhost")
+        if fwd in ("127.0.0.1", "::1", "localhost"):
+            return True
     return False
 
 

@@ -87,4 +87,9 @@ qdrant_data/
 .llm_config.json
 .llm_fleet_stats.json
 .active_collection
+.providers.json
+.swarm_reports/
 *.pid
+
+# === Claude Code agent worktrees ===
+.claude/
