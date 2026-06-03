@@ -145,7 +145,19 @@ if [ -z "$VENV_PYTHON" ] || [ ! -f "$VENV_PYTHON" ]; then
     exit 1
 fi
 
-# 4. Uruchom aplikację w tle
+# 4. Wczytaj .env (app.py nie ładuje go sam — wymagane QDRANT_URL, QDRANT_KEY)
+if [ ! -f ".env" ]; then
+    echo "BŁĄD: Brak pliku .env w katalogu projektu."
+    echo "  cp .env.example .env"
+    echo "  Uzupełnij QDRANT_URL i QDRANT_KEY (Cloud lub lokalny Qdrant — patrz .env.example)"
+    exit 1
+fi
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
+
+# 5. Uruchom aplikację w tle
 echo "[3/4] Uruchamiam aplikację w tle..."
 
 nohup "$VENV_PYTHON" app.py > app.log 2>&1 &
@@ -162,7 +174,7 @@ else
 fi
 
 echo ""
-echo "[4/4] Gotowe!"
+echo "[4/4] Gotowe! (zmienne z .env załadowane)"
 echo ""
 echo "   Adres:        http://127.0.0.1:5000"
 echo "   Logi na żywo: tail -f app.log"
