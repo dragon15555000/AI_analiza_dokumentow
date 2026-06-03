@@ -713,6 +713,45 @@ DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # 
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
+# ---- Provider Pool (wiele kluczy / adresów serwerów) ----
+_PROVIDERS_FILE = Path(__file__).parent / ".providers.json"
+_provider_pool_lock = threading.Lock()
+
+def _load_provider_pool() -> dict:
+    """Wczytuje pulę dostawców z pliku JSON."""
+    try:
+        if _PROVIDERS_FILE.exists():
+            return json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
+
+def _save_provider_pool(pool: dict) -> None:
+    with _provider_pool_lock:
+        _PROVIDERS_FILE.write_text(json.dumps(pool, indent=2, ensure_ascii=False), encoding="utf-8")
+
+# Wskaźnik rotacji round-robin (klucze OpenRouter)
+_provider_rr_idx: int = 0
+
+def _pick_openrouter_key() -> str:
+    """Zwraca kolejny aktywny klucz OpenRouter z puli (round-robin).
+    Jeśli pula pusta — używa głównego OPENROUTER_API_KEY z .env."""
+    global _provider_rr_idx
+    pool = _load_provider_pool()
+    active = [e for e in pool.get("openrouter_keys", []) if e.get("active") and e.get("key")]
+    if not active:
+        return OPENROUTER_API_KEY
+    with _provider_pool_lock:
+        idx = _provider_rr_idx % len(active)
+        _provider_rr_idx = (idx + 1) % len(active)
+    return active[idx]["key"]
+
+def _pick_ollama_url() -> str:
+    """Zwraca pierwszy aktywny adres Ollama z puli, albo domyślny OLLAMA_URL."""
+    pool = _load_provider_pool()
+    active = [e for e in pool.get("ollama_urls", []) if e.get("active") and e.get("url")]
+    return active[0]["url"] if active else OLLAMA_URL
+
 APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
 # Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
@@ -1639,7 +1678,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {_pick_openrouter_key()}",
             "Content-Type": "application/json"
         }
         messages = []
@@ -1785,7 +1824,7 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                      max_tokens: int, temperature: float) -> dict | requests.Response:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {_pick_openrouter_key()}",
         "HTTP-Referer": "http://localhost",  # opcjonalnie
         "X-Title": "AI Analiza Dokumentów"
     }
@@ -4141,6 +4180,157 @@ def models_recommend():
                        'score': round(base + bonus, 1)})
     ranked.sort(key=lambda x: x['score'], reverse=True)
     return jsonify({"success": True, "ranked": ranked[:5], "task": task})
+
+
+# ===== PROVIDER POOL API =====
+
+@app.route('/api/providers', methods=['GET'])
+def providers_list():
+    """Lista wszystkich skonfigurowanych dostawców."""
+    pool = _load_provider_pool()
+    # Maskuj klucze API — pokaż tylko ostatnie 6 znaków
+    safe = json.loads(json.dumps(pool))
+    for entry in safe.get("openrouter_keys", []):
+        k = entry.get("key", "")
+        entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
+        del entry["key"]
+    for entry in safe.get("custom_endpoints", []):
+        k = entry.get("key", "")
+        entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
+        if "key" in entry:
+            del entry["key"]
+    # Dodaj domyślne (z .env) jako informację
+    safe["defaults"] = {
+        "openrouter_key_set": bool(OPENROUTER_API_KEY),
+        "ollama_url": OLLAMA_URL,
+        "active_keys": len([e for e in pool.get("openrouter_keys", []) if e.get("active")]),
+        "active_ollamas": len([e for e in pool.get("ollama_urls", []) if e.get("active")]),
+    }
+    return jsonify({"success": True, "pool": safe})
+
+
+@app.route('/api/providers', methods=['POST'])
+def providers_add():
+    """Dodaje nowego dostawcę do puli."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    data = request.get_json() or {}
+    ptype = data.get("type")  # openrouter_key | ollama_url | custom_endpoint
+    if ptype not in ("openrouter_key", "ollama_url", "custom_endpoint"):
+        return jsonify({"success": False, "error": "Nieznany typ dostawcy"})
+
+    import uuid
+    pool = _load_provider_pool()
+    entry_id = str(uuid.uuid4())[:8]
+
+    if ptype == "openrouter_key":
+        key = (data.get("key") or "").strip()
+        if not key:
+            return jsonify({"success": False, "error": "Brak klucza API"})
+        pool.setdefault("openrouter_keys", []).append({
+            "id": entry_id, "name": data.get("name", f"Konto {entry_id}"),
+            "key": key, "active": True,
+        })
+    elif ptype == "ollama_url":
+        url = (data.get("url") or "").strip().rstrip("/")
+        if not url:
+            return jsonify({"success": False, "error": "Brak adresu URL"})
+        pool.setdefault("ollama_urls", []).append({
+            "id": entry_id, "name": data.get("name", url),
+            "url": url, "active": True,
+        })
+    elif ptype == "custom_endpoint":
+        url = (data.get("url") or "").strip().rstrip("/")
+        if not url:
+            return jsonify({"success": False, "error": "Brak adresu URL"})
+        pool.setdefault("custom_endpoints", []).append({
+            "id": entry_id, "name": data.get("name", url),
+            "url": url, "key": data.get("key", ""), "active": True,
+        })
+
+    _save_provider_pool(pool)
+    return jsonify({"success": True, "id": entry_id})
+
+
+@app.route('/api/providers/<entry_id>', methods=['DELETE'])
+def providers_delete(entry_id: str):
+    """Usuwa dostawcę z puli."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    pool = _load_provider_pool()
+    removed = False
+    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+        before = len(pool.get(section, []))
+        pool[section] = [e for e in pool.get(section, []) if e.get("id") != entry_id]
+        if len(pool[section]) < before:
+            removed = True
+    if removed:
+        _save_provider_pool(pool)
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+
+
+@app.route('/api/providers/<entry_id>/toggle', methods=['POST'])
+def providers_toggle(entry_id: str):
+    """Włącza/wyłącza dostawcę."""
+    if not _is_local_request():
+        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
+    pool = _load_provider_pool()
+    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+        for entry in pool.get(section, []):
+            if entry.get("id") == entry_id:
+                entry["active"] = not entry.get("active", True)
+                _save_provider_pool(pool)
+                return jsonify({"success": True, "active": entry["active"]})
+    return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+
+
+@app.route('/api/providers/<entry_id>/test', methods=['POST'])
+def providers_test(entry_id: str):
+    """Testuje połączenie z dostawcą (krótki ping)."""
+    pool = _load_provider_pool()
+    entry = None
+    ptype = None
+    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+        for e in pool.get(section, []):
+            if e.get("id") == entry_id:
+                entry = e; ptype = section; break
+
+    if not entry:
+        # Może to być test domyślnego
+        if entry_id == "default_openrouter":
+            entry = {"key": OPENROUTER_API_KEY}; ptype = "openrouter_keys"
+        elif entry_id == "default_ollama":
+            entry = {"url": OLLAMA_URL}; ptype = "ollama_urls"
+        else:
+            return jsonify({"success": False, "error": "Nie znaleziono"}), 404
+
+    t0 = time.time()
+    try:
+        if ptype == "openrouter_keys":
+            key = entry.get("key", "")
+            if not key:
+                return jsonify({"success": False, "error": "Brak klucza", "ms": 0})
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "meta-llama/llama-3.1-8b-instruct:free",
+                      "messages": [{"role": "user", "content": "Say: OK"}],
+                      "max_tokens": 5},
+                timeout=20,
+            )
+            ms = int((time.time() - t0) * 1000)
+            ok = r.status_code == 200
+            return jsonify({"success": ok, "ms": ms, "status": r.status_code,
+                           "error": None if ok else r.text[:200]})
+        elif ptype in ("ollama_urls", "custom_endpoints"):
+            url = entry.get("url", "").rstrip("/")
+            r = requests.get(f"{url}/api/tags", timeout=8)
+            ms = int((time.time() - t0) * 1000)
+            return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
+    except Exception as exc:
+        ms = int((time.time() - t0) * 1000)
+        return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
 
 
 @app.route('/suggestions', methods=['GET'])

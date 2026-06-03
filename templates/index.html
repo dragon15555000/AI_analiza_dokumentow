@@ -1682,7 +1682,7 @@ table { margin: 0; }
   <div id="fleetCards" class="row g-3 mb-4"></div>
 
   <!-- Ranking tabela -->
-  <div class="search-card">
+  <div class="search-card mb-4">
     <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin-bottom:12px;">🏆 Ranking (szybkość × jakość × dostępność)</h5>
     <div class="table-responsive">
       <table class="table table-sm mb-0" id="fleetRankTable">
@@ -1696,6 +1696,75 @@ table { margin: 0; }
           <tr><td colspan="8" class="text-center text-muted py-3">Kliknij "Sprawdź wszystkie" aby zmierzyć modele.</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Zarządzanie dostawcami -->
+  <div class="search-card">
+    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+      <div>
+        <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;">🔑 Dostawcy API</h5>
+        <p class="small text-muted mb-0">Dodaj wiele kluczy OpenRouter i adresów Ollama — rotacja round-robin.</p>
+      </div>
+      <button class="btn btn-outline-secondary btn-sm" onclick="providersLoad()">↺ Odśwież</button>
+    </div>
+
+    <!-- Domyślne (z .env) -->
+    <div id="providersDefaults" class="mb-3 p-2 rounded" style="background:var(--c-bg);border:1px solid var(--c-border);font-size:0.82rem;">
+      Wczytywanie…
+    </div>
+
+    <!-- Zakładki sekcji -->
+    <ul class="nav nav-pills nav-sm gap-1 mb-3" id="providersTabs">
+      <li class="nav-item"><a class="nav-link active py-1 px-2 small" href="#" onclick="providersShowSection('openrouter');return false;">OpenRouter</a></li>
+      <li class="nav-item"><a class="nav-link py-1 px-2 small" href="#" onclick="providersShowSection('ollama');return false;">Ollama / local</a></li>
+      <li class="nav-item"><a class="nav-link py-1 px-2 small" href="#" onclick="providersShowSection('custom');return false;">Custom endpoint</a></li>
+    </ul>
+
+    <!-- Sekcja OpenRouter -->
+    <div id="providersSectionOpenrouter">
+      <table class="table table-sm mb-2" id="providersTableOpenrouter">
+        <thead><tr><th>Nazwa</th><th>Klucz</th><th>Status</th><th style="width:130px;"></th></tr></thead>
+        <tbody id="providersBodyOpenrouter">
+          <tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych kluczy</td></tr>
+        </tbody>
+      </table>
+      <div class="d-flex gap-2 flex-wrap align-items-end">
+        <input type="text" id="providerOrName" class="form-control form-control-sm" style="width:130px;" placeholder="Nazwa (opcja)">
+        <input type="text" id="providerOrKey" class="form-control form-control-sm" style="flex:1;min-width:200px;" placeholder="sk-or-…  klucz API OpenRouter">
+        <button class="btn btn-primary btn-sm" onclick="providerAdd('openrouter_key')">+ Dodaj</button>
+      </div>
+    </div>
+
+    <!-- Sekcja Ollama -->
+    <div id="providersSectionOllama" style="display:none;">
+      <table class="table table-sm mb-2" id="providersTableOllama">
+        <thead><tr><th>Nazwa</th><th>URL</th><th>Status</th><th style="width:130px;"></th></tr></thead>
+        <tbody id="providersBodyOllama">
+          <tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych serwerów</td></tr>
+        </tbody>
+      </table>
+      <div class="d-flex gap-2 flex-wrap align-items-end">
+        <input type="text" id="providerOllamaName" class="form-control form-control-sm" style="width:130px;" placeholder="Nazwa (opcja)">
+        <input type="text" id="providerOllamaUrl" class="form-control form-control-sm" style="flex:1;min-width:200px;" placeholder="http://192.168.1.x:11434">
+        <button class="btn btn-primary btn-sm" onclick="providerAdd('ollama_url')">+ Dodaj</button>
+      </div>
+    </div>
+
+    <!-- Sekcja Custom -->
+    <div id="providersSectionCustom" style="display:none;">
+      <table class="table table-sm mb-2" id="providersTableCustom">
+        <thead><tr><th>Nazwa</th><th>URL</th><th>Status</th><th style="width:130px;"></th></tr></thead>
+        <tbody id="providersBodyCustom">
+          <tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>
+        </tbody>
+      </table>
+      <div class="d-flex gap-2 flex-wrap align-items-end">
+        <input type="text" id="providerCustomName" class="form-control form-control-sm" style="width:120px;" placeholder="Nazwa">
+        <input type="text" id="providerCustomUrl" class="form-control form-control-sm" style="flex:1;min-width:180px;" placeholder="https://…/v1">
+        <input type="text" id="providerCustomKey" class="form-control form-control-sm" style="width:160px;" placeholder="Klucz API (opcja)">
+        <button class="btn btn-primary btn-sm" onclick="providerAdd('custom_endpoint')">+ Dodaj</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1815,7 +1884,7 @@ function showTab(name) {
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
-    if (name === 'fleet') fleetLoad();
+    if (name === 'fleet') { fleetLoad(); providersLoad(); }
     if (name === 'reports') {
         setTimeout(() => {
             try { loadReports(); } catch(e) { console.warn('Reports tab error:', e); }
@@ -6567,6 +6636,150 @@ function fleetPingAll() {
 function fleetUseInSwarm(modelId) {
     showTab('swarm');
     alert(`Model ${modelId} zostanie użyty przy następnym uruchomieniu roju w trybie "Szybkość".`);
+}
+
+// ===== PROVIDER POOL =====
+let _providersCurrentSection = 'openrouter';
+
+function providersShowSection(section) {
+    _providersCurrentSection = section;
+    ['openrouter','ollama','custom'].forEach(s => {
+        const el = document.getElementById('providersSectionO' + (s === 'openrouter' ? 'penrouter' : s.charAt(0).toUpperCase() + s.slice(1)));
+        if (el) el.style.display = s === section ? '' : 'none';
+    });
+    document.querySelectorAll('#providersTabs .nav-link').forEach((a,i) => {
+        a.classList.toggle('active', ['openrouter','ollama','custom'][i] === section);
+    });
+}
+
+function providersLoad() {
+    fetch('/api/providers').then(r => r.json()).then(data => {
+        if (!data.success) return;
+        const pool = data.pool;
+        const def = pool.defaults || {};
+
+        // Podsumowanie domyślnych
+        const defDiv = document.getElementById('providersDefaults');
+        if (defDiv) {
+            const orStatus = def.openrouter_key_set
+                ? `<span class="text-success">✓ klucz w .env</span>`
+                : `<span class="text-muted">brak klucza .env</span>`;
+            const olStatus = def.ollama_url
+                ? `<span class="text-success">✓ ${escapeHtml(def.ollama_url)}</span>`
+                : `<span class="text-muted">brak</span>`;
+            defDiv.innerHTML = `<b>Domyślne (.env):</b> OpenRouter: ${orStatus} &nbsp;|&nbsp; Ollama: ${olStatus}
+                &nbsp;|&nbsp; Aktywne klucze puli: <b>${def.active_keys}</b> &nbsp;|&nbsp; Aktywne Ollama: <b>${def.active_ollamas}</b>`;
+        }
+
+        // Tabela OpenRouter
+        const orBody = document.getElementById('providersBodyOpenrouter');
+        if (orBody) {
+            const rows = (pool.openrouter_keys || []);
+            orBody.innerHTML = rows.length ? rows.map(e => _providerRow(e, 'openrouter')).join('') :
+                '<tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych kluczy</td></tr>';
+        }
+
+        // Tabela Ollama
+        const olBody = document.getElementById('providersBodyOllama');
+        if (olBody) {
+            const rows = (pool.ollama_urls || []);
+            olBody.innerHTML = rows.length ? rows.map(e => _providerRow(e, 'ollama')).join('') :
+                '<tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych serwerów</td></tr>';
+        }
+
+        // Tabela Custom
+        const cuBody = document.getElementById('providersBodyCustom');
+        if (cuBody) {
+            const rows = (pool.custom_endpoints || []);
+            cuBody.innerHTML = rows.length ? rows.map(e => _providerRow(e, 'custom')).join('') :
+                '<tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>';
+        }
+    }).catch(err => console.error('providersLoad error', err));
+}
+
+function _providerRow(e, type) {
+    const active = e.active !== false;
+    const dotColor = active ? '#22c55e' : '#94a3b8';
+    const displayVal = e.key_masked || e.url || '—';
+    return `<tr id="provRow_${escapeHtml(e.id)}">
+        <td class="small">${escapeHtml(e.name || e.id)}</td>
+        <td class="small text-muted" style="font-family:monospace;">${escapeHtml(displayVal)}</td>
+        <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};"></span>
+            <span id="provRowStatus_${escapeHtml(e.id)}" class="small ms-1">${active ? 'aktywny' : 'wyłączony'}</span></td>
+        <td class="text-end" style="white-space:nowrap;">
+            <button class="btn btn-outline-secondary btn-sm py-0 px-1 me-1" style="font-size:0.75rem;"
+                onclick="providerTest('${escapeHtml(e.id)}', this)">Test</button>
+            <button class="btn ${active ? 'btn-warning' : 'btn-success'} btn-sm py-0 px-1 me-1" style="font-size:0.75rem;"
+                onclick="providerToggle('${escapeHtml(e.id)}', this)">${active ? 'Wyłącz' : 'Włącz'}</button>
+            <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:0.75rem;"
+                onclick="providerDelete('${escapeHtml(e.id)}')">✕</button>
+        </td>
+    </tr>`;
+}
+
+function providerAdd(ptype) {
+    let body = { type: ptype };
+    if (ptype === 'openrouter_key') {
+        const key = document.getElementById('providerOrKey').value.trim();
+        const name = document.getElementById('providerOrName').value.trim();
+        if (!key) { alert('Podaj klucz API'); return; }
+        body.key = key; body.name = name;
+    } else if (ptype === 'ollama_url') {
+        const url = document.getElementById('providerOllamaUrl').value.trim();
+        const name = document.getElementById('providerOllamaName').value.trim();
+        if (!url) { alert('Podaj adres URL'); return; }
+        body.url = url; body.name = name;
+    } else if (ptype === 'custom_endpoint') {
+        const url = document.getElementById('providerCustomUrl').value.trim();
+        const name = document.getElementById('providerCustomName').value.trim();
+        const key = document.getElementById('providerCustomKey').value.trim();
+        if (!url) { alert('Podaj adres URL'); return; }
+        body.url = url; body.name = name; body.key = key;
+    }
+    fetch('/api/providers', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+        .then(r => r.json()).then(data => {
+            if (data.success) {
+                // wyczyść pola
+                ['providerOrKey','providerOrName','providerOllamaUrl','providerOllamaName',
+                 'providerCustomUrl','providerCustomName','providerCustomKey'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = '';
+                });
+                providersLoad();
+            } else {
+                alert('Błąd: ' + (data.error || 'nieznany'));
+            }
+        });
+}
+
+function providerDelete(id) {
+    if (!confirm('Usunąć tego dostawcę?')) return;
+    fetch(`/api/providers/${encodeURIComponent(id)}`, {method:'DELETE'})
+        .then(r => r.json()).then(data => {
+            if (data.success) providersLoad();
+            else alert('Błąd: ' + (data.error || 'nieznany'));
+        });
+}
+
+function providerToggle(id, btn) {
+    fetch(`/api/providers/${encodeURIComponent(id)}/toggle`, {method:'POST'})
+        .then(r => r.json()).then(data => {
+            if (data.success) providersLoad();
+            else alert('Błąd: ' + (data.error || 'nieznany'));
+        });
+}
+
+function providerTest(id, btn) {
+    const orig = btn.textContent;
+    btn.textContent = '…'; btn.disabled = true;
+    fetch(`/api/providers/${encodeURIComponent(id)}/test`, {method:'POST'})
+        .then(r => r.json()).then(data => {
+            btn.textContent = orig; btn.disabled = false;
+            const ms = data.ms || 0;
+            const msg = data.success ? `OK — ${ms} ms` : `Błąd: ${data.error || data.status || 'timeout'}`;
+            const statusEl = document.getElementById(`provRowStatus_${id}`);
+            if (statusEl) statusEl.textContent = msg;
+        }).catch(() => { btn.textContent = orig; btn.disabled = false; });
 }
 </script>
 

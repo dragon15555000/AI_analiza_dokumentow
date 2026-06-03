@@ -86,6 +86,7 @@ qdrant_data/
 .sql_config.json
 .llm_config.json
 .active_collection
+.providers.json
 *.pid
 
 # === Claude Code agent worktrees ===
