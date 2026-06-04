@@ -490,6 +490,39 @@ table { margin: 0; }
 .fleet-tier-bar { display: flex; gap: 2px; }
 .fleet-tier-pip { width: 8px; height: 8px; border-radius: 2px; background: var(--c-border); }
 .fleet-tier-pip.filled { background: var(--c-accent); }
+.active-llm-badge {
+    background: rgba(79, 70, 229, 0.22);
+    border: 1px solid rgba(129, 140, 248, 0.45);
+    font-size: 0.72rem;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.active-llm-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4ade80;
+    box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.25);
+    animation: activeLlmPulse 2s ease-in-out infinite;
+}
+@keyframes activeLlmPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.65; transform: scale(0.92); }
+}
+.btn-favorite-model {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: #fbbf24;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 1rem;
+    line-height: 1.2;
+    cursor: pointer;
+}
+.btn-favorite-model.is-favorite { color: #f59e0b; background: rgba(245,158,11,0.15); }
     </style>
 </head>
 <body>
@@ -553,8 +586,17 @@ table { margin: 0; }
         <input id="openaiModelInput" type="text" placeholder="np. llama-3.3-70b-versatile" class="ctrl-input"
                style="display:none; max-width:180px;" onchange="onOpenaiModelInputChange()"
                title="Nazwa modelu OpenAI-compatible (Groq, LM Studio…)">
+        <select id="favoriteModelsQuick" onchange="onFavoriteQuickSelect(this)" style="display:none; max-width:170px;" class="ctrl-input"
+               title="Szybki wybór ulubionego modelu">
+            <option value="">⭐ Ulubione…</option>
+        </select>
+        <button type="button" id="btnFavoriteModel" class="btn-favorite-model" onclick="toggleCurrentModelFavorite()" title="Dodaj model do ulubionych">☆</button>
     </div>
-    <div class="badge-stat" style="font-size:0.7rem; background:rgba(255,255,255,0.05);">Model: <span>768 · Nomic</span></div>
+    <div id="activeLlmBadgeWrap" class="badge-stat active-llm-badge stat-hide-mobile" title="Aktywny model LLM (chat, analiza, sieć)">
+        <span id="activeLlmDot" class="active-llm-dot"></span>
+        <span style="opacity:0.8;">LLM:</span> <strong id="activeLlmBadge">—</strong>
+    </div>
+    <div class="badge-stat stat-hide-mobile" style="font-size:0.65rem;opacity:0.65;" title="Model embeddingów (import i wyszukiwanie wektorowe)">Embed: Nomic · 768d</div>
   </div>
 </div>
 
@@ -1452,6 +1494,11 @@ table { margin: 0; }
           </div>
         </div>
       </div>
+      <div class="mt-2 mb-1" id="cfgFavoritesWrap">
+        <label class="form-label small fw-bold mb-1">Ulubione modele LLM</label>
+        <div id="cfgFavoritesList" class="d-flex flex-wrap gap-2"></div>
+        <div class="form-text" style="font-size:0.75rem;">Dodaj gwiazdką ☆ w pasku górnym. Lista jest zapisywana w tej przeglądarce.</div>
+      </div>
       <div class="mt-3 d-flex gap-2 align-items-center">
         <button class="btn btn-primary btn-sm" onclick="llmConfigSave()">💾 Zapisz i zastosuj</button>
         <span id="cfgSaveStatus" class="small text-muted"></span>
@@ -1550,6 +1597,30 @@ table { margin: 0; }
           </label>
           <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1" style="cursor:pointer;font-size:0.82rem;">
             <input type="checkbox" class="form-check-input ext-check" value="txt"> TXT
+          </label>
+        </div>
+      </div>
+      <div class="mb-3 p-2 rounded border" style="background:#f8fafc;">
+        <label class="form-check-label d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+          <input type="checkbox" class="form-check-input mt-1" id="importForceOcr" onchange="onImportForceOcrChange()">
+          <span>
+            <strong class="small">Wymuś OCR (Tesseract)</strong>
+            <div class="small text-muted" id="importOcrHint">Skany PDF i obrazy — wolniejsze, wymaga Tesseract + poppler</div>
+          </span>
+        </label>
+        <div id="importImageExts" class="d-flex flex-wrap gap-2 mt-2 ps-4" style="display:none;">
+          <span class="small text-muted align-self-center">Obrazy:</span>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1 ext-check-ocr-label" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check ext-check-ocr" value="jpg"> JPG
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1 ext-check-ocr-label" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check ext-check-ocr" value="png"> PNG
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1 ext-check-ocr-label" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check ext-check-ocr" value="tiff"> TIFF
+          </label>
+          <label class="form-check-label d-flex align-items-center gap-1 border rounded px-2 py-1 ext-check-ocr-label" style="cursor:pointer;font-size:0.82rem;">
+            <input type="checkbox" class="form-check-input ext-check ext-check-ocr" value="bmp"> BMP
           </label>
         </div>
       </div>
@@ -2102,6 +2173,7 @@ function updateHealthStatus() {
                         ? 'OCR (Tesseract) — dostępny'
                         : 'OCR niedostępny';
                 }
+                syncImportOcrAvailability(d);
             }
         })
         .catch(() => {
@@ -3649,6 +3721,8 @@ function executeImport() {
 
     const params = new URLSearchParams({folder: folderPath});
     exts.forEach(e => params.append('ext', e));
+    const forceOcr = document.getElementById('importForceOcr')?.checked;
+    if (forceOcr) params.set('force_ocr', '1');
     const url = '/import/stream?' + params.toString();
 
     let sseController = null;
@@ -3658,7 +3732,8 @@ function executeImport() {
         sseController = await streamSSE(url, {
             'start': (d) => {
                 lbl.textContent = `Przetwarzanie 0 / ${d.total} plików`;
-                log.innerHTML += `<div style="color:#63b3ed;">Znaleziono ${d.total} plików do importu...</div>`;
+                const ocrNote = d.force_ocr ? ' · wymuszony OCR' : '';
+                log.innerHTML += `<div style="color:#63b3ed;">Znaleziono ${d.total} plików do importu${ocrNote}...</div>`;
             },
             'file': (d) => {
                 const p = Math.round(d.i / d.total * 100);
@@ -3666,7 +3741,8 @@ function executeImport() {
                 lbl.textContent = `${d.i} / ${d.total}: ${d.file.length > 40 ? d.file.slice(0,37)+'...' : d.file}`;
                 pct.textContent = p + '%';
                 const color = d.new > 0 ? '#68d391' : '#a0aec0';
-                log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${escapeHtml(d.file)} — ${d.new} nowych / ${d.chunks} chunków</div>`;
+                const ocrTag = d.ocr ? ' · OCR' : '';
+                log.innerHTML += `<div style="color:${color};">[${d.i}/${d.total}] ${escapeHtml(d.file)} — ${d.new} nowych / ${d.chunks} chunków${ocrTag}</div>`;
                 log.scrollTop = log.scrollHeight;
             },
             'skip': (d) => {
@@ -4488,7 +4564,12 @@ function renderTimeline(data) {
 // Uruchom inicjalizację filtrów po załadowaniu strony
 document.addEventListener('DOMContentLoaded', () => {
     initNetworkFilterListeners();
-    loadTopbarProviders().then(() => restoreLlmProvider());
+    initImportOcrUi();
+    loadTopbarProviders().then(() => {
+        restoreLlmProvider();
+        refreshFavoriteModelOptions();
+        updateActiveLlmBadge();
+    });
     startHealthAutoRefresh();
 });
 
@@ -4715,6 +4796,7 @@ function syncTopbarProviders(pool) {
 
     const opts = [
         { value: 'openrouter', label: 'OpenRouter' },
+        { value: 'gemini', label: 'Gemini' },
         { value: 'ollama', label: 'Lokalny (Ollama)' },
     ];
 
@@ -4742,6 +4824,7 @@ function syncTopbarProviders(pool) {
     const pick = (v) => v && opts.some(o => o.value === v) ? v : null;
     sel.value = pick(current) || pick(localStorage.getItem('llm_provider')) || 'openrouter';
     syncLlmModelPickerVisibility();
+    refreshFavoriteModelOptions();
 }
 
 function isOpenRouterProvider(prov) {
@@ -4804,6 +4887,7 @@ function syncLlmModelPickerVisibility() {
         }
     }
     if (sep) sep.style.display = isOr || isOllamaLike || isOpenAiCustom ? '' : 'none';
+    refreshFavoriteQuickSelect();
 }
 
 function getCurrentLlmProvider() {
@@ -4852,6 +4936,8 @@ function onOpenaiModelSelectChange() {
         input.value = '';
         localStorage.removeItem('openai_model');
     }
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
 }
 
 function onOpenaiModelInputChange() {
@@ -4860,6 +4946,8 @@ function onOpenaiModelInputChange() {
     const v = input.value.trim();
     if (v) localStorage.setItem('openai_model', v);
     else localStorage.removeItem('openai_model');
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
 }
 
 function getLlmRequestPayload() {
@@ -4882,6 +4970,8 @@ function onTopbarLlmModelChange() {
     } else {
         localStorage.removeItem('llm_model');
     }
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
 }
 
 function syncOpenRouterModelSelection(model) {
@@ -4911,6 +5001,8 @@ function syncOpenRouterModelSelection(model) {
         input.value = value;
     }
 
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
     return true;
 }
 
@@ -4957,6 +5049,8 @@ function onLlmProviderChange() {
     if (!sel) return;
     localStorage.setItem('llm_provider', sel.value);
     syncLlmModelPickerVisibility();
+    refreshFavoriteModelOptions();
+    updateActiveLlmBadge();
 
     const badge = sel.parentElement;
     badge.style.transition = 'all 0.2s';
@@ -4968,6 +5062,8 @@ function onOpenRouterModelChange() {
     const input = document.getElementById('openrouterModelInput');
     if (!input) return;
     localStorage.setItem('openrouter_model', input.value.trim());
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
 }
 
 function onOpenRouterModelSelectChange() {
@@ -4987,6 +5083,8 @@ function onOpenRouterModelSelectChange() {
         input.value = '';
         localStorage.removeItem('openrouter_model');
     }
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
 }
 
 function restoreLlmProvider() {
@@ -5053,6 +5151,266 @@ function restoreLlmProvider() {
         }
     }
     syncLlmModelPickerVisibility();
+    refreshFavoriteModelOptions();
+    updateActiveLlmBadge();
+}
+
+const LLM_FAVORITES_KEY = 'llm_favorite_models_v1';
+
+function loadFavoriteModels() {
+    try {
+        const raw = localStorage.getItem(LLM_FAVORITES_KEY);
+        const list = raw ? JSON.parse(raw) : [];
+        return Array.isArray(list) ? list : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function saveFavoriteModels(list) {
+    localStorage.setItem(LLM_FAVORITES_KEY, JSON.stringify(list.slice(0, 12)));
+}
+
+function favoriteModelKey(provider, model) {
+    return `${provider}::${model}`;
+}
+
+function isModelFavorite(provider, model) {
+    if (!provider || !model) return false;
+    const key = favoriteModelKey(provider, model);
+    return loadFavoriteModels().some(f => favoriteModelKey(f.provider, f.model) === key);
+}
+
+function formatModelShortName(model) {
+    if (!model) return '?';
+    const parts = String(model).split('/');
+    return parts[parts.length - 1].replace(/:free$/, ' (free)');
+}
+
+function formatActiveLlmLabel() {
+    const prov = getCurrentLlmProvider();
+    const model = getCurrentLlmModel() || '—';
+    const short = formatModelShortName(model);
+    if (isOpenRouterProvider(prov)) return `OpenRouter · ${short}`;
+    if (isGeminiProvider(prov)) return `Gemini · ${short}`;
+    if (isOpenAiCustomProvider(prov)) {
+        const name = _poolCustomProviders[prov]?.name || 'Custom API';
+        return `${name} · ${short}`;
+    }
+    if (isOllamaLikeProvider(prov)) return `Ollama · ${short}`;
+    return `${prov} · ${short}`;
+}
+
+function updateActiveLlmBadge() {
+    const badge = document.getElementById('activeLlmBadge');
+    const wrap = document.getElementById('activeLlmBadgeWrap');
+    if (badge) badge.textContent = formatActiveLlmLabel();
+    if (wrap) wrap.title = `Aktywny model LLM: ${formatActiveLlmLabel()}`;
+}
+
+function updateFavoriteModelButton() {
+    const btn = document.getElementById('btnFavoriteModel');
+    if (!btn) return;
+    const fav = isModelFavorite(getCurrentLlmProvider(), getCurrentLlmModel());
+    btn.textContent = fav ? '★' : '☆';
+    btn.classList.toggle('is-favorite', fav);
+    btn.title = fav ? 'Usuń z ulubionych' : 'Dodaj model do ulubionych';
+}
+
+function injectFavoriteOptions(selectEl, provider) {
+    if (!selectEl) return;
+    selectEl.querySelectorAll('optgroup[data-favorites]').forEach(g => g.remove());
+    const favs = loadFavoriteModels().filter(f => f.provider === provider);
+    if (!favs.length) return;
+    const grp = document.createElement('optgroup');
+    grp.label = '⭐ Ulubione';
+    grp.dataset.favorites = '1';
+    favs.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.model;
+        opt.textContent = f.label || formatModelShortName(f.model);
+        grp.appendChild(opt);
+    });
+    const customOpt = selectEl.querySelector('option[value="custom"]');
+    if (customOpt) selectEl.insertBefore(grp, customOpt);
+    else selectEl.insertBefore(grp, selectEl.options[1] || null);
+}
+
+function refreshFavoriteQuickSelect() {
+    const sel = document.getElementById('favoriteModelsQuick');
+    if (!sel) return;
+    const prov = getCurrentLlmProvider();
+    const favs = loadFavoriteModels().filter(f => f.provider === prov);
+    const useQuick = favs.length && !isOpenRouterProvider(prov) && !isOpenAiCustomProvider(prov);
+    if (!useQuick) {
+        sel.style.display = 'none';
+        return;
+    }
+    sel.innerHTML = '<option value="">⭐ Ulubione…</option>';
+    favs.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.model;
+        opt.textContent = f.label || formatModelShortName(f.model);
+        sel.appendChild(opt);
+    });
+    sel.style.display = '';
+}
+
+function refreshFavoriteModelOptions() {
+    injectFavoriteOptions(document.getElementById('openrouterModelSelect'), 'openrouter');
+    const prov = getCurrentLlmProvider();
+    if (isOpenAiCustomProvider(prov)) {
+        injectFavoriteOptions(document.getElementById('openaiModelSelect'), prov);
+    }
+    refreshFavoriteQuickSelect();
+    updateFavoriteModelButton();
+    renderFavoriteModelsPanel();
+}
+
+function formatProviderLabel(prov) {
+    if (prov === 'openrouter') return 'OpenRouter';
+    if (prov === 'gemini') return 'Gemini';
+    if (prov === 'ollama') return 'Ollama';
+    return _poolCustomProviders[prov]?.name || prov;
+}
+
+function renderFavoriteModelsPanel() {
+    const el = document.getElementById('cfgFavoritesList');
+    if (!el) return;
+    const favs = loadFavoriteModels();
+    if (!favs.length) {
+        el.innerHTML = '<span class="text-muted small">Brak ulubionych — użyj ☆ obok selektora modelu w pasku górnym.</span>';
+        return;
+    }
+    el.innerHTML = favs.map(f => {
+        const prov = jsAttrEscape(f.provider);
+        const model = jsAttrEscape(f.model);
+        const label = escapeHtml(formatProviderLabel(f.provider)) + ' · ' + escapeHtml(f.label || formatModelShortName(f.model));
+        return `<span class="badge bg-light text-dark border d-inline-flex align-items-center gap-1" style="font-weight:500;cursor:pointer;padding:6px 10px;"
+            onclick="applyFavoriteFromPanel('${prov}','${model}')" title="Zastosuj ten model">
+            ${label}
+            <button type="button" style="border:none;background:none;color:#94a3b8;line-height:1;padding:0 2px;"
+                onclick="event.stopPropagation();removeFavoriteModel('${prov}','${model}')">✕</button>
+        </span>`;
+    }).join('');
+}
+
+function applyFavoriteFromPanel(provider, model) {
+    const sel = document.getElementById('llmProviderSelect');
+    if (!sel || !Array.from(sel.options).some(o => o.value === provider)) {
+        alert('Ten provider nie jest dostępny w bieżącej sesji.');
+        return;
+    }
+    sel.value = provider;
+    onLlmProviderChange();
+    if (isOpenRouterProvider(provider)) {
+        syncOpenRouterModelSelection(model);
+        onOpenRouterModelSelectChange();
+    } else if (isOpenAiCustomProvider(provider)) {
+        const osel = document.getElementById('openaiModelSelect');
+        const oinp = document.getElementById('openaiModelInput');
+        let found = false;
+        if (osel) {
+            for (let i = 0; i < osel.options.length; i++) {
+                if (osel.options[i].value === model) {
+                    osel.value = model;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (found && oinp) {
+            oinp.style.display = 'none';
+            oinp.value = model;
+            localStorage.setItem('openai_model', model);
+        } else if (osel && oinp) {
+            osel.value = 'custom';
+            oinp.style.display = 'inline-block';
+            oinp.value = model;
+            localStorage.setItem('openai_model', model);
+        }
+        updateActiveLlmBadge();
+        updateFavoriteModelButton();
+    } else {
+        const top = document.getElementById('topbarLlmModel');
+        if (top) {
+            top.value = model;
+            onTopbarLlmModelChange();
+        }
+    }
+}
+
+function removeFavoriteModel(provider, model) {
+    const key = favoriteModelKey(provider, model);
+    const favs = loadFavoriteModels().filter(f => favoriteModelKey(f.provider, f.model) !== key);
+    saveFavoriteModels(favs);
+    refreshFavoriteModelOptions();
+}
+
+function toggleCurrentModelFavorite() {
+    const provider = getCurrentLlmProvider();
+    const model = getCurrentLlmModel();
+    if (!model) {
+        alert('Wybierz najpierw model LLM.');
+        return;
+    }
+    let favs = loadFavoriteModels();
+    const key = favoriteModelKey(provider, model);
+    if (favs.some(f => favoriteModelKey(f.provider, f.model) === key)) {
+        favs = favs.filter(f => favoriteModelKey(f.provider, f.model) !== key);
+    } else {
+        favs.unshift({ provider, model, label: formatModelShortName(model) });
+    }
+    saveFavoriteModels(favs);
+    refreshFavoriteModelOptions();
+    updateActiveLlmBadge();
+}
+
+function onFavoriteQuickSelect(sel) {
+    if (!sel || !sel.value) return;
+    const top = document.getElementById('topbarLlmModel');
+    if (top) {
+        top.value = sel.value;
+        onTopbarLlmModelChange();
+    }
+    sel.value = '';
+    updateActiveLlmBadge();
+}
+
+function initImportOcrUi() {
+    const cb = document.getElementById('importForceOcr');
+    if (!cb) return;
+    cb.checked = localStorage.getItem('import_force_ocr') === '1';
+    onImportForceOcrChange(false);
+}
+
+function syncImportOcrAvailability(healthData) {
+    const cb = document.getElementById('importForceOcr');
+    const hint = document.getElementById('importOcrHint');
+    if (!cb) return;
+    const ok = !!(healthData?.ocr_available ?? healthData?.ocr?.available);
+    cb.disabled = !ok;
+    if (hint) {
+        hint.textContent = ok
+            ? 'Skany PDF (wymuszone OCR zamiast tekstu cyfrowego) oraz pliki JPG/PNG/TIFF/BMP'
+            : 'OCR niedostępny — zainstaluj: tesseract-ocr tesseract-ocr-pol poppler-utils';
+    }
+}
+
+function onImportForceOcrChange(persist) {
+    const cb = document.getElementById('importForceOcr');
+    const wrap = document.getElementById('importImageExts');
+    if (!cb || !wrap) return;
+    wrap.style.display = cb.checked ? 'flex' : 'none';
+    document.querySelectorAll('.ext-check-ocr-label').forEach(el => {
+        el.style.opacity = cb.checked ? '1' : '0.55';
+    });
+    if (persist !== false) {
+        localStorage.setItem('import_force_ocr', cb.checked ? '1' : '0');
+    }
+    if (cb.checked) {
+        document.querySelectorAll('.ext-check-ocr').forEach(el => { el.checked = true; });
+    }
 }
 
 function getCurrentOpenRouterModel() {
@@ -6512,6 +6870,7 @@ function llmConfigLoad() {
             document.getElementById('cfgOrModelVerify').value  = d.openrouter_model_verify || '';
             document.getElementById('cfgOrFallback').checked   = !!d.openrouter_fallback;
             llmConfigToggle();
+            renderFavoriteModelsPanel();
         });
 }
 

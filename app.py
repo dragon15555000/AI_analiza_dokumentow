@@ -855,6 +855,101 @@ APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
 # który nadpisuje X-Forwarded-For — NIGDY nie włączaj gdy app jest dostępna z zewnątrz bez proxy
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
 
+_HEAVY_TASK_HISTORY_LIMIT = 20
+_heavy_task_mutex = threading.Lock()
+_heavy_task_state_lock = threading.Lock()
+_heavy_task_current: dict | None = None
+_heavy_task_history: list[dict] = []
+
+
+def _new_task_id(kind: str) -> str:
+    raw = f"{kind}:{time.time_ns()}:{threading.get_ident()}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _task_snapshot(task: dict | None) -> dict | None:
+    if not task:
+        return None
+    snapshot = dict(task)
+    meta = snapshot.get("meta")
+    if isinstance(meta, dict):
+        snapshot["meta"] = dict(meta)
+    return snapshot
+
+
+def _tasks_snapshot() -> tuple[dict | None, list[dict]]:
+    with _heavy_task_state_lock:
+        current = _task_snapshot(_heavy_task_current)
+        history = [_task_snapshot(item) for item in _heavy_task_history]
+    return current, history
+
+
+def _start_heavy_task(kind: str, label: str, meta: dict | None = None) -> tuple[bool, dict | None]:
+    if not _heavy_task_mutex.acquire(blocking=False):
+        current, _ = _tasks_snapshot()
+        return False, current
+
+    now = time.time()
+    task = {
+        "id": _new_task_id(kind),
+        "kind": kind,
+        "label": label,
+        "status": "running",
+        "started_at": now,
+        "updated_at": now,
+        "finished_at": None,
+        "progress_pct": 0,
+        "done": 0,
+        "total": None,
+        "current_item": None,
+        "meta": meta or {},
+        "error": None,
+    }
+    with _heavy_task_state_lock:
+        global _heavy_task_current
+        _heavy_task_current = task
+    return True, _task_snapshot(task)
+
+
+def _update_heavy_task(task_id: str, **updates) -> None:
+    if not task_id:
+        return
+    safe_updates = {k: v for k, v in updates.items() if k not in {"id", "started_at"}}
+    with _heavy_task_state_lock:
+        if not _heavy_task_current or _heavy_task_current.get("id") != task_id:
+            return
+        _heavy_task_current.update(safe_updates)
+        _heavy_task_current["updated_at"] = time.time()
+
+
+def _finish_heavy_task(task_id: str, status: str = "done", error: str | None = None) -> None:
+    if not task_id:
+        return
+    should_release = False
+    with _heavy_task_state_lock:
+        global _heavy_task_current
+        if not _heavy_task_current or _heavy_task_current.get("id") != task_id:
+            return
+        now = time.time()
+        _heavy_task_current["status"] = status
+        _heavy_task_current["updated_at"] = now
+        _heavy_task_current["finished_at"] = now
+        _heavy_task_current["error"] = error
+        _heavy_task_history.insert(0, _task_snapshot(_heavy_task_current))
+        del _heavy_task_history[_HEAVY_TASK_HISTORY_LIMIT:]
+        _heavy_task_current = None
+        should_release = True
+    if should_release:
+        _heavy_task_mutex.release()
+
+
+def _heavy_task_busy_payload(task: dict | None) -> dict:
+    return {
+        "msg": "Inna ciężka operacja jest już uruchomiona. Poczekaj na zakończenie zadania.",
+        "error": "heavy_task_already_running",
+        "task": task,
+    }
+
 # Wersja aplikacji — automatycznie odczytywana z git tagów w trybie deweloperskim
 # (git describe --tags --dirty). W releasach produkcyjnych wraca do stałej.
 def _get_app_version() -> str:
@@ -1017,7 +1112,8 @@ def _get_latest_github_release() -> dict | None:
     except Exception:
         return None
 ALLOWED_DOC_EXTENSIONS = frozenset(
-    {"docx", "pdf", "xlsx", "xls", "csv", "md", "json", "txt"}
+    {"docx", "pdf", "xlsx", "xls", "csv", "md", "json", "txt",
+     "jpg", "jpeg", "png", "tiff", "tif", "bmp"}
 )
 
 
@@ -4219,7 +4315,49 @@ def extract_file_metadata(f_path: Path) -> dict:
     return meta
 
 
-def extract_text(file_path: Path) -> str:
+def _ocr_pdf_pages(file_path: Path) -> str:
+    """OCR wszystkich stron PDF przez Tesseract."""
+    if not (pytesseract and convert_from_path):
+        return ""
+    logger.info("[OCR] Analiza wizualna pliku: %s...", file_path.name)
+    pages = convert_from_path(file_path, dpi=200)
+    ocr_text = []
+    for page_img in pages:
+        page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
+        ocr_text.append(page_text)
+    text = "\n\n".join(ocr_text)
+    logger.info("[OCR] Zakończono dla: %s (Pobrano znaków: %d)", file_path.name, len(text))
+    return text
+
+
+def _ocr_image_file(file_path: Path) -> str:
+    """OCR pojedynczego pliku graficznego."""
+    if not pytesseract:
+        return ""
+    try:
+        from PIL import Image
+        img = Image.open(file_path)
+        text = pytesseract.image_to_string(img, lang=OCR_LANG)
+        logger.info("[OCR] Przetworzono obraz: %s", file_path.name)
+        return text
+    except ImportError:
+        pass
+    if convert_from_path:
+        try:
+            pages = convert_from_path(file_path, dpi=200)
+            ocr_text = []
+            for page_img in pages:
+                page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
+                ocr_text.append(page_text)
+            text = "\n\n".join(ocr_text)
+            logger.info("[OCR] Przetworzono obraz przez pdf2image: %s", file_path.name)
+            return text
+        except Exception as ocr_err:
+            logger.warning("Błąd OCR obrazu %s: %s", file_path.name, ocr_err)
+    return ""
+
+
+def extract_text(file_path: Path, force_ocr: bool = False) -> str:
     ext = file_path.suffix.lower()
     try:
         if ext in ['.md', '.txt']:
@@ -4232,54 +4370,31 @@ def extract_text(file_path: Path) -> str:
             return "\n".join([p.text for p in docx.Document(file_path).paragraphs])
         
         elif ext == '.pdf':
+            if force_ocr:
+                try:
+                    return _ocr_pdf_pages(file_path)
+                except Exception as ocr_err:
+                    logger.warning("Błąd wymuszonego OCR dla %s: %s", file_path.name, ocr_err)
+                    return ""
+
             text = ""
             # Próba 1: Zwykłe wyciągnięcie tekstu cyfrowego
             if pdfplumber:
                 with pdfplumber.open(file_path) as pdf:
                     text = "\n".join([page.extract_text() or "" for page in pdf.pages])
-            
+
             # Próba 2 (Fallback OCR): Jeżeli plik to skan (brak tekstu), uruchom Tesseract
             if len(text.strip()) < 20 and pytesseract and convert_from_path:
-                logger.info(f"[OCR] Analiza wizualna pliku: {file_path.name}...")
                 try:
-                    pages = convert_from_path(file_path, dpi=200)
-                    ocr_text = []
-                    for page_img in pages:
-                        page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
-                        ocr_text.append(page_text)
-                    text = "\n\n".join(ocr_text)
-                    logger.info(f"[OCR] Zakończono dla: {file_path.name} (Pobrano znaków: {len(text)})")
+                    text = _ocr_pdf_pages(file_path)
                 except Exception as ocr_err:
-                    logger.warning(f"Błąd OCR dla pliku {file_path.name}: {ocr_err}")
-            
+                    logger.warning("Błąd OCR dla pliku %s: %s", file_path.name, ocr_err)
+
             return text
 
         # Obsługa obrazów bezpośrednio (jpg, png, tiff itp.) przez OCR
-        elif ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'] and pytesseract:
-            if convert_from_path:
-                # pdf2image może obsłużyć niektóre obrazy, ale dla pewności używamy PIL jeśli dostępna
-                try:
-                    from PIL import Image
-                    img = Image.open(file_path)
-                    text = pytesseract.image_to_string(img, lang=OCR_LANG)
-                    logger.info(f"[OCR] Przetworzono obraz: {file_path.name}")
-                    return text
-                except ImportError:
-                    pass  # fallback poniżej
-            # Fallback - spróbuj przez pdf2image jeśli PIL nie ma
-            if convert_from_path:
-                try:
-                    pages = convert_from_path(file_path, dpi=200)
-                    ocr_text = []
-                    for page_img in pages:
-                        page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
-                        ocr_text.append(page_text)
-                    text = "\n\n".join(ocr_text)
-                    logger.info(f"[OCR] Przetworzono obraz przez pdf2image: {file_path.name}")
-                    return text
-                except Exception as ocr_err:
-                    logger.warning(f"Błąd OCR obrazu {file_path.name}: {ocr_err}")
-            return ""
+        elif ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp']:
+            return _ocr_image_file(file_path)
 
         elif ext in ['.xlsx', '.xls'] and openpyxl:
             return _extract_excel(file_path)
@@ -4596,124 +4711,183 @@ def api_drives():
         return jsonify({"success": False, "error": str(e)})
 
 
+@app.route('/tasks', methods=['GET'])
+def tasks_status():
+    current, history = _tasks_snapshot()
+    return jsonify({
+        "success": True,
+        "busy": current is not None,
+        "current": current,
+        "history": history,
+    })
+
+
 @app.route('/import/stream')
 def import_stream():
     folder = request.args.get('folder', '').strip()
     if folder:
         folder = _normalize_browse_path(folder)
     exts = request.args.getlist('ext') or ['docx','pdf','xlsx','xls','csv','md','json']
+    force_ocr = request.args.get('force_ocr', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
     def generate():
         def sse(event, data):
             import json as _json
             return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
 
-        folder_path = Path(folder).expanduser()
-        if not folder or not folder_path.exists():
-            yield sse("error", {"msg": f"Ścieżka nie istnieje: {folder}"})
-            return
-        if not folder_path.is_dir() or not _path_is_allowed(folder_path):
-            yield sse("error", {"msg": "Ścieżka niedozwolona lub poza SEARCH_ROOTS"})
-            return
+        task_id = ""
+        try:
+            folder_path = Path(folder).expanduser()
+            if not folder or not folder_path.exists():
+                yield sse("error", {"msg": f"Ścieżka nie istnieje: {folder}"})
+                return
+            if not folder_path.is_dir() or not _path_is_allowed(folder_path):
+                yield sse("error", {"msg": "Ścieżka niedozwolona lub poza SEARCH_ROOTS"})
+                return
 
-        files = _find_files_safe(folder_path.resolve(), exts)
+            files = _find_files_safe(folder_path.resolve(), exts)
+            if not files:
+                yield sse("done", {"count": 0, "chunks": 0, "skipped": 0, "msg": "Brak kompatybilnych plików."})
+                return
 
-        if not files:
-            yield sse("done", {"count": 0, "chunks": 0, "skipped": 0, "msg": "Brak kompatybilnych plików."})
-            return
+            ok, task = _start_heavy_task("document_import", f"Import dokumentów: {folder_path}", {
+                "folder": str(folder_path),
+                "ext": list(exts),
+                "force_ocr": force_ocr,
+            })
+            if not ok:
+                yield sse("error", _heavy_task_busy_payload(task))
+                return
+            task_id = task["id"]
+            _update_heavy_task(task_id, total=len(files))
 
-        yield sse("start", {"total": len(files)})
+            yield sse("start", {"total": len(files), "force_ocr": force_ocr, "task_id": task_id})
 
-        qdrant = get_qdrant_client()
-        imported = 0
-        skipped = 0
-        total_chunks = 0
-        new_chunks = 0
+            qdrant = get_qdrant_client()
+            imported = 0
+            skipped = 0
+            total_chunks = 0
+            new_chunks = 0
+            ocr_count = 0
 
-        for i, f_path in enumerate(files):
-            try:
-                text = extract_text(f_path)
-                if not text or len(text.strip()) < 10:
-                    skipped += 1
-                    yield sse("skip", {"file": f_path.name, "reason": "pusty", "i": i+1, "total": len(files)})
-                    continue
-
-                chunks = make_chunks(text)
-                file_new = 0
-
-                # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
-                file_meta = extract_file_metadata(f_path)
-
-                # Deduplikacja — sprawdź które chunki już są w bazie
-                chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
-                existing_ids = set()
-                for batch_start in range(0, len(chunk_ids), 100):
-                    batch = chunk_ids[batch_start:batch_start+100]
-                    found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
-                                           with_payload=False, with_vectors=False)
-                    existing_ids.update(p.id for p in found)
-
-                new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
-                                   if cid not in existing_ids]
-                total_chunks += len(chunks)
-
-                # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
-                BATCH = 6
-                embed_failed = False
-                for b in range(0, len(new_chunks_data), BATCH):
-                    batch_items = new_chunks_data[b:b+BATCH]
-                    batch_texts  = [item[1] for item in batch_items]
-                    batch_ids    = [item[0] for item in batch_items]
-                    try:
-                        vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
-                    except EmbeddingError as e:
+            for i, f_path in enumerate(files):
+                _update_heavy_task(
+                    task_id,
+                    done=i,
+                    total=len(files),
+                    progress_pct=round(i / len(files) * 100) if files else 0,
+                    current_item=str(f_path),
+                )
+                try:
+                    ext_l = f_path.suffix.lower()
+                    used_ocr = (force_ocr and ext_l == '.pdf') or ext_l in {
+                        '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'
+                    }
+                    text = extract_text(f_path, force_ocr=force_ocr)
+                    if used_ocr and text and len(text.strip()) >= 10:
+                        ocr_count += 1
+                    if not text or len(text.strip()) < 10:
                         skipped += 1
-                        embed_failed = True
-                        yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
-                        break
+                        yield sse("skip", {"file": f_path.name, "reason": "pusty", "i": i+1, "total": len(files)})
+                        continue
 
-                    points  = [
-                        PointStruct(
-                            id=cid,
-                            vector=vec,
-                            payload={
-                                "file": f_path.name,
-                                "text": txt,
-                                "full_path": str(f_path),
-                                "metadata": file_meta
-                            }
-                        )
-                        for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
-                        if vec and any(v != 0.0 for v in vec)
-                    ]
-                    if points:
-                        qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
-                    new_chunks += len(points)
-                    file_new  += len(points)
+                    chunks = make_chunks(text)
+                    file_new = 0
 
-                if embed_failed:
-                    continue
+                    # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
+                    file_meta = extract_file_metadata(f_path)
 
-                imported += 1
-                yield sse("file", {
-                    "file": f_path.name,
-                    "chunks": len(chunks),
-                    "new": file_new,
-                    "i": i+1,
-                    "total": len(files)
-                })
-                time.sleep(0.02)
-            except Exception as e:
-                skipped += 1
-                yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                    # Deduplikacja — sprawdź które chunki już są w bazie
+                    chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
+                    existing_ids = set()
+                    for batch_start in range(0, len(chunk_ids), 100):
+                        batch = chunk_ids[batch_start:batch_start+100]
+                        found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
+                                               with_payload=False, with_vectors=False)
+                        existing_ids.update(p.id for p in found)
 
-        yield sse("done", {
-            "count": imported,
-            "chunks": total_chunks,
-            "new_chunks": new_chunks,
-            "skipped": skipped,
-            "msg": f"Przetworzono {imported} plików · {new_chunks} nowych chunków · {total_chunks - new_chunks} duplikatów pominiętych"
-        })
+                    new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
+                                       if cid not in existing_ids]
+                    total_chunks += len(chunks)
+
+                    # Batch embeddings — 6 równolegle (zgodne z get_embeddings_batch default, żeby nie obciążać Ollamy)
+                    BATCH = 6
+                    embed_failed = False
+                    for b in range(0, len(new_chunks_data), BATCH):
+                        batch_items = new_chunks_data[b:b+BATCH]
+                        batch_texts  = [item[1] for item in batch_items]
+                        batch_ids    = [item[0] for item in batch_items]
+                        try:
+                            vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                        except EmbeddingError as e:
+                            skipped += 1
+                            embed_failed = True
+                            yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+                            break
+
+                        points  = [
+                            PointStruct(
+                                id=cid,
+                                vector=vec,
+                                payload={
+                                    "file": f_path.name,
+                                    "text": txt,
+                                    "full_path": str(f_path),
+                                    "metadata": file_meta
+                                }
+                            )
+                            for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
+                            if vec and any(v != 0.0 for v in vec)
+                        ]
+                        if points:
+                            qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                        new_chunks += len(points)
+                        file_new  += len(points)
+
+                    if embed_failed:
+                        continue
+
+                    imported += 1
+                    _update_heavy_task(
+                        task_id,
+                        done=i + 1,
+                        total=len(files),
+                        progress_pct=round((i + 1) / len(files) * 100) if files else 100,
+                        current_item=str(f_path),
+                    )
+                    yield sse("file", {
+                        "file": f_path.name,
+                        "chunks": len(chunks),
+                        "new": file_new,
+                        "i": i+1,
+                        "total": len(files),
+                        "ocr": used_ocr,
+                    })
+                    time.sleep(0.02)
+                except Exception as e:
+                    skipped += 1
+                    yield sse("skip", {"file": f_path.name, "reason": str(e)[:80], "i": i+1, "total": len(files)})
+
+            ocr_note = f" · OCR: {ocr_count} plików" if ocr_count else ""
+            _update_heavy_task(task_id, done=len(files), total=len(files), progress_pct=100, current_item=None)
+            yield sse("done", {
+                "count": imported,
+                "chunks": total_chunks,
+                "new_chunks": new_chunks,
+                "skipped": skipped,
+                "ocr_count": ocr_count,
+                "task_id": task_id,
+                "msg": f"Przetworzono {imported} plików · {new_chunks} nowych chunków · {total_chunks - new_chunks} duplikatów pominiętych{ocr_note}"
+            })
+        except Exception as e:
+            logger.exception("import_stream error")
+            yield sse("error", {"msg": str(e), "task_id": task_id or None})
+            if task_id:
+                _finish_heavy_task(task_id, status="error", error=str(e)[:500])
+                task_id = ""
+        finally:
+            if task_id:
+                _finish_heavy_task(task_id)
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -7997,7 +8171,19 @@ def sql_vectorize():
         def sse(event, payload):
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        task_id = ""
+        conn = None
         try:
+            ok, task = _start_heavy_task("sql_vectorize", f"Wektoryzacja SQL: {table}", {
+                "table": table,
+                "columns": list(cols),
+                "label_col": label_col,
+            })
+            if not ok:
+                yield sse("error", _heavy_task_busy_payload(task))
+                return
+            task_id = task["id"]
+
             _require_sql_backend(cfg)
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
@@ -8013,7 +8199,12 @@ def sql_vectorize():
                 return
 
             total = _sql_table_count(conn, table, dialect)
-            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols})
+            _update_heavy_task(task_id, total=total, meta={
+                "table": table,
+                "columns": active_cols,
+                "label_col": label_col,
+            })
+            yield sse("start", {"start": True, "total": total, "table": table, "columns": active_cols, "task_id": task_id})
 
             qdrant = get_qdrant_client()
             done = 0
@@ -8041,6 +8232,7 @@ def sql_vectorize():
                 done += len(rows_buf)
                 rows_buf = []
                 pct = round(done / total * 100) if total else 0
+                _update_heavy_task(task_id, done=done, total=total, progress_pct=pct, current_item=table)
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
             if rows_buf:
@@ -8059,14 +8251,29 @@ def sql_vectorize():
                     qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
                 done += len(rows_buf)
                 pct = round(done / total * 100) if total else 0
+                _update_heavy_task(task_id, done=done, total=total, progress_pct=pct, current_item=table)
                 yield sse("progress", {"progress": True, "done": done, "total": total, "pct": pct})
 
-            conn.close()
+            if conn:
+                conn.close()
+                conn = None
             _docs_cache["data"] = None
-            yield sse("done", {"done": True, "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
+            _update_heavy_task(task_id, done=done, total=total, progress_pct=100, current_item=None)
+            yield sse("done", {"done": True, "task_id": task_id, "msg": f"Zwektoryzowano {done} wierszy z tabeli [{table}]"})
         except Exception as e:
             logger.exception("sql_vectorize error")
-            yield sse("error", {"error": str(e)})
+            yield sse("error", {"error": str(e), "task_id": task_id or None})
+            if task_id:
+                _finish_heavy_task(task_id, status="error", error=str(e)[:500])
+                task_id = ""
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.debug("Nie zamknięto połączenia SQL po błędzie", exc_info=True)
+            if task_id:
+                _finish_heavy_task(task_id)
 
     return Response(
         stream_with_context(generate()),
@@ -8085,7 +8292,15 @@ def sql_vectorize_all():
         def sse(event, payload):
             return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        task_id = ""
+        conn = None
         try:
+            ok, task = _start_heavy_task("sql_vectorize_all", "Wektoryzacja wszystkich tabel SQL", {})
+            if not ok:
+                yield sse("error", _heavy_task_busy_payload(task))
+                return
+            task_id = task["id"]
+
             _require_sql_backend(cfg)
             dialect = _sql_dialect(cfg)
             _ensure_collection_exists()
@@ -8093,7 +8308,8 @@ def sql_vectorize_all():
             data_cur = conn.cursor(as_dict=True) if dialect == "mssql" else conn.cursor()
 
             tables = [t["name"] for t in _sql_list_tables(conn, dialect)]
-            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables})
+            _update_heavy_task(task_id, total=len(tables), meta={"tables": tables})
+            yield sse("start", {"start": True, "total_tables": len(tables), "tables": tables, "task_id": task_id})
 
             qdrant = get_qdrant_client()
             total_rows = 0
@@ -8106,6 +8322,13 @@ def sql_vectorize_all():
                         "table_idx": table_idx,
                         "total_tables": len(tables),
                     })
+                    _update_heavy_task(
+                        task_id,
+                        done=table_idx,
+                        total=len(tables),
+                        progress_pct=round(table_idx / len(tables) * 100) if tables else 0,
+                        current_item=table,
+                    )
 
                     active_cols = _sql_text_columns(conn, table, dialect)
                     if not active_cols:
@@ -8144,6 +8367,13 @@ def sql_vectorize_all():
                         total_rows += len(rows_buf)
                         rows_buf = []
                         pct = round(table_done / table_total * 100) if table_total else 0
+                        _update_heavy_task(
+                            task_id,
+                            done=table_idx,
+                            total=len(tables),
+                            progress_pct=round((table_idx + (pct / 100)) / len(tables) * 100) if tables else 100,
+                            current_item=f"{table} ({pct}%)",
+                        )
                         yield sse("progress", {
                             "progress": True,
                             "table": table,
@@ -8175,20 +8405,42 @@ def sql_vectorize_all():
                         "rows": table_done,
                         "table_idx": table_idx,
                     })
+                    _update_heavy_task(
+                        task_id,
+                        done=table_idx + 1,
+                        total=len(tables),
+                        progress_pct=round((table_idx + 1) / len(tables) * 100) if tables else 100,
+                        current_item=None,
+                    )
                 except Exception as e:
                     yield sse("table_error", {"table_error": True, "table": table, "error": str(e)})
 
-            conn.close()
+            if conn:
+                conn.close()
+                conn = None
             _docs_cache["data"] = None
+            _update_heavy_task(task_id, done=len(tables), total=len(tables), progress_pct=100, current_item=None)
             yield sse("done", {
                 "done": True,
+                "task_id": task_id,
                 "total_rows": total_rows,
                 "total_tables": len(tables),
                 "msg": f"Zwektoryzowano {total_rows} wierszy z {len(tables)} tabel",
             })
         except Exception as e:
             logger.exception("sql_vectorize_all error")
-            yield sse("error", {"error": str(e)})
+            yield sse("error", {"error": str(e), "task_id": task_id or None})
+            if task_id:
+                _finish_heavy_task(task_id, status="error", error=str(e)[:500])
+                task_id = ""
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.debug("Nie zamknięto połączenia SQL po błędzie", exc_info=True)
+            if task_id:
+                _finish_heavy_task(task_id)
 
     return Response(
         stream_with_context(generate()),
