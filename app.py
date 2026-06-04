@@ -49,6 +49,8 @@ from llm_client import (
     _test_claude_api,
     _test_openrouter_api_key,
     _effective_custom_endpoint_model,
+    _llm_response_text,
+    _llm_usage_from_result,
 )
 from task_queue import submit_task, get_task, update_task, cancel_task, get_task_status
 
