@@ -452,16 +452,18 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
 
 
 def _call_claude(prompt: str, system: str, stream: bool, model: str,
-                 max_tokens: int = 4096, temperature: float = 0.2):
+                 max_tokens: int = 4096, temperature: float = 0.2,
+                 api_key: str | None = None, base_url: str | None = None):
     """Wywołanie API Anthropic (Claude) — system prompt jako osobne pole."""
-    if not ANTHROPIC_API_KEY:
+    effective_key = (api_key or ANTHROPIC_API_KEY or "").strip()
+    if not effective_key:
         raise RuntimeError("Brak ANTHROPIC_API_KEY — ustaw w .env lub przekaż przez _sync_llm_client_config")
     if stream:
         raise RuntimeError("Claude streaming nie jest jeszcze obsługiwane")
 
     effective_model = (model or CLAUDE_MODEL or "").strip()
     headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
+        "x-api-key": effective_key,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
@@ -474,8 +476,9 @@ def _call_claude(prompt: str, system: str, stream: bool, model: str,
     if system:
         payload["system"] = system
 
+    messages_url = _anthropic_messages_url(base_url or CLAUDE_API_BASE)
     logger.info("Wysyłam zapytanie do Claude (model: %s)", effective_model)
-    r = requests.post(f"{CLAUDE_API_BASE}/messages", headers=headers, json=payload, timeout=300)
+    r = requests.post(messages_url, headers=headers, json=payload, timeout=300)
     if r.status_code != 200:
         detail = _redact_api_keys(r.text or "")[:500]
         logger.error("Błąd Claude API (%s): %s", r.status_code, detail)
@@ -995,6 +998,19 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
                 "error": message,
             }
 
+        if _custom_endpoint_is_anthropic(url, name):
+            api_key = (key or "").strip()
+            t0 = time.time()
+            ok, message, ms = _test_claude_api(api_key)
+            if ok:
+                return {"ok": True, "url": url, "ms": ms, "error": None}
+            return {
+                "ok": False,
+                "url": url,
+                "ms": ms or int((time.time() - t0) * 1000),
+                "error": message,
+            }
+
         if _custom_endpoint_is_openai(url):
             t0 = time.time()
             headers = {"Content-Type": "application/json"}
@@ -1048,9 +1064,74 @@ def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
     n = (name or "").lower().strip()
     if "generativelanguage.googleapis.com" in u:
         return True
-    if n in ("g1.5f", "gemini") or n.startswith("gemini-"):
+    if n in ("g1.5f", "gemini", "gem1.5") or n.startswith("gemini-"):
         return True
     return False
+
+
+def _custom_endpoint_is_anthropic(url: str, name: str = "") -> bool:
+    """Czy URL/nazwa wskazuje na natywne API Anthropic Claude."""
+    u = (url or "").lower()
+    n = (name or "").lower().strip()
+    if "anthropic.com" in u:
+        return True
+    if n in ("claude", "clude", "anthropic") or n.startswith("claud"):
+        return True
+    return False
+
+
+def _anthropic_messages_url(base_url: str) -> str:
+    """Normalizuje URL custom endpointu do POST /v1/messages."""
+    raw = (base_url or CLAUDE_API_BASE or "").strip().rstrip("/")
+    if not raw:
+        return f"{CLAUDE_API_BASE}/messages"
+    if raw.endswith("/messages"):
+        return raw
+    if raw.endswith("/v1"):
+        return raw + "/messages"
+    if "anthropic.com" in raw.lower():
+        return f"{CLAUDE_API_BASE}/messages"
+    return raw + "/messages" if not raw.endswith("/messages") else raw
+
+
+def _test_claude_api(api_key: str, model: str | None = None) -> tuple[bool, str, int]:
+    """Test Anthropic Claude API — krótki POST /v1/messages."""
+    if not api_key:
+        return False, "Brak klucza API", 0
+    effective_model = (model or CLAUDE_MODEL or "claude-sonnet-4-6").strip()
+    t0 = time.time()
+    try:
+        headers = {
+            "x-api-key": api_key.strip(),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": effective_model,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Say OK"}],
+        }
+        r = requests.post(
+            f"{CLAUDE_API_BASE}/messages",
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        ms = int((time.time() - t0) * 1000)
+        if r.status_code == 200:
+            return True, "OK", ms
+        detail = (r.text or "")[:200]
+        try:
+            err_body = r.json()
+            err_obj = err_body.get("error") if isinstance(err_body, dict) else None
+            if isinstance(err_obj, dict) and err_obj.get("message"):
+                detail = str(err_obj["message"])[:200]
+        except Exception:
+            pass
+        return False, f"HTTP {r.status_code}: {detail}", ms
+    except Exception as exc:
+        ms = int((time.time() - t0) * 1000)
+        return False, str(exc)[:200], ms
 
 
 
@@ -1198,7 +1279,7 @@ def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str,
 
 def _custom_endpoint_is_openai(url: str) -> bool:
     """Czy URL wskazuje na OpenAI-compatible API (Groq, LM Studio, itp.)."""
-    if _custom_endpoint_is_gemini(url):
+    if _custom_endpoint_is_gemini(url) or _custom_endpoint_is_anthropic(url):
         return False
     u = (url or "").lower().rstrip("/")
     return "openai/v1" in u or u.endswith("/v1")
@@ -1287,11 +1368,17 @@ def _call_openai_compatible(url: str, key: str, prompt: str, system: str, stream
 
 
 def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: bool,
-                          model: str = "", max_tokens: int = 2000, temperature: float = 0.2):
-    """Custom endpoint: Gemini, OpenAI-compatible albo Ollama."""
-    if _custom_endpoint_is_gemini(url):
+                          model: str = "", max_tokens: int = 2000, temperature: float = 0.2,
+                          name: str = ""):
+    """Custom endpoint: Gemini, Anthropic Claude, OpenAI-compatible albo Ollama."""
+    if _custom_endpoint_is_gemini(url, name):
         return _call_gemini_custom_endpoint(
             url, key, prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature
+        )
+    if _custom_endpoint_is_anthropic(url, name):
+        return _call_claude(
+            prompt, system, stream, model or CLAUDE_MODEL, max_tokens, temperature,
+            api_key=key, base_url=url,
         )
     if _custom_endpoint_is_openai(url):
         return _call_openai_compatible(
@@ -1377,6 +1464,20 @@ def _llm_response_text(result) -> str:
 
 
 
+def _effective_custom_endpoint_model(ep_url: str, ep_name: str, model: str | None) -> str:
+    """Model dopasowany do typu custom endpointu — ignoruje np. Qwen wysłany przy Claude."""
+    raw = (model or "").strip()
+    if _custom_endpoint_is_anthropic(ep_url, ep_name):
+        if raw.startswith("claude"):
+            return raw
+        return (CLAUDE_MODEL or "claude-sonnet-4-6").strip()
+    if _custom_endpoint_is_gemini(ep_url, ep_name):
+        return _normalize_gemini_model(raw or GEMINI_MODEL)
+    if _custom_endpoint_is_openai(ep_url):
+        return raw or LLM_MODEL or "llama-3.3-70b-versatile"
+    return raw or LLM_MODEL or ""
+
+
 def call_llm(prompt: str, system: str = "", stream: bool = False,
              provider: str | None = None, model: str | None = None,
              max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
@@ -1394,11 +1495,15 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
                 break
 
     if custom_endpoint:
+        ep_url = custom_endpoint.get("url", "")
+        ep_name = custom_endpoint.get("name", "")
+        eff_model = _effective_custom_endpoint_model(ep_url, ep_name, model)
         return _call_custom_endpoint(
-            custom_endpoint.get("url", ""),
+            ep_url,
             custom_endpoint.get("key", ""),
-            prompt, system, stream, model or LLM_MODEL,
+            prompt, system, stream, eff_model,
             max_tokens, temperature,
+            name=ep_name,
         )
 
     prov = get_llm_provider(provider)
@@ -1496,21 +1601,36 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
     if custom_endpoint:
         url_base = custom_endpoint.get("url", "")
-        if _custom_endpoint_is_gemini(url_base, custom_endpoint.get("name", "")):
+        ep_name = custom_endpoint.get("name", "")
+        eff_model = _effective_custom_endpoint_model(url_base, ep_name, model)
+        if _custom_endpoint_is_gemini(url_base, ep_name):
             yield from _stream_gemini_custom_endpoint(
                 url_base,
                 custom_endpoint.get("key", ""),
                 prompt, system,
-                model or GEMINI_MODEL,
+                eff_model,
                 max_tokens, temperature,
             )
+            return
+        if _custom_endpoint_is_anthropic(url_base, ep_name):
+            try:
+                result = _call_claude(
+                    prompt, system, False, eff_model,
+                    max_tokens, temperature,
+                    api_key=custom_endpoint.get("key", ""), base_url=url_base,
+                )
+                text = _llm_response_text(result)
+                if text:
+                    yield text
+            except Exception as exc:
+                yield f"[Błąd Claude: {_redact_api_keys(str(exc))}]"
             return
         if _custom_endpoint_is_openai(url_base):
             yield from _stream_openai_compatible(
                 url_base,
                 custom_endpoint.get("key", ""),
                 prompt, system,
-                model or LLM_MODEL,
+                eff_model,
                 max_tokens, temperature,
             )
             return
@@ -1520,7 +1640,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
         if key:
             headers["Authorization"] = f"Bearer {key}"
         payload = {
-            "model": model or LLM_MODEL,
+            "model": eff_model,
             "prompt": prompt,
             "system": system,
             "stream": True,

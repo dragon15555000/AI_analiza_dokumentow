@@ -557,7 +557,6 @@ table { margin: 0; }
         <select id="llmProviderSelect" onchange="onLlmProviderChange()">
             <option value="openrouter">OpenRouter</option>
             <option value="gemini">Gemini</option>
-            <option value="claude">Claude</option>
             <option value="ollama">Lokalny (Ollama)</option>
         </select>
         <span id="llmModelSeparator" style="color:rgba(255,255,255,0.2);">│</span>
@@ -587,6 +586,17 @@ table { margin: 0; }
         <input id="openaiModelInput" type="text" placeholder="np. llama-3.3-70b-versatile" class="ctrl-input"
                style="display:none; max-width:180px;" onchange="onOpenaiModelInputChange()"
                title="Nazwa modelu OpenAI-compatible (Groq, LM Studio…)">
+        <select id="claudeModelSelect" onchange="onClaudeModelSelectChange()" style="display:none; max-width:240px;">
+            <option value="">-- wybierz model --</option>
+            <option value="claude-sonnet-4-6">Claude Sonnet 4.6 ★ zalecany</option>
+            <option value="claude-opus-4-6">Claude Opus 4.6 — najmocniejszy</option>
+            <option value="claude-haiku-4-5">Claude Haiku 4.5 — szybki / tani</option>
+            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet (legacy)</option>
+            <option value="custom">Własny model…</option>
+        </select>
+        <input id="claudeModelInput" type="text" placeholder="np. claude-sonnet-4-6" class="ctrl-input"
+               style="display:none; max-width:180px;" onchange="onClaudeModelInputChange()"
+               title="ID modelu Anthropic Claude">
         <select id="favoriteModelsQuick" onchange="onFavoriteQuickSelect(this)" style="display:none; max-width:170px;" class="ctrl-input"
                title="Szybki wybór ulubionego modelu">
             <option value="">⭐ Ulubione…</option>
@@ -1974,7 +1984,7 @@ table { margin: 0; }
       </table>
       <div class="d-flex gap-2 flex-wrap align-items-end">
         <input type="text" id="providerCustomName" class="form-control form-control-sm" style="width:120px;" placeholder="Nazwa">
-        <input type="text" id="providerCustomUrl" class="form-control form-control-sm" style="flex:1;min-width:180px;" placeholder="https://…/v1">
+        <input type="text" id="providerCustomUrl" class="form-control form-control-sm" style="flex:1;min-width:180px;" placeholder="Claude: https://api.anthropic.com/v1 · Groq: …/openai/v1">
         <input type="text" id="providerCustomKey" class="form-control form-control-sm" style="width:160px;" placeholder="Klucz API (opcja)">
         <button class="btn btn-primary btn-sm" onclick="providerAdd('custom_endpoint')">+ Dodaj</button>
       </div>
@@ -4860,7 +4870,6 @@ function syncTopbarProviders(pool) {
     const opts = [
         { value: 'openrouter', label: 'OpenRouter' },
         { value: 'gemini', label: 'Gemini' },
-        { value: 'claude', label: 'Claude' },
         { value: 'ollama', label: 'Lokalny (Ollama)' },
     ];
 
@@ -4885,8 +4894,14 @@ function syncTopbarProviders(pool) {
         `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`
     ).join('');
 
-    const pick = (v) => v && opts.some(o => o.value === v) ? v : null;
+    const pick = (v) => {
+        const n = normalizeLlmProvider(v);
+        return n && opts.some(o => o.value === n) ? n : null;
+    };
     sel.value = pick(current) || pick(localStorage.getItem('llm_provider')) || 'openrouter';
+    if (localStorage.getItem('llm_provider') === 'claude') {
+        localStorage.setItem('llm_provider', 'openrouter');
+    }
     syncLlmModelPickerVisibility();
     refreshFavoriteModelOptions();
 }
@@ -4905,13 +4920,94 @@ function isGeminiProvider(prov) {
     return prov === 'gemini';
 }
 
+function isAnthropicCustomProvider(prov) {
+    const meta = _poolCustomProviders[prov];
+    return !!(meta && meta.api_type === 'anthropic');
+}
+
 function isClaudeProvider(prov) {
-    return prov === 'claude';
+    return prov === 'claude' || isAnthropicCustomProvider(prov);
+}
+
+/** Claude wyłączony z topbara — stary wybór w localStorage → OpenRouter free. */
+function normalizeLlmProvider(prov) {
+    if (prov === 'claude') return 'openrouter';
+    return prov || 'openrouter';
 }
 
 function isOpenAiCustomProvider(prov) {
     const meta = _poolCustomProviders[prov];
     return meta && meta.api_type === 'openai';
+}
+
+const _CLAUDE_DEFAULT_MODEL = 'claude-sonnet-4-6';
+
+function syncClaudeModelSelection(model) {
+    const value = (model || _CLAUDE_DEFAULT_MODEL).trim();
+    if (!value) return false;
+
+    localStorage.setItem('claude_model', value);
+
+    const select = document.getElementById('claudeModelSelect');
+    const input = document.getElementById('claudeModelInput');
+    if (!select || !input) return true;
+
+    let found = false;
+    for (let i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === value) {
+            select.value = value;
+            input.style.display = 'none';
+            input.value = value;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        select.value = 'custom';
+        input.style.display = 'inline-block';
+        input.value = value;
+    }
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
+    return true;
+}
+
+function getCurrentClaudeModel() {
+    const select = document.getElementById('claudeModelSelect');
+    const input = document.getElementById('claudeModelInput');
+    if (select && select.value && select.value !== 'custom') return select.value;
+    if (input && input.value.trim()) return input.value.trim();
+    return localStorage.getItem('claude_model') || _CLAUDE_DEFAULT_MODEL;
+}
+
+function onClaudeModelSelectChange() {
+    const select = document.getElementById('claudeModelSelect');
+    const input = document.getElementById('claudeModelInput');
+    if (!select || !input) return;
+    if (select.value === 'custom') {
+        input.style.display = 'inline-block';
+        input.focus();
+    } else if (select.value) {
+        input.style.display = 'none';
+        input.value = select.value;
+        localStorage.setItem('claude_model', select.value);
+    } else {
+        input.style.display = 'none';
+        input.value = '';
+        localStorage.removeItem('claude_model');
+    }
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
+}
+
+function onClaudeModelInputChange() {
+    const input = document.getElementById('claudeModelInput');
+    if (!input) return;
+    const v = input.value.trim();
+    if (v) localStorage.setItem('claude_model', v);
+    else localStorage.removeItem('claude_model');
+    updateActiveLlmBadge();
+    updateFavoriteModelButton();
 }
 
 function syncLlmModelPickerVisibility() {
@@ -4926,6 +5022,8 @@ function syncLlmModelPickerVisibility() {
     const topModel = document.getElementById('topbarLlmModel');
     const oaiSel = document.getElementById('openaiModelSelect');
     const oaiInp = document.getElementById('openaiModelInput');
+    const claudeSel = document.getElementById('claudeModelSelect');
+    const claudeInp = document.getElementById('claudeModelInput');
     const sep = document.getElementById('llmModelSeparator');
 
     if (orSel) orSel.style.display = isOr ? '' : 'none';
@@ -4937,23 +5035,27 @@ function syncLlmModelPickerVisibility() {
         }
     }
     if (topModel) {
-        const showTop = (!isOr && !isOpenAiCustom && (isOllamaLike || isGemini || isClaude));
+        const showTop = (!isOr && !isOpenAiCustom && !isClaude && (isOllamaLike || isGemini));
         topModel.style.display = showTop ? 'inline-block' : 'none';
         if (showTop && isGemini && !topModel.value.trim()) {
             topModel.value = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
         }
-        if (showTop && isClaude && !topModel.value.trim()) {
-            topModel.value = localStorage.getItem('claude_model') || 'claude-3-5-sonnet-20241022';
-        }
         if (showTop && isGemini) {
             topModel.placeholder = 'gemini-2.0-flash';
             topModel.title = 'Model Gemini';
-        } else if (showTop && isClaude) {
-            topModel.placeholder = 'claude-3-5-sonnet-20241022';
-            topModel.title = 'Model Claude (Anthropic)';
         } else if (showTop && isOllamaLike) {
             topModel.placeholder = 'model (np. llama3)';
             topModel.title = 'Nazwa modelu Ollama lub custom endpoint';
+        }
+    }
+    if (claudeSel) claudeSel.style.display = isClaude ? '' : 'none';
+    if (claudeInp) {
+        if (!isClaude) {
+            claudeInp.style.display = 'none';
+        } else if (claudeSel && claudeSel.value === 'custom') {
+            claudeInp.style.display = 'inline-block';
+        } else if (isClaude && claudeSel && !claudeSel.value) {
+            syncClaudeModelSelection(localStorage.getItem('claude_model') || _CLAUDE_DEFAULT_MODEL);
         }
     }
     if (oaiSel) oaiSel.style.display = isOpenAiCustom ? '' : 'none';
@@ -4970,8 +5072,8 @@ function syncLlmModelPickerVisibility() {
 
 function getCurrentLlmProvider() {
     const sel = document.getElementById('llmProviderSelect');
-    if (sel) return sel.value;
-    return localStorage.getItem('llm_provider') || 'openrouter';
+    if (sel) return normalizeLlmProvider(sel.value);
+    return normalizeLlmProvider(localStorage.getItem('llm_provider'));
 }
 
 function getCurrentLlmModel() {
@@ -4983,16 +5085,15 @@ function getCurrentLlmModel() {
         if (top && top.value.trim()) return top.value.trim();
         return localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
     }
-    if (isClaudeProvider(prov)) {
+    if (isClaudeProvider(prov)) return getCurrentClaudeModel();
+    if (isOllamaLikeProvider(prov)) {
         const top = document.getElementById('topbarLlmModel');
         if (top && top.value.trim()) return top.value.trim();
-        return localStorage.getItem('claude_model') || 'claude-3-5-sonnet-20241022';
+        const cfg = document.getElementById('cfgLlmModel');
+        if (cfg && cfg.value.trim()) return cfg.value.trim();
+        return localStorage.getItem('llm_model') || null;
     }
-    const top = document.getElementById('topbarLlmModel');
-    if (top && top.value.trim()) return top.value.trim();
-    const cfg = document.getElementById('cfgLlmModel');
-    if (cfg && cfg.value.trim()) return cfg.value.trim();
-    return localStorage.getItem('llm_model') || null;
+    return getCurrentOpenRouterModel();
 }
 
 function getCurrentOpenaiModel() {
@@ -5048,13 +5149,9 @@ function onTopbarLlmModelChange() {
     if (isGeminiProvider(prov)) {
         if (v) localStorage.setItem('gemini_model', v);
         else localStorage.removeItem('gemini_model');
-    } else if (isClaudeProvider(prov)) {
-        if (v) localStorage.setItem('claude_model', v);
-        else localStorage.removeItem('claude_model');
-    } else if (v) {
-        localStorage.setItem('llm_model', v);
-    } else {
-        localStorage.removeItem('llm_model');
+    } else if (isOllamaLikeProvider(prov)) {
+        if (v) localStorage.setItem('llm_model', v);
+        else localStorage.removeItem('llm_model');
     }
     updateActiveLlmBadge();
     updateFavoriteModelButton();
@@ -5135,6 +5232,9 @@ function onLlmProviderChange() {
     if (!sel) return;
     localStorage.setItem('llm_provider', sel.value);
     syncLlmModelPickerVisibility();
+    if (isClaudeProvider(sel.value)) {
+        syncClaudeModelSelection(localStorage.getItem('claude_model') || _CLAUDE_DEFAULT_MODEL);
+    }
     refreshFavoriteModelOptions();
     updateActiveLlmBadge();
 
@@ -5177,19 +5277,26 @@ function restoreLlmProvider() {
     const sel = document.getElementById('llmProviderSelect');
     if (!sel) return;
 
-    const savedProvider = localStorage.getItem('llm_provider');
+    const savedProvider = normalizeLlmProvider(localStorage.getItem('llm_provider'));
     if (savedProvider && Array.from(sel.options).some(o => o.value === savedProvider)) {
         sel.value = savedProvider;
+        localStorage.setItem('llm_provider', savedProvider);
+    } else if (sel.options.length) {
+        sel.value = 'openrouter';
+        localStorage.setItem('llm_provider', 'openrouter');
     }
 
     const topModel = document.getElementById('topbarLlmModel');
     if (topModel) {
         const savedGeminiModel = localStorage.getItem('gemini_model');
-        const savedClaudeModel = localStorage.getItem('claude_model');
         const savedLlmModel = localStorage.getItem('llm_model');
         if (sel.value === 'gemini' && savedGeminiModel) topModel.value = savedGeminiModel;
-        else if (sel.value === 'claude' && savedClaudeModel) topModel.value = savedClaudeModel;
-        else if (savedLlmModel) topModel.value = savedLlmModel;
+        else if (isOllamaLikeProvider(sel.value) && savedLlmModel) topModel.value = savedLlmModel;
+    }
+
+    const savedClaudeModel = localStorage.getItem('claude_model');
+    if (isClaudeProvider(sel.value)) {
+        syncClaudeModelSelection(savedClaudeModel || _CLAUDE_DEFAULT_MODEL);
     }
 
     const savedOpenaiModel = localStorage.getItem('openai_model') || localStorage.getItem('groq_model');
@@ -5235,7 +5342,9 @@ function restoreLlmProvider() {
                 modelInput.value = savedModel;
             }
         } else {
+            modelSelect.value = 'meta-llama/llama-3.3-70b-instruct:free';
             modelInput.style.display = 'none';
+            localStorage.setItem('openrouter_model', modelSelect.value);
         }
     }
     syncLlmModelPickerVisibility();
@@ -5351,6 +5460,9 @@ function refreshFavoriteModelOptions() {
     if (isOpenAiCustomProvider(prov)) {
         injectFavoriteOptions(document.getElementById('openaiModelSelect'), prov);
     }
+    if (isClaudeProvider(prov)) {
+        injectFavoriteOptions(document.getElementById('claudeModelSelect'), prov);
+    }
     refreshFavoriteQuickSelect();
     updateFavoriteModelButton();
     renderFavoriteModelsPanel();
@@ -5421,6 +5533,9 @@ function applyFavoriteFromPanel(provider, model) {
         }
         updateActiveLlmBadge();
         updateFavoriteModelButton();
+    } else if (isClaudeProvider(provider)) {
+        syncClaudeModelSelection(model);
+        onClaudeModelSelectChange();
     } else {
         const top = document.getElementById('topbarLlmModel');
         if (top) {
@@ -5458,10 +5573,19 @@ function toggleCurrentModelFavorite() {
 
 function onFavoriteQuickSelect(sel) {
     if (!sel || !sel.value) return;
-    const top = document.getElementById('topbarLlmModel');
-    if (top) {
-        top.value = sel.value;
-        onTopbarLlmModelChange();
+    const prov = getCurrentLlmProvider();
+    if (isClaudeProvider(prov)) {
+        syncClaudeModelSelection(sel.value);
+        onClaudeModelSelectChange();
+    } else if (isOpenRouterProvider(prov)) {
+        syncOpenRouterModelSelection(sel.value);
+        onOpenRouterModelSelectChange();
+    } else {
+        const top = document.getElementById('topbarLlmModel');
+        if (top) {
+            top.value = sel.value;
+            onTopbarLlmModelChange();
+        }
     }
     sel.value = '';
     updateActiveLlmBadge();
@@ -7756,8 +7880,9 @@ function providersLoad() {
         if (cuBody) {
             const rows = (pool.custom_endpoints || []);
             const defaultGeminiRow = def.gemini_key_set ? _providerDefaultRow('gemini', def) : '';
-            cuBody.innerHTML = defaultGeminiRow + (rows.length ? rows.map(e => _providerRow(e, 'custom')).join('') :
-                (defaultGeminiRow ? '' : '<tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>'));
+            const defaultClaudeRow = def.claude_key_set ? _providerDefaultRow('claude', def) : '';
+            cuBody.innerHTML = defaultGeminiRow + defaultClaudeRow + (rows.length ? rows.map(e => _providerRow(e, 'custom')).join('') :
+                (defaultGeminiRow || defaultClaudeRow ? '' : '<tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>'));
         }
 
         syncTopbarProviders(pool);
@@ -7787,6 +7912,17 @@ function _providerDefaultRow(type, def) {
                     onclick="providerTest('default_gemini', this)">Test</button>
             </td></tr>`;
     }
+    if (type === 'claude') {
+        return `<tr class="table-light">
+            <td class="small"><em>.env (domyślny)</em></td>
+            <td class="small text-muted">ANTHROPIC_API_KEY · ${escapeHtml(def.claude_model || 'claude-sonnet-4-6')}</td>
+            <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;"></span>
+                <span id="provRowStatus_default_claude" class="small ms-1">aktywny (Claude API)</span></td>
+            <td class="text-end">
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" style="font-size:0.75rem;"
+                    onclick="providerTest('default_claude', this)">Test</button>
+            </td></tr>`;
+    }
     return `<tr class="table-light">
         <td class="small"><em>.env (domyślny)</em></td>
         <td class="small text-muted" style="font-family:monospace;">${escapeHtml(def.ollama_url || '')}</td>
@@ -7801,7 +7937,7 @@ function _providerDefaultRow(type, def) {
 function _providerRow(e, type) {
     const active = e.active !== false;
     const dotColor = active ? '#22c55e' : '#94a3b8';
-    const displayVal = e.key_masked || e.url || '—';
+    const displayVal = e.url || e.key_masked || '—';
     return `<tr id="provRow_${escapeHtml(e.id)}">
         <td class="small">${escapeHtml(e.name || e.id)}</td>
         <td class="small text-muted" style="font-family:monospace;">${escapeHtml(displayVal)}</td>

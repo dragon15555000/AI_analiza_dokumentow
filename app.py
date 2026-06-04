@@ -38,6 +38,15 @@ from llm_client import (
     _is_rate_limit_error,
     _get_retry_after,
     _redact_api_keys,
+    _gemini_generate_url,
+    _gemini_request_with_retry,
+    _gemini_error_message,
+    _gemini_key_from_url_or_value,
+    _gemini_custom_generate_url,
+    _gemini_generate_payload,
+    _gemini_response_text,
+    _custom_endpoint_is_anthropic,
+    _test_claude_api,
 )
 from task_queue import submit_task, get_task, update_task, cancel_task, get_task_status
 
@@ -1792,6 +1801,19 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
                 "error": message,
             }
 
+        if _custom_endpoint_is_anthropic(url, name):
+            api_key = (key or "").strip()
+            t0 = time.time()
+            ok, message, ms = _test_claude_api(api_key)
+            if ok:
+                return {"ok": True, "url": url, "ms": ms, "error": None}
+            return {
+                "ok": False,
+                "url": url,
+                "ms": ms or int((time.time() - t0) * 1000),
+                "error": message,
+            }
+
         if _custom_endpoint_is_openai(url):
             t0 = time.time()
             headers = {"Content-Type": "application/json"}
@@ -1972,7 +1994,7 @@ def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
     n = (name or "").lower().strip()
     if "generativelanguage.googleapis.com" in u:
         return True
-    if n in ("g1.5f", "gemini") or n.startswith("gemini-"):
+    if n in ("g1.5f", "gemini", "gem1.5") or n.startswith("gemini-"):
         return True
     return False
 
@@ -2060,7 +2082,7 @@ def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str,
 
 def _custom_endpoint_is_openai(url: str) -> bool:
     """Czy URL wskazuje na OpenAI-compatible API (Groq, LM Studio, itp.)."""
-    if _custom_endpoint_is_gemini(url):
+    if _custom_endpoint_is_gemini(url) or _custom_endpoint_is_anthropic(url):
         return False
     u = (url or "").lower().rstrip("/")
     return "openai/v1" in u or u.endswith("/v1")
@@ -5025,6 +5047,7 @@ def providers_list():
         entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
         entry["api_type"] = (
             "gemini" if _custom_endpoint_is_gemini(entry.get("url", ""), entry.get("name", ""))
+            else "anthropic" if _custom_endpoint_is_anthropic(entry.get("url", ""), entry.get("name", ""))
             else "openai" if _custom_endpoint_is_openai(entry.get("url", ""))
             else "ollama"
         )
@@ -5038,6 +5061,8 @@ def providers_list():
         "ollama_url": OLLAMA_URL,
         "gemini_key_set": bool(GEMINI_API_KEY),
         "gemini_model": GEMINI_MODEL,
+        "claude_key_set": bool(ANTHROPIC_API_KEY),
+        "claude_model": CLAUDE_MODEL,
         "pool_active_keys": len(pool_or),
         "pool_active_ollamas": len(pool_ol),
         "active_keys": len(pool_or) if pool_or else (1 if OPENROUTER_API_KEY else 0),
@@ -5144,6 +5169,9 @@ def providers_test(entry_id: str):
         elif entry_id == "default_gemini":
             ok, message, ms = _test_gemini_api(GEMINI_API_KEY)
             return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
+        elif entry_id == "default_claude":
+            ok, message, ms = _test_claude_api(ANTHROPIC_API_KEY)
+            return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
         else:
             return jsonify({"success": False, "error": "Nie znaleziono"}), 404
 
@@ -5166,6 +5194,13 @@ def providers_test(entry_id: str):
             key = entry.get("key", "")
             name = entry.get("name", "") or entry.get("label", "")
             if _custom_endpoint_is_gemini(url, name):
+                health = _check_custom_endpoint_health(url, key, name)
+                return jsonify({
+                    "success": bool(health.get("ok")),
+                    "ms": health.get("ms", 0),
+                    "error": health.get("error"),
+                })
+            if _custom_endpoint_is_anthropic(url, name):
                 health = _check_custom_endpoint_health(url, key, name)
                 return jsonify({
                     "success": bool(health.get("ok")),
