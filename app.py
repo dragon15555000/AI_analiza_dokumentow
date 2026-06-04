@@ -683,6 +683,10 @@ except ValueError:
     GEMINI_AUDIT_MAX_BYTES = 12 * 1024 * 1024
 
 GEMINI_AUDIT_EXTENSIONS = {".log", ".txt", ".json", ".out", ".err", ".md", ".csv", ".xml"}
+try:
+    OPENROUTER_AUDIT_MAX_CHARS = max(8000, int(os.environ.get("OPENROUTER_AUDIT_MAX_CHARS", "90000")))
+except ValueError:
+    OPENROUTER_AUDIT_MAX_CHARS = 90000
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 try:
     GEMINI_MAX_RETRIES = max(1, int(os.environ.get("GEMINI_MAX_RETRIES", "5")))
@@ -4287,12 +4291,102 @@ GEMINI_AUDIT_SYSTEM = (
 )
 
 
+def _is_audit_llm_rate_error(token: str) -> bool:
+    if not isinstance(token, str):
+        return False
+    low = token.lower()
+    return (
+        "429" in token
+        or "rate_limit" in low
+        or "limit zapytań gemini" in low
+        or "too many requests" in low
+    )
+
+
+def _audit_llm_error_token(token: str) -> bool:
+    return isinstance(token, str) and (
+        token.startswith("[Błąd") or token.startswith("[RATE_LIMIT]")
+    )
+
+
+def _stream_audit_analysis(
+    full_prompt: str,
+    system: str,
+    gemini_model: str,
+    *,
+    fallback_openrouter: bool = True,
+):
+    """
+    Generator tokenów audytu: najpierw Gemini (duży kontekst),
+    przy 429 opcjonalnie OpenRouter (z przycięciem promptu).
+    """
+    gemini_error = None
+    for token in _stream_gemini_tokens(
+        full_prompt,
+        system=system,
+        model=gemini_model,
+        max_tokens=8192,
+        temperature=0.2,
+    ):
+        if _audit_llm_error_token(token):
+            gemini_error = token
+            break
+        yield token
+
+    if gemini_error is None:
+        return
+
+    if not fallback_openrouter or not OPENROUTER_API_KEY:
+        yield gemini_error
+        return
+
+    if not _is_audit_llm_rate_error(gemini_error):
+        yield gemini_error
+        return
+
+    or_model = (OPENROUTER_MODEL or "meta-llama/llama-3.3-70b-instruct:free").strip()
+    prompt = full_prompt
+    truncated = False
+    if len(prompt) > OPENROUTER_AUDIT_MAX_CHARS:
+        prompt = (
+            full_prompt[:OPENROUTER_AUDIT_MAX_CHARS]
+            + f"\n\n[…ucięto plik do {OPENROUTER_AUDIT_MAX_CHARS:,} znaków — fallback OpenRouter ma mniejsze okno kontekstu…]"
+        )
+        truncated = True
+
+    logger.info(
+        "Audyt: Gemini 429 → fallback OpenRouter (%s%s)",
+        or_model,
+        ", ucięty prompt" if truncated else "",
+    )
+    yield (
+        f"\n\n---\n⚠️ **Gemini: limit RPM (429).** Kontynuacja przez OpenRouter (`{or_model}`)"
+        f"{', skrócony fragment pliku' if truncated else ''}.\n\n"
+    )
+
+    for token in stream_llm_tokens(
+        prompt,
+        system=system,
+        provider="openrouter",
+        model=or_model,
+        max_tokens=8192,
+        temperature=0.2,
+    ):
+        if isinstance(token, str) and token.startswith("[") and "Błąd" in token:
+            yield f"[Błąd OpenRouter fallback: {token.strip('[]')}]"
+            return
+        yield token
+
+
 @app.route('/audit/info', methods=['GET'])
 def audit_info():
     """Status konfiguracji audytu Gemini."""
     return jsonify({
         "success": True,
         "gemini_configured": bool(GEMINI_API_KEY),
+        "openrouter_fallback_available": bool(OPENROUTER_API_KEY),
+        "openrouter_audit_model": OPENROUTER_MODEL,
+        "openrouter_audit_max_chars": OPENROUTER_AUDIT_MAX_CHARS,
         "default_model": GEMINI_MODEL,
         "max_bytes": GEMINI_AUDIT_MAX_BYTES,
         "allowed_extensions": sorted(GEMINI_AUDIT_EXTENSIONS),
@@ -4307,6 +4401,9 @@ def audit_file_stream():
     query = (data.get("query") or data.get("prompt") or "").strip()
     model = (data.get("model") or GEMINI_MODEL).strip()
     redact = data.get("redact_secrets", True)
+    fallback_openrouter = data.get("fallback_openrouter", True)
+    if isinstance(fallback_openrouter, str):
+        fallback_openrouter = fallback_openrouter.lower() in ("1", "true", "yes")
 
     if not GEMINI_API_KEY:
         def _err_gen():
@@ -4369,17 +4466,19 @@ def audit_file_stream():
 
             full_prompt = f"{query}\n\n--- ZAWARTOŚĆ PLIKU ({path.name}) ---\n{content}"
             full_answer = ""
+            used_model = model
 
-            for token in _stream_gemini_tokens(
+            for token in _stream_audit_analysis(
                 full_prompt,
                 system=GEMINI_AUDIT_SYSTEM,
-                model=model,
-                max_tokens=8192,
-                temperature=0.2,
+                gemini_model=model,
+                fallback_openrouter=fallback_openrouter,
             ):
-                if isinstance(token, str) and token.startswith("[Błąd"):
+                if _audit_llm_error_token(token):
                     yield sse("error", {"error": token})
                     return
+                if token.startswith("\n\n---\n⚠️"):
+                    used_model = OPENROUTER_MODEL or "openrouter-fallback"
                 full_answer += token
                 yield sse("token", {"token": token})
 
@@ -4387,7 +4486,7 @@ def audit_file_stream():
                 "ai_answer": full_answer,
                 "file": str(path),
                 "file_name": path.name,
-                "model": model,
+                "model": used_model,
                 "chars_analyzed": len(content),
                 "bytes_analyzed": size,
             })
