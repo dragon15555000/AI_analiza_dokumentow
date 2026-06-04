@@ -2610,10 +2610,8 @@ def generate_answer(
         if _is_rate_limit_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA and prov == "openrouter":
             logger.warning("generate_answer: OpenRouter 429 → fallback do Ollama")
             try:
-                result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-                if isinstance(result, dict):
-                    return result.get("response", str(result))
-                return str(result)
+                result = call_llm(prompt, system, stream=False, provider="ollama", model=LLM_MODEL)
+                return _llm_response_text(result)
             except Exception as fb_e:
                 return f"[RATE_LIMIT + Błąd fallback] {fb_e}"
         logger.error(f"LLM error in generate_answer ({prov}): {e}")
@@ -5769,8 +5767,8 @@ def get_suggestions():
             f"DOKUMENTY:\n{context}"
         )
         system_msg = "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań."
-        result = _call_ollama(prompt, system_msg, stream=False, model=LLM_MODEL)
-        raw = result.get("response", "") if isinstance(result, dict) else ""
+        result = call_llm(prompt, system_msg, stream=False, provider="ollama", model=LLM_MODEL)
+        raw = _llm_response_text(result)
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]
         suggestions = [l for l in lines if len(l) > 10][:8]

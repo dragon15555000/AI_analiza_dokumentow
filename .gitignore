@@ -95,3 +95,4 @@ qdrant_data/
 
 # === Claude Code agent worktrees ===
 .claude/
+.aider*
