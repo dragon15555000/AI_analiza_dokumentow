@@ -3,6 +3,7 @@
 
 import json
 import urllib.request
+import urllib.parse
 import re
 import os
 import hashlib
@@ -727,6 +728,7 @@ except ValueError:
     GEMINI_AUDIT_MAX_BYTES = 12 * 1024 * 1024
 
 GEMINI_AUDIT_EXTENSIONS = {".log", ".txt", ".json", ".out", ".err", ".md", ".csv", ".xml"}
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
@@ -837,7 +839,8 @@ def _save_model_live_stats(stats: dict) -> None:
     except OSError as exc:
         logger.warning("Nie zapisano statystyk modeli: %s", exc)
 
-APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
+APP_API_KEY_ENV = os.environ.get("APP_API_KEY", "").strip()
+APP_API_KEY = APP_API_KEY_ENV
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
 # Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
 # który nadpisuje X-Forwarded-For — NIGDY nie włączaj gdy app jest dostępna z zewnątrz bez proxy
@@ -1478,6 +1481,15 @@ def _save_llm_config(cfg: dict):
         logger.warning("Błąd zapisu llm config: %s", e)
 
 
+def _effective_app_api_key(cfg: dict | None = None) -> str:
+    """Klucz ochrony API: UI (.llm_config.json) ma pierwszeństwo, pusty → fallback z .env."""
+    data = cfg if cfg is not None else _load_llm_config()
+    ui_key = (data.get("app_api_key") or "").strip()
+    if ui_key:
+        return ui_key
+    return APP_API_KEY_ENV
+
+
 def _apply_llm_config(cfg: dict):
     """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
@@ -1503,12 +1515,7 @@ def _apply_llm_config(cfg: dict):
     if cfg.get("gemini_api_key"):
         GEMINI_API_KEY = cfg["gemini_api_key"]
 
-    # Obsługa klucza API aplikacji (do ochrony endpointów)
-    if cfg.get("app_api_key"):
-        APP_API_KEY = cfg["app_api_key"]
-    elif "app_api_key" in cfg and not cfg.get("app_api_key"):
-        # Pozwól wyczyścić klucz przez UI
-        APP_API_KEY = ""
+    APP_API_KEY = _effective_app_api_key(cfg)
 
 
 _apply_llm_config(_load_llm_config())
@@ -1541,7 +1548,11 @@ def get_llm_config():
         # Bezpieczne flagi zamiast podglądów kluczy
         "openrouter_key_set": bool(cfg.get("openrouter_key")),
         "gemini_key_set": bool(cfg.get("gemini_api_key") or env_gemini_key or GEMINI_API_KEY),
-        "app_api_key_set": bool(cfg.get("app_api_key")),
+        "app_api_key_set": bool(_effective_app_api_key(cfg)),
+        "app_api_key_source": (
+            "ui" if (cfg.get("app_api_key") or "").strip()
+            else ("env" if APP_API_KEY_ENV else None)
+        ),
     })
 
 
@@ -1569,7 +1580,12 @@ def save_llm_config():
     if data.get("gemini_api_key"):
         current["gemini_api_key"] = data["gemini_api_key"]
     if "app_api_key" in data:
-        current["app_api_key"] = data["app_api_key"] or ""
+        ui_app_key = (data.get("app_api_key") or "").strip()
+        if ui_app_key:
+            current["app_api_key"] = ui_app_key
+        else:
+            # Pusty = usuń override UI → fallback do APP_API_KEY z .env
+            current.pop("app_api_key", None)
 
     _save_llm_config(current)
     _apply_llm_config(current)
@@ -1628,8 +1644,10 @@ def _list_gemini_generate_models(api_key: str) -> tuple[bool, list[str], str | N
     if not api_key:
         return False, [], "Brak klucza API"
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        response = _gemini_request_with_retry("GET", url, timeout=8, max_retries=2)
+        url = f"{GEMINI_API_BASE}/models"
+        response = _gemini_request_with_retry(
+            "GET", url, api_key=api_key, timeout=8, max_retries=2,
+        )
         data = response.json()
         names: list[str] = []
         for entry in data.get("models", []):
@@ -1666,15 +1684,19 @@ def _gemini_model_hint(api_key: str, model: str) -> str:
     return base
 
 
-def _gemini_generate_url(model: str, stream: bool = False, api_key: str | None = None) -> str:
+def _gemini_auth_headers(api_key: str | None = None) -> dict[str, str]:
+    """Nagłówek x-goog-api-key — zalecany przez Google zamiast ?key= w URL."""
+    key = (api_key or GEMINI_API_KEY or "").strip()
+    if not key:
+        raise ValueError("Brak klucza Gemini API")
+    return {"x-goog-api-key": key}
+
+
+def _gemini_generate_url(model: str, stream: bool = False) -> str:
     action = "streamGenerateContent" if stream else "generateContent"
     suffix = "?alt=sse" if stream else ""
-    key = (api_key or GEMINI_API_KEY).strip()
     effective_model = _normalize_gemini_model(model)
-    return (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:{action}{suffix}"
-        f"?key={key}"
-    )
+    return f"{GEMINI_API_BASE}/models/{effective_model}:{action}{suffix}"
 
 
 def _is_gemini_base_url(url: str, provider_name: str = "") -> bool:
@@ -1682,16 +1704,21 @@ def _is_gemini_base_url(url: str, provider_name: str = "") -> bool:
     return _custom_endpoint_is_gemini(url, provider_name)
 
 
-def _gemini_request_with_retry(method: str, url: str, *, timeout: int = 60,
+def _gemini_request_with_retry(method: str, url: str, *, api_key: str | None = None,
+                               timeout: int = 60,
                                max_retries: int = 3, initial_delay: float = 1.5,
                                **kwargs):
-    """Wysyła request do Gemini z prostym backoff przy 429."""
+    """Wysyła request do Gemini z nagłówkiem x-goog-api-key i backoff przy 429."""
     delay = initial_delay
     last_error = None
+    headers = dict(kwargs.pop("headers", None) or {})
+    headers.update(_gemini_auth_headers(api_key))
+    if kwargs.get("json") is not None and "Content-Type" not in headers:
+        headers.setdefault("Content-Type", "application/json")
 
     for attempt in range(max_retries):
         try:
-            response = requests.request(method, url, timeout=timeout, **kwargs)
+            response = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
             if response.status_code == 429 and attempt < max_retries - 1:
                 retry_after = response.headers.get("Retry-After")
                 wait = delay
@@ -1930,7 +1957,19 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
         return {"ok": False, "error": "Brak URL"}
     try:
         if _custom_endpoint_is_gemini(url, name):
-            ok, message, ms = _test_gemini_api(key)
+            t0 = time.time()
+            try:
+                result = _call_gemini_custom_endpoint(
+                    url, key, "Odpowiedz jednym słowem: OK", "", False,
+                    GEMINI_MODEL, max_tokens=5, temperature=0.0,
+                )
+                ms = int((time.time() - t0) * 1000)
+                ok = bool(_llm_response_text(result))
+                message = "OK" if ok else "Pusta odpowiedź Gemini"
+            except Exception as exc:
+                ms = int((time.time() - t0) * 1000)
+                ok = False
+                message = _redact_api_keys(str(exc))[:200]
             return {
                 "ok": ok,
                 "url": url,
@@ -2558,6 +2597,15 @@ def stream_llm_tokens(prompt: str, system: str = "",
 
     if custom_endpoint:
         url_base = custom_endpoint.get("url", "")
+        if _custom_endpoint_is_gemini(url_base, custom_endpoint.get("name", "")):
+            yield from _stream_gemini_custom_endpoint(
+                url_base,
+                custom_endpoint.get("key", ""),
+                prompt, system,
+                model or GEMINI_MODEL,
+                max_tokens, temperature,
+            )
+            return
         if _custom_endpoint_is_openai(url_base):
             yield from _stream_openai_compatible(
                 url_base,
@@ -2759,6 +2807,130 @@ def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
     return False
 
 
+def _gemini_key_from_url_or_value(url: str, key: str = "") -> str:
+    """Zwraca klucz Gemini z pola key albo z query stringu endpointu."""
+    if key:
+        return key.strip()
+    try:
+        parsed = urllib.parse.urlparse(url or "")
+        params = urllib.parse.parse_qs(parsed.query)
+        return (params.get("key") or [""])[0].strip()
+    except Exception:
+        return ""
+
+
+def _redact_api_keys(text: str) -> str:
+    """Usuwa klucze API z komunikatów błędów przed zwrotem do UI/logiki API."""
+    redacted = str(text or "")
+    redacted = re.sub(r"([?&]key=)[^&\s\"']+", r"\1[REDACTED]", redacted)
+    redacted = re.sub(r"(x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+", r"\1[REDACTED]", redacted, flags=re.IGNORECASE)
+    return redacted
+
+
+def _gemini_custom_generate_url(endpoint_url: str, key: str, model: str | None = None,
+                                stream: bool = False) -> str:
+    """Buduje pełny URL Gemini: /v1beta/models/{model}:generateContent."""
+    method = "streamGenerateContent" if stream else "generateContent"
+    raw = (endpoint_url or "").strip().replace("{api_key}", key or "")
+    effective_model = _normalize_gemini_model(model or GEMINI_MODEL)
+
+    if "generativelanguage.googleapis.com" not in raw.lower():
+        raw = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:{method}"
+
+    parsed = urllib.parse.urlparse(raw)
+    base = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    if "/models/" not in base:
+        base = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:{method}"
+    elif ":generateContent" in base or ":streamGenerateContent" in base:
+        base = re.sub(r":(?:streamGenerateContent|generateContent)$", f":{method}", base)
+    else:
+        base = base.rstrip("/") + f":{method}"
+
+    params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    params.pop("key", None)
+    if stream:
+        params["alt"] = "sse"
+    query = urllib.parse.urlencode(params)
+    return base + (f"?{query}" if query else "")
+
+
+def _gemini_generate_payload(prompt: str, system: str = "",
+                             max_tokens: int = 2000, temperature: float = 0.2) -> dict:
+    """Payload JSON dla Gemini generateContent."""
+    text = f"{system.strip()}\n\n{prompt}" if system else prompt
+    return {
+        "contents": [{"role": "user", "parts": [{"text": text}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    }
+
+
+def _gemini_response_text(data: dict) -> str:
+    """Ekstrahuje tekst z odpowiedzi Gemini generateContent."""
+    parts = (
+        (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts"))
+        or []
+    )
+    return "".join(str(part.get("text") or "") for part in parts).strip()
+
+
+def _call_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
+                                 stream: bool, model: str = "",
+                                 max_tokens: int = 2000, temperature: float = 0.2):
+    """Natywny Gemini custom endpoint przez POST generateContent."""
+    api_key = _gemini_key_from_url_or_value(url, key)
+    if not api_key:
+        raise RuntimeError("Brak klucza API Gemini")
+    req_url = _gemini_custom_generate_url(url, api_key, model or GEMINI_MODEL, stream=stream)
+    payload = _gemini_generate_payload(prompt, system, max_tokens, temperature)
+    if stream:
+        return requests.post(
+            req_url,
+            json=payload,
+            headers=_gemini_auth_headers(api_key),
+            stream=True,
+            timeout=300,
+        )
+    r = _gemini_request_with_retry(
+        "POST",
+        req_url,
+        api_key=api_key,
+        json=payload,
+        timeout=180,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return {"response": _gemini_response_text(data), "raw": data}
+
+
+def _stream_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
+                                   model: str = "", max_tokens: int = 2000,
+                                   temperature: float = 0.2):
+    """Generator tokenów z natywnego Gemini streamGenerateContent."""
+    try:
+        with _call_gemini_custom_endpoint(
+            url, key, prompt, system, True, model, max_tokens, temperature
+        ) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                decoded = line.decode("utf-8", errors="replace")
+                if not decoded.startswith("data: "):
+                    continue
+                try:
+                    chunk = json.loads(decoded[6:].strip())
+                    text = _gemini_response_text(chunk)
+                    if text:
+                        yield text
+                except Exception:
+                    continue
+    except Exception as exc:
+        yield f"[Błąd Gemini custom streaming: {_redact_api_keys(str(exc))}]"
+
+
 def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str, int]:
     """Test Gemini API — weryfikuje model z listy generateContent."""
     if not api_key:
@@ -2869,7 +3041,11 @@ def _call_openai_compatible(url: str, key: str, prompt: str, system: str, stream
 
 def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: bool,
                           model: str = "", max_tokens: int = 2000, temperature: float = 0.2):
-    """Custom endpoint: OpenAI-compatible (/v1/chat/completions) lub Ollama (/api/generate)."""
+    """Custom endpoint: Gemini, OpenAI-compatible albo Ollama."""
+    if _custom_endpoint_is_gemini(url):
+        return _call_gemini_custom_endpoint(
+            url, key, prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature
+        )
     if _custom_endpoint_is_openai(url):
         return _call_openai_compatible(
             url, key, prompt, system, stream, model or LLM_MODEL, max_tokens, temperature
@@ -5782,8 +5958,12 @@ def providers_test(entry_id: str):
             key = entry.get("key", "")
             name = entry.get("name", "") or entry.get("label", "")
             if _custom_endpoint_is_gemini(url, name):
-                ok, message, ms = _test_gemini_api(key)
-                return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
+                health = _check_custom_endpoint_health(url, key, name)
+                return jsonify({
+                    "success": bool(health.get("ok")),
+                    "ms": health.get("ms", 0),
+                    "error": health.get("error"),
+                })
             elif _custom_endpoint_is_openai(url):
                 headers = {"Content-Type": "application/json"}
                 if key:

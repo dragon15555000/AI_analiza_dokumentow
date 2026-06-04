@@ -1442,7 +1442,10 @@ table { margin: 0; }
             </label>
             <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="clearAppApiKey()" style="font-size:0.7rem;">Wyczyść</button>
           </div>
-          <input type="password" id="cfgAppKey" class="form-control form-control-sm font-monospace" placeholder="Zostaw puste, aby nie zmieniać">
+          <input type="password" id="cfgAppKey" class="form-control form-control-sm font-monospace" placeholder="Zostaw puste — użyje APP_API_KEY z .env">
+          <div class="form-text small text-muted mt-1">
+            Puste pole + zapis = klucz z pliku <code>.env</code>. Własna wartość nadpisuje .env.
+          </div>
           <div class="form-text small text-danger mt-1">
             <strong>Uwaga:</strong> Po ustawieniu tego klucza wszystkie zapytania do API (w tym import, SQL, health) będą wymagały nagłówka <code>X-API-Key</code>.
             Używaj tylko jeśli wystawiasz aplikację poza localhost.
@@ -6478,8 +6481,14 @@ function llmConfigLoad() {
             // App API Key
             document.getElementById('cfgAppKey').value = '';
             const appKeyStatus = document.getElementById('cfgAppKeyStatus');
-            appKeyStatus.textContent = d.app_api_key_set ? '(ustawiony)' : '(nie ustawiony)';
-            appKeyStatus.style.color = d.app_api_key_set ? '#166534' : '#991b1b';
+            if (d.app_api_key_set) {
+                const src = d.app_api_key_source === 'ui' ? 'ustawiony w UI' : 'z .env';
+                appKeyStatus.textContent = `(${src})`;
+                appKeyStatus.style.color = '#166534';
+            } else {
+                appKeyStatus.textContent = '(nie ustawiony)';
+                appKeyStatus.style.color = '#991b1b';
+            }
 
             // Model główny
             const sel = document.getElementById('cfgOrModelSelect');
@@ -6517,9 +6526,9 @@ function cfgOrModelSyncInput() {
 }
 
 function clearAppApiKey() {
-    if (!confirm('Na pewno wyczyścić App API Key? Po zapisaniu ochrona API zostanie wyłączona.')) return;
+    if (!confirm('Wyczyścić App API Key z UI? Po zapisie wróci fallback do APP_API_KEY z pliku .env (jeśli jest).')) return;
     document.getElementById('cfgAppKey').value = '';
-    // Immediately save empty value
+    window._clearAppApiKeyPending = true;
     llmConfigSave();
 }
 
@@ -6529,7 +6538,12 @@ function llmConfigSave() {
 
     // App API Key (zawsze próbujemy zapisać, nawet jeśli puste)
     const appKey = document.getElementById('cfgAppKey').value.trim();
-    payload.app_api_key = appKey;  // puste = wyczyść
+    if (appKey) {
+        payload.app_api_key = appKey;
+    } else if (window._clearAppApiKeyPending) {
+        payload.app_api_key = '';
+        window._clearAppApiKeyPending = false;
+    }
 
     const geminiKey = document.getElementById('cfgGeminiKey').value.trim();
     if (geminiKey) payload.gemini_api_key = geminiKey;

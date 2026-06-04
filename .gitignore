@@ -86,6 +86,8 @@ qdrant_data/
 .sql_config.json
 .llm_config.json
 .llm_fleet_stats.json
+.llm_custom_endpoint_stats.json
+.llm_model_live_stats.json
 .active_collection
 .providers.json
 .swarm_reports/
