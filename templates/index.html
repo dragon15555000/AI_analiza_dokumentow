@@ -1922,6 +1922,16 @@ function escapeHtml(s) {
         .replace(/"/g, '&quot;');
 }
 
+/** Escapuje wartość do inline onclick="fn('…')" — backslash Windows (C:\\Users) psuje JS bez tego. */
+function jsAttrEscape(s) {
+    if (s == null) return '';
+    return String(s)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n');
+}
+
 (function installFetchApiKey() {
     if (!window.API_KEY_REQUIRED) return;
     const orig = window.fetch.bind(window);
@@ -2157,7 +2167,7 @@ function renderDocTable(docs) {
         return;
     }
     tbody.innerHTML = docs.map((d, i) => {
-        const safe = d.file.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const safe = jsAttrEscape(d.file);
         return `<tr id="docrow-${i}">
             <td style="text-align:center;">
                 <input type="checkbox" class="doc-check" value="${safe}" onchange="onDocCheck()">
@@ -2634,7 +2644,7 @@ function executeSearch() {
                                         <div class="d-flex gap-2">
                                             <button onclick="exportDocx()" class="btn btn-outline-secondary btn-sm" style="font-size:0.75rem;padding:2px 10px;">📄 DOCX</button>
                             ${mode==='extract'?`<button onclick="exportCsv()" class="btn btn-outline-success btn-sm" style="font-size:0.75rem;padding:2px 10px;">📊 CSV</button>`:''}
-                                            <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
+                                            <button onclick="openNetworkForQuery('${jsAttrEscape(query)}'); showTab('network');" class="btn btn-outline-primary btn-sm" style="font-size:0.75rem;padding:2px 10px;">🕸 Sieć</button>
                                         </div>
                                     </div>
                                     <div id="aiAnswerBody" style="font-size:0.96rem;line-height:1.65;color:#1e2937;white-space:pre-wrap;"></div>
@@ -2747,7 +2757,7 @@ function executeSearch() {
                             style="font-size:0.75rem;padding:2px 10px;" title="Pobierz raport Word">
                             📄 Pobierz DOCX
                         </button>
-                        <button onclick="openNetworkForQuery('${query.replace(/'/g,"\\'")}'); showTab('network');"
+                        <button onclick="openNetworkForQuery('${jsAttrEscape(query)}'); showTab('network');"
                             class="btn btn-outline-primary btn-sm"
                             style="font-size:0.75rem;padding:2px 10px;" title="Wizualizuj sieć powiązań">
                             🕸 Sieć powiązań
@@ -2774,7 +2784,7 @@ function executeSearch() {
             const pathHtml = hasPath
                 ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
                     📂 <span style="font-family:monospace;">${item.win_path}</span>
-                    <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
+                    <button onclick="openFile('${jsAttrEscape(item.full_path)}')"
                         style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
                    </div>`
                 : '';
@@ -2879,8 +2889,8 @@ function renderCompareFileList() {
         <div class="d-flex justify-content-between align-items-center py-1 border-bottom">
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${d.file}">${d.file}</span>
             <div class="d-flex gap-1 flex-shrink-0 ms-1">
-                <button class="doc-row-btn" onclick="setCompareFile('A','${d.file.replace(/'/g,"\\'")}')">A</button>
-                <button class="doc-row-btn" onclick="setCompareFile('B','${d.file.replace(/'/g,"\\'")}')">B</button>
+                <button class="doc-row-btn" onclick="setCompareFile('A','${jsAttrEscape(d.file)}')">A</button>
+                <button class="doc-row-btn" onclick="setCompareFile('B','${jsAttrEscape(d.file)}')">B</button>
             </div>
         </div>`).join('');
 }
@@ -3006,7 +3016,7 @@ function renderDocResults(results, query, container) {
         const pathHtml = hasPath
             ? `<div style="font-size:0.72rem;color:#6c757d;padding:4px 16px 6px;background:#fafafa;border-top:1px solid #f0f0f0;">
                 📂 <span style="font-family:monospace;">${escapeHtml(item.win_path)}</span>
-                <button onclick="openFile('${item.full_path.replace(/'/g,"\\'")}')"
+                <button onclick="openFile('${jsAttrEscape(item.full_path)}')"
                     style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
                </div>` : '';
         return `<div class="result-card">
@@ -3255,7 +3265,7 @@ function renderBrowseError(d) {
     const roots = d.allowed_roots || [];
     if (roots.length) {
         html += `<div class="p-2 small text-muted">Dozwolone katalogi (SEARCH_ROOTS):<br>` +
-            roots.map(r => `<a href="#" class="me-2" onclick="quickDriveSelect('${String(r).replace(/'/g,"\\'")}');return false">${escapeHtml(r)}</a>`).join('') +
+            roots.map(r => `<a href="#" class="me-2" onclick="quickDriveSelect('${jsAttrEscape(String(r))}');return false">${escapeHtml(r)}</a>`).join('') +
             `</div>`;
     }
     list.innerHTML = html;
@@ -3274,13 +3284,13 @@ function renderBrowseEntries(d) {
     const segLinks = parts.map(seg => {
         acc += '/' + seg;
         const p = acc;
-        return `<a href="#" onclick="browseDir('${p.replace(/'/g,"\\'")}');return false">${escapeHtml(seg)}</a>`;
+        return `<a href="#" onclick="browseDir('${jsAttrEscape(p)}');return false">${escapeHtml(seg)}</a>`;
     }).join(' / ');
     const crumb = document.getElementById('browseCrumb');
     const pathHint = displayPath !== d.current
         ? `<span class="text-muted" style="font-size:0.7rem;"> (${escapeHtml(displayPath)})</span>` : '';
     crumb.innerHTML = d.parent
-        ? `<a href="#" onclick="browseDir('${d.parent.replace(/'/g,"\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; ${segLinks || escapeHtml(d.current)}${pathHint}`
+        ? `<a href="#" onclick="browseDir('${jsAttrEscape(d.parent)}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; ${segLinks || escapeHtml(d.current)}${pathHint}`
         : ((segLinks || escapeHtml(d.current)) + pathHint);
 
     const list = document.getElementById('browseList');
@@ -3295,7 +3305,7 @@ function renderBrowseEntries(d) {
             msg = `<div class="p-3">
                 <div class="small text-warning">Brak plików dokumentów w tym folderze.</div>
                 <div class="small text-muted mt-1">Są inne pliki, ale żaden nie pasuje do wybranych typów (PDF/DOCX/XLSX itp.).</div>
-                <button class="btn btn-sm btn-outline-primary mt-2" onclick="browseDirWithAll('${d.current.replace(/'/g,"\\'")}')">Pokaż wszystkie pliki i foldery</button>
+                <button class="btn btn-sm btn-outline-primary mt-2" onclick="browseDirWithAll('${jsAttrEscape(d.current)}')">Pokaż wszystkie pliki i foldery</button>
             </div>`;
         } else if (d.permission_denied > 0) {
             msg = `<div class="p-3 text-muted small">Brak uprawnień do odczytu zawartości (${d.permission_denied} elementów pominiętych).</div>`;
@@ -3309,8 +3319,8 @@ function renderBrowseEntries(d) {
     list.innerHTML = d.entries.map(e => {
         if (e.type === 'dir') {
             const chooseBtn = `<button class="btn btn-sm btn-outline-success py-0 px-2" style="font-size:0.72rem;flex-shrink:0;"
-                        onclick="event.stopPropagation();selectImportFolder('${e.path.replace(/'/g,"\\'")}')">Wybierz</button>`;
-            return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${e.path.replace(/'/g,"\\'")}')">
+                        onclick="event.stopPropagation();selectImportFolder('${jsAttrEscape(e.path)}')">Wybierz</button>`;
+            return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;" onclick="browseDir('${jsAttrEscape(e.path)}')">
                 <span style="color:#f59e0b;">📁</span>
                 <span class="small flex-grow-1" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.name)}</span>
                 ${chooseBtn}
@@ -3397,8 +3407,8 @@ function loadQuickDrives(forceBrowse) {
                 return;
             }
             container.innerHTML = d.drives.map(drive => {
-                const safePath = drive.path.replace(/'/g, "\\'");
-                const safeWin = (drive.win_path || '').replace(/'/g, "\\'");
+                const safePath = jsAttrEscape(drive.path);
+                const safeWin = jsAttrEscape(drive.win_path || '');
                 const cls = drive.accessible ? 'drive-ok' : 'drive-warn';
                 const hint = (drive.win_path || drive.path) + (drive.importable ? '' : ' · tylko nawigacja');
                 return `<button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 drive-chip ${cls}"
@@ -3737,7 +3747,7 @@ function loadSuggestions(force) {
         if (sideContainer) {
             sideContainer.innerHTML = d.suggestions.map(s =>
                 `<button class="prompt-btn" style="border-color:#e0e0ff;background:#fafafe;"
-                    onclick="selectPrompt('${s.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${s}</button>`
+                    onclick="selectPrompt('${jsAttrEscape(s)}')">${s}</button>`
             ).join('') + (d.cached ? '<div class="small text-muted px-1 mt-1" style="font-size:0.7rem;">z cache · kliknij ↺ aby odświeżyć</div>' : '');
         }
         // Zakładka AI z bazy — większe karty
@@ -3746,7 +3756,7 @@ function loadSuggestions(force) {
             d.suggestions.map((s, i) =>
                 `<div class="col-md-6">
                     <div class="card border-0 shadow-sm h-100" style="border-left:4px solid #4f46e5 !important;cursor:pointer;"
-                        onclick="selectPrompt('${s.replace(/'/g,"\\'").replace(/"/g,'&quot;')}'); showTab('search');">
+                        onclick="selectPrompt('${jsAttrEscape(s)}'); showTab('search');">
                         <div class="card-body py-3 px-3">
                             <div class="d-flex gap-2 align-items-start">
                                 <span style="color:#4f46e5;font-weight:800;font-size:1.1rem;">${i+1}</span>
@@ -4054,7 +4064,7 @@ function renderNetworkInsights(d) {
     if (stats.top_hubs && stats.top_hubs.length) {
         hubsEl.innerHTML = '<span class="text-muted">Kluczowe węzły:</span> ' +
             stats.top_hubs.slice(0, 5).map(h => {
-                const safeId = String(h.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                const safeId = jsAttrEscape(h.id);
                 return `<span class="badge bg-light text-dark border me-1" style="cursor:pointer;font-weight:500;"
                   onclick="highlightNetworkNode('${safeId}')"
                   title="Siła: ${h.score}">${escapeHtml(h.label)} <small class="text-muted">×${h.score}</small></span>`;
@@ -5723,7 +5733,7 @@ function sqlAsk() {
                 </div>
                 <pre style="font-size:0.82rem;background:#1a1f36;color:#a0aec0;padding:12px;border-radius:6px;overflow-x:auto;margin-bottom:12px;">${d.sql}</pre>
                 <div class="d-flex gap-2">
-                    <button class="btn btn-danger" onclick="sqlConfirmWrite('${d.sql.replace(/'/g,"\\'").replace(/\n/g,' ')}')">
+                    <button class="btn btn-danger" onclick="sqlConfirmWrite('${jsAttrEscape(d.sql.replace(/\n/g, ' '))}')">
                         ✅ Potwierdź — wykonaj
                     </button>
                     <button class="btn btn-outline-secondary" onclick="document.getElementById('sqlResult').innerHTML=''">
@@ -7486,12 +7496,12 @@ function renderAuditBrowseEntries(d) {
     const segLinks = parts.map(seg => {
         acc += '/' + seg;
         const p = acc;
-        return `<a href="#" onclick="auditBrowseDir('${p.replace(/'/g, "\\'")}');return false">${escapeHtml(seg)}</a>`;
+        return `<a href="#" onclick="auditBrowseDir('${jsAttrEscape(p)}');return false">${escapeHtml(seg)}</a>`;
     }).join(' / ');
     const crumb = document.getElementById('auditBrowseCrumb');
     if (crumb) {
         crumb.innerHTML = d.parent
-            ? `<a href="#" onclick="auditBrowseDir('${d.parent.replace(/'/g, "\\'")}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; ${segLinks || escapeHtml(d.current)}`
+            ? `<a href="#" onclick="auditBrowseDir('${jsAttrEscape(d.parent)}');return false;">↑ Wyżej</a> &nbsp;|&nbsp; ${segLinks || escapeHtml(d.current)}`
             : (segLinks || escapeHtml(d.current));
     }
 
@@ -7504,7 +7514,7 @@ function renderAuditBrowseEntries(d) {
     list.innerHTML = d.entries.map(e => {
         if (e.type === 'dir') {
             return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;"
-                onclick="auditBrowseDir('${e.path.replace(/'/g, "\\'")}')">
+                onclick="auditBrowseDir('${jsAttrEscape(e.path)}')">
                 <span style="color:#f59e0b;">📁</span>
                 <span class="small flex-grow-1">${escapeHtml(e.name)}</span>
             </div>`;
@@ -7512,7 +7522,7 @@ function renderAuditBrowseEntries(d) {
         const meta = (e.modified || e.size_kb)
             ? `<span class="small text-muted">${escapeHtml(e.modified || '')}${e.size_kb ? ' · ' + e.size_kb + ' KB' : ''}</span>` : '';
         return `<div class="d-flex align-items-center px-3 py-2 border-bottom" style="cursor:pointer;gap:8px;background:#f8fafc;"
-            onclick="selectAuditFile('${e.path.replace(/'/g, "\\'")}')">
+            onclick="selectAuditFile('${jsAttrEscape(e.path)}')">
             <span>📄</span>
             <span class="small flex-grow-1 text-truncate">${escapeHtml(e.name)}</span>
             ${meta}
