@@ -24,6 +24,7 @@ from qdrant_client.models import PointStruct
 from prompts import SEARCH_MODES, MODEL_REGISTRY, VERIFY_SYSTEM_PROMPT, VERIFY_PROMPT_TEMPLATE, DETECTIVE_PROMPT_TEMPLATE, DEFAULT_PROMPT_TEMPLATE, CHAT_CONTEXT_BLOCK_TEMPLATE
 from sql_safety import _is_sql_safe, _extract_sql_table_refs, _validate_sql_table_refs, DANGEROUS_SQL_KEYWORDS
 from models_fleet import _load_custom_endpoint_stats, _save_custom_endpoint_stats, _get_or_init_endpoint_stats, _load_model_live_stats, _save_model_live_stats, _model_score, _custom_endpoint_score, _set_model_live, _set_MODEL_REGISTRY
+import llm_client
 
 # Wczytaj .env jeśli istnieje
 _env_path = Path(__file__).parent / ".env"
@@ -742,6 +743,19 @@ APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
 # Ustaw TRUST_PROXY=true tylko jeśli aplikacja stoi za zaufanym reverse proxy (nginx/traefik)
 # który nadpisuje X-Forwarded-For — NIGDY nie włączaj gdy app jest dostępna z zewnątrz bez proxy
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
+
+# Inicjalizuj llm_client z bieżącymi zmiennymi konfiguracyjnymi
+llm_client._set_load_provider_pool(_load_provider_pool)
+llm_client._sync_llm_client_config(
+    GEMINI_API_KEY=GEMINI_API_KEY,
+    GEMINI_MODEL=GEMINI_MODEL,
+    OPENROUTER_API_KEY=OPENROUTER_API_KEY,
+    OPENROUTER_MODEL=OPENROUTER_MODEL,
+    OPENROUTER_MODEL_VERIFY=OPENROUTER_MODEL_VERIFY,
+    LLM_MODEL=LLM_MODEL,
+    GROQ_MODEL=GROQ_MODEL,
+    DEFAULT_LLM_PROVIDER=DEFAULT_LLM_PROVIDER,
+)
 
 _HEAVY_TASK_HISTORY_LIMIT = 20
 _heavy_task_mutex = threading.Lock()
@@ -1509,6 +1523,17 @@ def _apply_llm_config(cfg: dict):
         GEMINI_API_KEY = cfg["gemini_api_key"]
 
     APP_API_KEY = _effective_app_api_key(cfg)
+
+    # Synchronizuj konfigurację z llm_client
+    llm_client._sync_llm_client_config(
+        DEFAULT_LLM_PROVIDER=DEFAULT_LLM_PROVIDER,
+        OPENROUTER_API_KEY=OPENROUTER_API_KEY,
+        OPENROUTER_MODEL=OPENROUTER_MODEL,
+        OPENROUTER_MODEL_VERIFY=OPENROUTER_MODEL_VERIFY,
+        LLM_MODEL=LLM_MODEL,
+        GEMINI_MODEL=GEMINI_MODEL,
+        GEMINI_API_KEY=GEMINI_API_KEY,
+    )
 
 
 _apply_llm_config(_load_llm_config())
