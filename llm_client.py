@@ -1022,11 +1022,12 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
             headers = {"Content-Type": "application/json"}
             if key:
                 headers["Authorization"] = f"Bearer {key}"
+            probe_model = _effective_custom_endpoint_model(url, name, None)
             r = requests.post(
                 _openai_chat_completions_url(url),
                 headers=headers,
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": probe_model,
                     "messages": [{"role": "user", "content": "Say: OK"}],
                     "max_tokens": 5,
                 },
@@ -1283,6 +1284,13 @@ def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str,
 
 
 
+def _custom_endpoint_is_groq(url: str, name: str = "") -> bool:
+    """Czy URL/nazwa wskazuje na API Groq (OpenAI-compatible)."""
+    u = (url or "").lower()
+    n = (name or "").lower().strip()
+    return "groq.com" in u or n == "groq"
+
+
 def _custom_endpoint_is_openai(url: str) -> bool:
     """Czy URL wskazuje na OpenAI-compatible API (Groq, LM Studio, itp.)."""
     if _custom_endpoint_is_gemini(url) or _custom_endpoint_is_anthropic(url):
@@ -1369,7 +1377,9 @@ def _call_openai_compatible(url: str, key: str, prompt: str, system: str, stream
         return requests.post(chat_url, headers=headers, json=payload, stream=True, timeout=300)
     r = requests.post(chat_url, headers=headers, json=payload, timeout=180)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return {"response": content, "raw": data}
 
 
 
@@ -1498,7 +1508,17 @@ def _redact_api_keys(text: str) -> str:
 
 def _llm_response_text(result) -> str:
     if isinstance(result, dict):
-        return (result.get("response") or "").strip()
+        if result.get("response"):
+            return (result.get("response") or "").strip()
+        try:
+            return (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                or ""
+            ).strip()
+        except Exception:
+            return ""
     return str(result).strip()
 
 
@@ -1512,6 +1532,8 @@ def _effective_custom_endpoint_model(ep_url: str, ep_name: str, model: str | Non
         return (CLAUDE_MODEL or "claude-sonnet-4-6").strip()
     if _custom_endpoint_is_gemini(ep_url, ep_name):
         return _normalize_gemini_model(raw or GEMINI_MODEL)
+    if _custom_endpoint_is_groq(ep_url, ep_name):
+        return raw or (GROQ_MODEL or "llama-3.3-70b-versatile").strip()
     if _custom_endpoint_is_openai(ep_url):
         return raw or LLM_MODEL or "llama-3.3-70b-versatile"
     return raw or LLM_MODEL or ""

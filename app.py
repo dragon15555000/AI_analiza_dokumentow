@@ -48,6 +48,7 @@ from llm_client import (
     _custom_endpoint_is_anthropic,
     _test_claude_api,
     _test_openrouter_api_key,
+    _effective_custom_endpoint_model,
 )
 from task_queue import submit_task, get_task, update_task, cancel_task, get_task_status
 
@@ -1824,11 +1825,12 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
             headers = {"Content-Type": "application/json"}
             if key:
                 headers["Authorization"] = f"Bearer {key}"
+            probe_model = _effective_custom_endpoint_model(url, name, None)
             r = requests.post(
                 _openai_chat_completions_url(url),
                 headers=headers,
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": probe_model,
                     "messages": [{"role": "user", "content": "Say: OK"}],
                     "max_tokens": 5,
                 },
@@ -4679,6 +4681,11 @@ _SWARM_OR_SEMAPHORE = threading.Semaphore(2)
 
 def _format_swarm_worker_error(err: str) -> str:
     low = (err or "").lower()
+    if "404" in low and ("model" in low or "not found" in low):
+        return (
+            "Nieprawidłowy model dla tego endpointu (404). "
+            "Groq wymaga np. llama-3.3-70b-versatile — sprawdź GROQ_MODEL w .env."
+        )
     if "402" in low or "payment required" in low:
         return (
             "OpenRouter: brak kredytów (402). Doładuj konto na openrouter.ai "
