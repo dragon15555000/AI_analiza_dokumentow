@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import subprocess
 import platform
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from collections import defaultdict
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
@@ -3337,7 +3338,6 @@ def get_embedding(text: str) -> list:
 
 def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
     """Batch embeddings z mniejszą równoległością (domyślnie 6 zamiast 8), żeby mniej obciążać Ollamę."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     results = [None] * len(texts)
 
     def embed_one(idx_text):
@@ -5390,10 +5390,7 @@ def agents_swarm_stream():
                     'files': list({c['file'] for c in group})[:3],
                 })
 
-            # Równoległe wywołania LLM przez ThreadPoolExecutor
-            import queue as _q
-            result_queue: _q.Queue = _q.Queue()
-
+            # Równoległe wywołania LLM (ThreadPoolExecutor)
             def _run_worker(worker_id: int, context_chunks: list, model_id: str, model_name: str):
                 try:
                     ctx = "\n\n---\n\n".join(
@@ -5414,35 +5411,56 @@ def agents_swarm_stream():
                         model=model_id,
                     )
                     text = _llm_response_text(result)
-                    result_queue.put(('done', worker_id, text, model_name, None))
+                    return ('done', worker_id, text, model_name, None)
                 except Exception as exc:
-                    result_queue.put(('error', worker_id, None, model_name, str(exc)[:200]))
-
-            threads = []
-            for i, ((model_id, model_name), group) in enumerate(zip(models, groups)):
-                t = threading.Thread(target=_run_worker, args=(i, group, model_id, model_name), daemon=True)
-                t.start()
-                threads.append(t)
+                    return ('error', worker_id, None, model_name, str(exc)[:200])
 
             partial: dict[int, str] = {}
-            completed = 0
-            while completed < n_workers:
+            worker_timeout = 120
+            with ThreadPoolExecutor(max_workers=max(1, n_workers)) as ex:
+                futures = {
+                    ex.submit(_run_worker, i, group, model_id, model_name): i
+                    for i, ((model_id, model_name), group) in enumerate(zip(models, groups))
+                }
                 try:
-                    kind, wid, text, model_name, err = result_queue.get(timeout=120)
-                except Exception:
-                    yield sse('error', {'error': 'Timeout — workery nie odpowiedziały w czasie 120 s.'})
-                    return
-                if kind == 'done':
-                    partial[wid] = text
-                    yield sse('worker_done', {
-                        'worker_id': wid,
-                        'model': model_name,
-                        'preview': text[:240] + ('…' if len(text) > 240 else ''),
-                    })
-                else:
-                    partial[wid] = ''
-                    yield sse('worker_error', {'worker_id': wid, 'model': model_name, 'error': err})
-                completed += 1
+                    completed_futures = as_completed(futures, timeout=worker_timeout)
+                    for fut in completed_futures:
+                        wid = futures[fut]
+                        try:
+                            kind, worker_id, text, model_name, err = fut.result()
+                        except Exception as exc:
+                            partial[wid] = ''
+                            yield sse('worker_error', {
+                                'worker_id': wid,
+                                'model': models[wid][1] if wid < len(models) else '?',
+                                'error': str(exc)[:200],
+                            })
+                            continue
+                        if kind == 'done':
+                            partial[worker_id] = text
+                            yield sse('worker_done', {
+                                'worker_id': worker_id,
+                                'model': model_name,
+                                'preview': text[:240] + ('…' if len(text) > 240 else ''),
+                            })
+                        else:
+                            partial[worker_id] = ''
+                            yield sse('worker_error', {'worker_id': worker_id, 'model': model_name, 'error': err})
+                except FuturesTimeoutError:
+                    for fut, wid in futures.items():
+                        if fut.done():
+                            continue
+                        fut.cancel()
+                        partial[wid] = ''
+                        yield sse('worker_error', {
+                            'worker_id': wid,
+                            'model': models[wid][1] if wid < len(models) else '?',
+                            'error': f'Timeout — brak odpowiedzi w {worker_timeout} s',
+                        })
+
+            if len(partial) < n_workers:
+                yield sse('error', {'error': 'Timeout — workery nie odpowiedziały w czasie 120 s.'})
+                return
 
             # Synteza
             yield sse('synthesis_start', {'msg': 'Synteza wyników przez orkiestratora…'})
@@ -5590,14 +5608,12 @@ def models_ping_all():
     total_count = len(MODEL_REGISTRY) + len(custom_endpoints)
 
     def generate():
-        import queue as _q
         import json as _json
 
         def sse(event, data):
             payload = {"event": event, "data": data}
             return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
 
-        rq: _q.Queue = _q.Queue()
         yield sse('start', {'count': total_count})
 
         def _ping_model(mid: str):
@@ -5621,13 +5637,12 @@ def models_ping_all():
                 )
                 ms  = int((time.time() - t0) * 1000)
                 if r.status_code != 200:
-                    rq.put(('model', mid, False, ms, (r.text or f"HTTP {r.status_code}")[:120]))
-                    return
+                    return ('model', mid, False, ms, (r.text or f"HTTP {r.status_code}")[:120])
                 txt = _llm_response_text(r.json())
-                ok  = bool(txt and not txt.startswith('[') )
-                rq.put(('model', mid, ok, ms, None))
+                ok  = bool(txt and not txt.startswith('['))
+                return ('model', mid, ok, ms, None)
             except Exception as exc:
-                rq.put(('model', mid, False, int((time.time() - t0) * 1000), str(exc)[:120]))
+                return ('model', mid, False, int((time.time() - t0) * 1000), str(exc)[:120])
 
         def _ping_custom(endpoint_id: str, endpoint_url: str, endpoint_key: str, endpoint_name: str):
             t0 = time.time()
@@ -5635,74 +5650,84 @@ def models_ping_all():
                 health = _check_custom_endpoint_health(endpoint_url, endpoint_key, endpoint_name)
                 ms = int(health.get("ms") or ((time.time() - t0) * 1000))
                 ok = bool(health.get("ok"))
-                rq.put(('custom', endpoint_id, ok, ms, health.get("error")))
+                return ('custom', endpoint_id, ok, ms, health.get("error"))
             except Exception as exc:
                 ms = int((time.time() - t0) * 1000)
-                rq.put(('custom', endpoint_id, False, ms, str(exc)[:120]))
+                return ('custom', endpoint_id, False, ms, str(exc)[:120])
 
-        threads = [threading.Thread(target=_ping_model, args=(mid,), daemon=True)
-                   for mid in MODEL_REGISTRY]
-        threads.extend([
-            threading.Thread(
-                target=_ping_custom,
-                args=(e['id'], e['url'], e.get('key', ''), e.get('name', '')),
-                daemon=True,
-            )
+        ping_jobs = [( _ping_model, (mid,)) for mid in MODEL_REGISTRY]
+        ping_jobs.extend([
+            (_ping_custom, (e['id'], e['url'], e.get('key', ''), e.get('name', '')))
             for e in custom_endpoints
         ])
-        for t in threads: t.start()
 
         done = 0
-        while done < total_count:
+        max_workers = min(12, max(1, total_count))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(fn, *args) for fn, args in ping_jobs]
             try:
-                kind, eid, ok, ms, err = rq.get(timeout=90)
-            except Exception:
-                yield sse('timeout', {}); break
+                completed_futures = as_completed(futures, timeout=90)
+                for fut in completed_futures:
+                    try:
+                        kind, eid, ok, ms, err = fut.result()
+                    except Exception as exc:
+                        yield sse('result', {
+                            'kind': 'model',
+                            'model_id': '?',
+                            'ok': False, 'ms': 0, 'err': str(exc)[:120],
+                            'score': 0, 'avg_ms': None,
+                        })
+                        done += 1
+                        continue
 
-            if kind == 'model':
-                live = _model_live[eid]
-                live['ping_ok'] = ok; live['ping_ms'] = ms
-                live['ping_ts'] = time.time()
-                if ok:
-                    live['ok_count'] += 1
-                    prev = live.get('avg_ms')
-                    live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
-                else:
-                    live['err_count'] += 1
-                _save_model_live_stats(_model_live)
-                score = _model_score(eid)
-                live_copy = dict(live)
-                yield sse('result', {
-                    'kind': 'model',
-                    'model_id': eid,
-                    'ok': ok, 'ms': ms, 'err': err,
-                    'score': score,
-                    'avg_ms': live_copy.get('avg_ms'),
-                })
-            elif kind == 'custom':
-                all_stats = _load_custom_endpoint_stats()
-                stats = all_stats.get(eid, {
-                    "ping_ok": None, "ping_ms": None, "ping_ts": None,
-                    "err_count": 0, "ok_count": 0, "avg_ms": None
-                })
-                stats['ping_ok'] = ok
-                stats['ping_ms'] = ms
-                stats['ping_ts'] = time.time()
-                if ok:
-                    stats['ok_count'] += 1
-                    prev = stats.get('avg_ms')
-                    stats['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
-                else:
-                    stats['err_count'] += 1
-                all_stats[eid] = stats
-                _save_custom_endpoint_stats(all_stats)
-                yield sse('result', {
-                    'kind': 'custom',
-                    'endpoint_id': eid,
-                    'ok': ok, 'ms': ms, 'err': err,
-                    'avg_ms': stats.get('avg_ms'),
-                })
-            done += 1
+                    if kind == 'model':
+                        live = _model_live[eid]
+                        live['ping_ok'] = ok; live['ping_ms'] = ms
+                        live['ping_ts'] = time.time()
+                        if ok:
+                            live['ok_count'] += 1
+                            prev = live.get('avg_ms')
+                            live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
+                        else:
+                            live['err_count'] += 1
+                        _save_model_live_stats(_model_live)
+                        score = _model_score(eid)
+                        live_copy = dict(live)
+                        yield sse('result', {
+                            'kind': 'model',
+                            'model_id': eid,
+                            'ok': ok, 'ms': ms, 'err': err,
+                            'score': score,
+                            'avg_ms': live_copy.get('avg_ms'),
+                        })
+                    elif kind == 'custom':
+                        all_stats = _load_custom_endpoint_stats()
+                        stats = all_stats.get(eid, {
+                            "ping_ok": None, "ping_ms": None, "ping_ts": None,
+                            "err_count": 0, "ok_count": 0, "avg_ms": None
+                        })
+                        stats['ping_ok'] = ok
+                        stats['ping_ms'] = ms
+                        stats['ping_ts'] = time.time()
+                        if ok:
+                            stats['ok_count'] += 1
+                            prev = stats.get('avg_ms')
+                            stats['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
+                        else:
+                            stats['err_count'] += 1
+                        all_stats[eid] = stats
+                        _save_custom_endpoint_stats(all_stats)
+                        yield sse('result', {
+                            'kind': 'custom',
+                            'endpoint_id': eid,
+                            'ok': ok, 'ms': ms, 'err': err,
+                            'avg_ms': stats.get('avg_ms'),
+                        })
+                    done += 1
+            except FuturesTimeoutError:
+                for fut in futures:
+                    fut.cancel()
+                yield sse('timeout', {})
 
         yield sse('done', {'pinged': done})
 
