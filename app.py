@@ -1605,36 +1605,6 @@ def save_llm_config():
     return jsonify({"success": True, "message": "Konfiguracja LLM zapisana"})
 
 
-@app.route('/claude_test', methods=['POST'])
-def claude_test():
-    """Testowy endpoint integracji z Anthropic Claude."""
-    auth = _require_api_key()
-    if auth:
-        return auth
-    try:
-        data = request.get_json() or {}
-        user_message = (data.get("message") or "Cześć Claude, jak się masz?").strip()
-        if not user_message:
-            return jsonify({"success": False, "error": "Pole message jest puste"}), 400
-
-        result = call_llm(
-            prompt=user_message,
-            system="Jesteś pomocnym asystentem AI. Odpowiadaj zwięźle i po polsku.",
-            stream=False,
-            provider="claude",
-            model=data.get("model") or None,
-        )
-        return jsonify({
-            "success": True,
-            "response": _llm_response_text(result),
-            "model": data.get("model") or CLAUDE_MODEL,
-            "usage": _llm_usage_from_result(result),
-        })
-    except Exception as e:
-        logger.exception("claude_test error")
-        return jsonify({"success": False, "error": str(e)[:300]}), 500
-
-
 # ============================================================
 # LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
 # ============================================================

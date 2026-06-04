@@ -7839,7 +7839,7 @@ function initClaudeTestPanel() {
             if (data.success) {
                 responseBox.textContent = data.response || 'Brak treści odpowiedzi.';
             } else {
-                responseBox.textContent = 'Błąd po stronie serwera:\n' + (data.message || 'nieznany');
+                responseBox.textContent = 'Błąd po stronie serwera:\n' + (data.error || data.message || 'nieznany');
             }
         } catch (error) {
             responseBox.textContent = 'Błąd połączenia:\n' + (error.message || String(error));
