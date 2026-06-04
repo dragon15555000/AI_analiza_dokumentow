@@ -22,6 +22,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 from prompts import SEARCH_MODES, MODEL_REGISTRY, VERIFY_SYSTEM_PROMPT, VERIFY_PROMPT_TEMPLATE, DETECTIVE_PROMPT_TEMPLATE, DEFAULT_PROMPT_TEMPLATE, CHAT_CONTEXT_BLOCK_TEMPLATE
 from sql_safety import _is_sql_safe, _extract_sql_table_refs, _validate_sql_table_refs, DANGEROUS_SQL_KEYWORDS
+from models_fleet import _load_custom_endpoint_stats, _save_custom_endpoint_stats, _get_or_init_endpoint_stats, _load_model_live_stats, _save_model_live_stats, _model_score, _custom_endpoint_score, _set_model_live, _set_MODEL_REGISTRY
 
 # Wczytaj .env jeśli istnieje
 _env_path = Path(__file__).parent / ".env"
@@ -732,55 +733,7 @@ def _ollama_url_for_provider(provider: str | None = None) -> str:
     return _pick_ollama_url()
 
 # ---- Custom Endpoint Health & Stats ----
-_CUSTOM_STATS_FILE = Path(__file__).parent / ".llm_custom_endpoint_stats.json"
-_MODEL_LIVE_FILE = Path(__file__).parent / ".llm_model_live_stats.json"
-_custom_stats_lock = threading.Lock()
-_model_live_lock = threading.Lock()
 
-def _load_custom_endpoint_stats() -> dict:
-    """Wczytuje statystyki custom endpointów z pliku JSON."""
-    try:
-        if _CUSTOM_STATS_FILE.exists():
-            return json.loads(_CUSTOM_STATS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-def _save_custom_endpoint_stats(stats: dict) -> None:
-    """Zapisuje statystyki custom endpointów do pliku JSON."""
-    with _custom_stats_lock:
-        _CUSTOM_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
-
-def _get_or_init_endpoint_stats(endpoint_id: str) -> dict:
-    """Zwraca lub inicjalizuje strukturę statystyk dla endpointu."""
-    stats = _load_custom_endpoint_stats()
-    if endpoint_id not in stats:
-        stats[endpoint_id] = {
-            "ping_ok": None, "ping_ms": None, "ping_ts": None,
-            "err_count": 0, "ok_count": 0, "avg_ms": None
-        }
-        _save_custom_endpoint_stats(stats)
-    return stats[endpoint_id]
-
-
-def _load_model_live_stats() -> dict:
-    """Wczytuje utrwalone pingi wbudowanych modeli floty."""
-    try:
-        if _MODEL_LIVE_FILE.exists():
-            data = json.loads(_MODEL_LIVE_FILE.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-    except Exception as exc:
-        logger.debug("Nie wczytano statystyk modeli: %s", exc)
-    return {}
-
-
-def _save_model_live_stats(stats: dict) -> None:
-    """Zapisuje pingi wbudowanych modeli floty."""
-    try:
-        with _model_live_lock:
-            _MODEL_LIVE_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
-    except OSError as exc:
-        logger.warning("Nie zapisano statystyk modeli: %s", exc)
 
 APP_API_KEY_ENV = os.environ.get("APP_API_KEY", "").strip()
 APP_API_KEY = APP_API_KEY_ENV
@@ -3421,49 +3374,17 @@ for _mid in MODEL_REGISTRY:
         _defaults.update({k: _saved.get(k) for k in _defaults if k in _saved})
     _model_live[_mid] = _defaults
 
-
-def _model_score(model_id: str) -> float:
-    """Ranking 0–100. Jakość 40% + szybkość 30% + dostępność 30%."""
-    reg = MODEL_REGISTRY.get(model_id, {})
-    live = _model_live.get(model_id, {})
-    if live.get("ping_ok") is False:
-        return 0.0
-    quality = (reg.get("quality_tier", 1) - 1) / 2 * 40
-    speed   = (4 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej
-    if live.get("ping_ok") is True:
-        ms = live.get("avg_ms") or live.get("ping_ms") or 15000
-        avail = max(0.0, 30.0 - ms / 500.0)
-    else:
-        avail = 12.0  # nieznany — neutralny
-    return round(quality + speed + avail, 1)
+# Inicjalizuj models_fleet z globalnym stanem
+_set_model_live(_model_live)
+_set_MODEL_REGISTRY(MODEL_REGISTRY)
 
 
-def _custom_endpoint_score(endpoint_id: str) -> float:
-    """Ranking custom endpointu 0-100 na bazie dostepnosci i szybkosci."""
-    stats = _load_custom_endpoint_stats().get(endpoint_id, {})
-    if stats.get("ping_ok") is False:
-        return 0.0
-    if stats.get("ping_ok") is True:
-        ms = stats.get("avg_ms") or stats.get("ping_ms") or 8000
-        score = max(0.0, 70.0 - ms / 1000.0)
-    else:
-        score = 40.0
-    return round(score, 1)
-
-
-def _get_best_custom_endpoints(limit: int = 3) -> list[tuple]:
-    """Zwraca rankingowe custom endpointy (model_id, model_name) posortowane po score."""
+# Wrapper dla models_fleet._get_best_custom_endpoints — dostarcz provider_pool
+def _get_best_custom_endpoints_wrapper(limit: int = 3) -> list[tuple]:
+    """Wrapper dostarcza provider_pool do models_fleet._get_best_custom_endpoints."""
+    from models_fleet import _get_best_custom_endpoints as _get_best_from_fleet
     pool = _load_provider_pool()
-    endpoints = []
-    for endpoint in pool.get("custom_endpoints", []):
-        if not endpoint.get("active"):
-            continue
-        eid = endpoint.get("id")
-        name = endpoint.get("name", endpoint.get("url"))
-        score = _custom_endpoint_score(eid)
-        endpoints.append((eid, name, score))
-    endpoints.sort(key=lambda x: x[2], reverse=True)
-    return [(eid, name) for eid, name, _ in endpoints[:limit]]
+    return _get_best_from_fleet(limit=limit, provider_pool=pool)
 
 
 def _embedding_query_for_mode(query_text: str, mode: str) -> str:
@@ -5401,7 +5322,7 @@ def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
     import random as _rnd
     pool = list(FREE_MODELS_LIST)
 
-    custom_endpoints = _get_best_custom_endpoints(limit=2)
+    custom_endpoints = _get_best_custom_endpoints_wrapper(limit=2)
     if custom_endpoints:
         pool.extend(custom_endpoints)
 
