@@ -729,6 +729,15 @@ except ValueError:
 
 GEMINI_AUDIT_EXTENSIONS = {".log", ".txt", ".json", ".out", ".err", ".md", ".csv", ".xml"}
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+try:
+    GEMINI_MAX_RETRIES = max(1, int(os.environ.get("GEMINI_MAX_RETRIES", "5")))
+except ValueError:
+    GEMINI_MAX_RETRIES = 5
+try:
+    GEMINI_RETRY_INITIAL_DELAY = max(0.5, float(os.environ.get("GEMINI_RETRY_INITIAL_DELAY", "2.5")))
+except ValueError:
+    GEMINI_RETRY_INITIAL_DELAY = 2.5
+GEMINI_RETRY_MAX_WAIT_SEC = 60.0
 
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
@@ -1692,6 +1701,30 @@ def _gemini_auth_headers(api_key: str | None = None) -> dict[str, str]:
     return {"x-goog-api-key": key}
 
 
+def _gemini_retry_wait_seconds(delay: float, retry_after: str | None) -> float:
+    if retry_after:
+        try:
+            return max(0.5, min(GEMINI_RETRY_MAX_WAIT_SEC, float(retry_after)))
+        except Exception:
+            pass
+    return min(delay, GEMINI_RETRY_MAX_WAIT_SEC)
+
+
+def _gemini_error_message(status: int | None, detail: str = "") -> str:
+    if status == 429:
+        return (
+            "Limit zapytań Gemini (429). Odczekaj 30–60 s, przełącz na Groq/OpenRouter "
+            "lub ogranicz częstotliwość zapytań (darmowy tier ma niski RPM)."
+        )
+    if status == 404:
+        return f"Model Gemini niedostępny (404). {detail}".strip()
+    if status == 403:
+        return "Odmowa dostępu Gemini (403) — sprawdź klucz API (format AIzaSy… z AI Studio)."
+    if detail:
+        return _redact_api_keys(detail)[:240]
+    return f"Błąd Gemini (HTTP {status})"
+
+
 def _gemini_generate_url(model: str, stream: bool = False) -> str:
     action = "streamGenerateContent" if stream else "generateContent"
     suffix = "?alt=sse" if stream else ""
@@ -1706,57 +1739,74 @@ def _is_gemini_base_url(url: str, provider_name: str = "") -> bool:
 
 def _gemini_request_with_retry(method: str, url: str, *, api_key: str | None = None,
                                timeout: int = 60,
-                               max_retries: int = 3, initial_delay: float = 1.5,
+                               max_retries: int | None = None,
+                               initial_delay: float | None = None,
                                **kwargs):
     """Wysyła request do Gemini z nagłówkiem x-goog-api-key i backoff przy 429."""
-    delay = initial_delay
+    retries = GEMINI_MAX_RETRIES if max_retries is None else max_retries
+    delay = GEMINI_RETRY_INITIAL_DELAY if initial_delay is None else initial_delay
     last_error = None
+    last_status = None
+    last_body = ""
     headers = dict(kwargs.pop("headers", None) or {})
     headers.update(_gemini_auth_headers(api_key))
     if kwargs.get("json") is not None and "Content-Type" not in headers:
         headers.setdefault("Content-Type", "application/json")
 
-    for attempt in range(max_retries):
+    for attempt in range(retries):
         try:
             response = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
-            if response.status_code == 429 and attempt < max_retries - 1:
-                retry_after = response.headers.get("Retry-After")
-                wait = delay
-                if retry_after:
-                    try:
-                        wait = max(0.5, float(retry_after))
-                    except Exception:
-                        pass
+            last_status = response.status_code
+            last_body = (response.text or "")[:400]
+            if response.status_code == 429 and attempt < retries - 1:
+                wait = _gemini_retry_wait_seconds(
+                    delay, response.headers.get("Retry-After"),
+                )
+                logger.warning(
+                    "Gemini 429 (próba %s/%s) — czekam %.1fs",
+                    attempt + 1, retries, wait,
+                )
                 time.sleep(wait)
-                delay *= 2
+                delay = min(delay * 2, GEMINI_RETRY_MAX_WAIT_SEC)
                 continue
+
+            if response.status_code == 429:
+                raise RuntimeError(_gemini_error_message(429, last_body))
 
             response.raise_for_status()
             return response
         except requests.HTTPError as exc:
             last_error = exc
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status == 429 and attempt < max_retries - 1:
+            last_status = status
+            if getattr(exc, "response", None) is not None:
+                last_body = (exc.response.text or "")[:400]
+            if status == 429 and attempt < retries - 1:
                 retry_after = getattr(exc.response, "headers", {}).get("Retry-After") if getattr(exc, "response", None) is not None else None
-                wait = delay
-                if retry_after:
-                    try:
-                        wait = max(0.5, float(retry_after))
-                    except Exception:
-                        pass
+                wait = _gemini_retry_wait_seconds(delay, retry_after)
+                logger.warning(
+                    "Gemini 429 HTTPError (próba %s/%s) — czekam %.1fs",
+                    attempt + 1, retries, wait,
+                )
                 time.sleep(wait)
-                delay *= 2
+                delay = min(delay * 2, GEMINI_RETRY_MAX_WAIT_SEC)
                 continue
-            raise
+            if status == 429:
+                raise RuntimeError(_gemini_error_message(429, last_body)) from exc
+            raise RuntimeError(_gemini_error_message(status, last_body or str(exc))) from exc
         except requests.RequestException as exc:
             last_error = exc
-            if attempt < max_retries - 1 and "429" in str(exc):
-                time.sleep(delay)
-                delay *= 2
+            if attempt < retries - 1 and "429" in str(exc):
+                time.sleep(min(delay, GEMINI_RETRY_MAX_WAIT_SEC))
+                delay = min(delay * 2, GEMINI_RETRY_MAX_WAIT_SEC)
                 continue
-            raise
+            raise RuntimeError(_gemini_error_message(last_status, str(exc))) from exc
 
-    raise last_error if last_error else RuntimeError("Gemini request failed")
+    raise RuntimeError(
+        _gemini_error_message(last_status or 429, last_body)
+        if last_status == 429
+        else (str(last_error) if last_error else "Gemini request failed")
+    )
 
 
 def _check_gemini_health() -> dict:
@@ -1836,13 +1886,14 @@ def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = Non
     if system:
         payload["systemInstruction"] = {"parts": [{"text": system}]}
     try:
-        with _gemini_request_with_retry("POST", url, json=payload, stream=True, timeout=600, max_retries=3) as r:
+        with _gemini_request_with_retry("POST", url, json=payload, stream=True, timeout=600) as r:
             if r.status_code >= 400:
                 if r.status_code == 404:
                     yield f"[Błąd Gemini: {_gemini_model_hint(GEMINI_API_KEY, effective_model)}]"
+                elif r.status_code == 429:
+                    yield f"[RATE_LIMIT] {_gemini_error_message(429)}"
                 else:
-                    err_body = (r.text or "")[:400]
-                    yield f"[Błąd Gemini streaming: HTTP {r.status_code} — {err_body}]"
+                    yield f"[Błąd Gemini streaming: {_gemini_error_message(r.status_code, r.text[:400])}]"
                 return
             r.raise_for_status()
             for line in r.iter_lines(decode_unicode=True):
@@ -1957,24 +2008,16 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
         return {"ok": False, "error": "Brak URL"}
     try:
         if _custom_endpoint_is_gemini(url, name):
+            api_key = _gemini_key_from_url_or_value(url, key)
             t0 = time.time()
-            try:
-                result = _call_gemini_custom_endpoint(
-                    url, key, "Odpowiedz jednym słowem: OK", "", False,
-                    GEMINI_MODEL, max_tokens=5, temperature=0.0,
-                )
-                ms = int((time.time() - t0) * 1000)
-                ok = bool(_llm_response_text(result))
-                message = "OK" if ok else "Pusta odpowiedź Gemini"
-            except Exception as exc:
-                ms = int((time.time() - t0) * 1000)
-                ok = False
-                message = _redact_api_keys(str(exc))[:200]
+            ok, message, ms = _test_gemini_api(api_key)
+            if ok:
+                return {"ok": True, "url": url, "ms": ms, "error": None}
             return {
-                "ok": ok,
+                "ok": False,
                 "url": url,
-                "ms": ms,
-                "error": None if ok else message,
+                "ms": ms or int((time.time() - t0) * 1000),
+                "error": message,
             }
 
         if _custom_endpoint_is_openai(url):
@@ -2878,22 +2921,16 @@ def _call_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
         raise RuntimeError("Brak klucza API Gemini")
     req_url = _gemini_custom_generate_url(url, api_key, model or GEMINI_MODEL, stream=stream)
     payload = _gemini_generate_payload(prompt, system, max_tokens, temperature)
-    if stream:
-        return requests.post(
-            req_url,
-            json=payload,
-            headers=_gemini_auth_headers(api_key),
-            stream=True,
-            timeout=300,
-        )
     r = _gemini_request_with_retry(
         "POST",
         req_url,
         api_key=api_key,
         json=payload,
-        timeout=180,
+        stream=stream,
+        timeout=300 if stream else 180,
     )
-    r.raise_for_status()
+    if stream:
+        return r
     data = r.json()
     return {"response": _gemini_response_text(data), "raw": data}
 
@@ -2906,6 +2943,12 @@ def _stream_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
         with _call_gemini_custom_endpoint(
             url, key, prompt, system, True, model, max_tokens, temperature
         ) as r:
+            if r.status_code == 429:
+                yield f"[RATE_LIMIT] {_gemini_error_message(429)}"
+                return
+            if r.status_code >= 400:
+                yield f"[Błąd Gemini custom streaming: {_gemini_error_message(r.status_code, (r.text or '')[:400])}]"
+                return
             r.raise_for_status()
             for line in r.iter_lines():
                 if not line:
@@ -2921,7 +2964,11 @@ def _stream_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
                 except Exception:
                     continue
     except Exception as exc:
-        yield f"[Błąd Gemini custom streaming: {_redact_api_keys(str(exc))}]"
+        msg = str(exc)
+        if "429" in msg or "Limit zapytań Gemini" in msg:
+            yield f"[RATE_LIMIT] {_gemini_error_message(429)}"
+        else:
+            yield f"[Błąd Gemini custom streaming: {_redact_api_keys(msg)}]"
 
 
 def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str, int]:

@@ -7,6 +7,7 @@ cd "$ROOT"
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:5000}"
 SKIP_E2E=0
+FULL_LLM=0
 QUERY="${TEST_QUERY:-umowa}"
 
 usage() {
@@ -17,6 +18,7 @@ Testy integracyjne (wymaga działającej aplikacji na :5000):
   - py_compile app.py, wsgi.py
   - GET /health (Qdrant, embedding, LLM)
   - Groq chat API (compound-mini, llama-3.3-70b, compound)
+    Domyślnie: jeden lekki test skonfigurowanego providera; pełna macierz po --full-llm.
   - GET /api/config/llm
   - GET /api/swarm/modes + walidacja POST /agents/swarm (bez pełnego LLM)
   - GET /api/llm/fleet (cache, bez sondy)
@@ -24,6 +26,7 @@ Testy integracyjne (wymaga działającej aplikacji na :5000):
 
 Opcje:
   --skip-e2e      Pomiń test /search/stream (wolniejszy)
+  --full-llm      Uruchom pełną macierz zewnętrznych testów LLM (kosztowniejsze, limity API)
   --base-url URL  Domyślnie http://127.0.0.1:5000
   -h, --help      Ta pomoc
 
@@ -38,6 +41,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-e2e) SKIP_E2E=1; shift ;;
+    --full-llm) FULL_LLM=1; shift ;;
     --base-url) BASE_URL="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Nieznana opcja: $1" >&2; usage >&2; exit 2 ;;
@@ -66,7 +70,7 @@ fi
 # Tylko znaki ASCII (unika 401 przez śmieci z komentarza w .env)
 _raw_key="${APP_API_KEY:-$(read_env APP_API_KEY)}"
 export APP_API_KEY="$(printf '%s' "$_raw_key" | tr -cd '[:alnum:]')"
-export BASE_URL SKIP_E2E QUERY
+export BASE_URL SKIP_E2E FULL_LLM QUERY
 
 exec "$ROOT/venv/bin/python" - <<'PY'
 import json
@@ -82,6 +86,7 @@ ROOT = Path(__file__).resolve().parent if "__file__" in dir() else Path.cwd()
 ROOT = Path.cwd()
 BASE = os.environ.get("BASE_URL", "http://127.0.0.1:5000").rstrip("/")
 SKIP_E2E = os.environ.get("SKIP_E2E", "0") == "1"
+FULL_LLM = os.environ.get("FULL_LLM", "0") == "1"
 QUERY = os.environ.get("QUERY", "umowa")
 API_KEY = os.environ.get("APP_API_KEY", "").strip()
 
@@ -173,7 +178,7 @@ try:
         llm = h.get("llm", {})
         check("  llm", llm.get("ok"), safe_detail(llm.get("detail", "")))
         prov = h.get("provider", "")
-        check("  provider", prov in ("groq", "openrouter", "ollama"), prov)
+        check("  provider", prov in ("groq", "openrouter", "ollama", "gemini"), prov)
 except requests.RequestException as e:
     check("/health", False, str(e)[:100])
 
@@ -188,7 +193,35 @@ try:
 except requests.RequestException as e:
     check("/tasks", False, str(e)[:80])
 
-# 3. Groq API
+# 3. Jednorazowy test aktywnego providera LLM przez aplikację.
+try:
+    cfg_resp = requests.get(f"{BASE}/api/config/llm", headers=headers(), timeout=10)
+    provider_for_probe = ""
+    if cfg_resp.status_code == 200:
+        provider_for_probe = (cfg_resp.json().get("provider") or "").strip().lower()
+
+    provider_probe_map = {
+        "openrouter": "default_openrouter",
+        "ollama": "default_ollama",
+        "gemini": "default_gemini",
+    }
+    probe_id = provider_probe_map.get(provider_for_probe)
+    if probe_id:
+        probe = requests.post(f"{BASE}/api/providers/{probe_id}/test", headers=headers(), timeout=45)
+        if probe.status_code == 401:
+            check("LLM provider probe", False, "401")
+        else:
+            payload = probe.json()
+            detail = f"provider={provider_for_probe} model={payload.get('model') or ''} {payload.get('error') or ''}"
+            check("LLM provider probe", payload.get("success") is True, safe_detail(detail))
+    elif provider_for_probe == "groq":
+        check("LLM provider probe", True, "provider=groq (custom/pool; pełny test: --full-llm)")
+    else:
+        check("LLM provider probe", False, f"unknown provider={provider_for_probe or '?'}")
+except requests.RequestException as e:
+    check("LLM provider probe", False, str(e)[:80])
+
+# 3b. Groq API — pełna macierz tylko na żądanie.
 groq_keys: list[str] = []
 llm_cfg = ROOT / ".llm_config.json"
 if llm_cfg.exists():
@@ -209,10 +242,10 @@ if not groq_keys and (ROOT / ".env").exists():
     groq_keys.extend(env_candidates)
 
 groq_keys = [key for key in groq_keys if is_groq_key(key)]
-if not groq_keys:
+if FULL_LLM and not groq_keys:
     check("Groq API", False, "brak poprawnego GROQ_API_KEY/GROQ_API_KEYS w .llm_config.json lub .env")
 
-if groq_keys:
+if FULL_LLM and groq_keys:
     url = "https://api.groq.com/openai/v1/chat/completions"
     groq_key = groq_keys[0]
     if len(groq_keys) > 1:
@@ -236,6 +269,8 @@ if groq_keys:
                 check(f"Groq API {model}", False, err[:100])
         except requests.RequestException as e:
             check(f"Groq API {model}", False, str(e)[:80])
+else:
+    print("SKIP: Groq API matrix (--full-llm aby uruchomić)")
 
 # 4. Config LLM
 try:
