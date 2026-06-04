@@ -788,7 +788,9 @@ def _ollama_url_for_provider(provider: str | None = None) -> str:
 
 # ---- Custom Endpoint Health & Stats ----
 _CUSTOM_STATS_FILE = Path(__file__).parent / ".llm_custom_endpoint_stats.json"
+_MODEL_LIVE_FILE = Path(__file__).parent / ".llm_model_live_stats.json"
 _custom_stats_lock = threading.Lock()
+_model_live_lock = threading.Lock()
 
 def _load_custom_endpoint_stats() -> dict:
     """Wczytuje statystyki custom endpointów z pliku JSON."""
@@ -814,6 +816,26 @@ def _get_or_init_endpoint_stats(endpoint_id: str) -> dict:
         }
         _save_custom_endpoint_stats(stats)
     return stats[endpoint_id]
+
+
+def _load_model_live_stats() -> dict:
+    """Wczytuje utrwalone pingi wbudowanych modeli floty."""
+    try:
+        if _MODEL_LIVE_FILE.exists():
+            data = json.loads(_MODEL_LIVE_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.debug("Nie wczytano statystyk modeli: %s", exc)
+    return {}
+
+
+def _save_model_live_stats(stats: dict) -> None:
+    """Zapisuje pingi wbudowanych modeli floty."""
+    try:
+        with _model_live_lock:
+            _MODEL_LIVE_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Nie zapisano statystyk modeli: %s", exc)
 
 APP_API_KEY = os.environ.get("APP_API_KEY", "").strip()
 APP_HOST    = os.environ.get("APP_HOST", "127.0.0.1")
@@ -1460,7 +1482,7 @@ def _apply_llm_config(cfg: dict):
     """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
-    global OLLAMA_URL, LLM_MODEL, APP_API_KEY, GEMINI_MODEL
+    global OLLAMA_URL, LLM_MODEL, APP_API_KEY, GEMINI_MODEL, GEMINI_API_KEY
 
     if cfg.get("provider"):
         DEFAULT_LLM_PROVIDER = cfg["provider"]
@@ -1478,6 +1500,8 @@ def _apply_llm_config(cfg: dict):
         LLM_MODEL = cfg["llm_model"]
     if cfg.get("gemini_model"):
         GEMINI_MODEL = cfg["gemini_model"]
+    if cfg.get("gemini_api_key"):
+        GEMINI_API_KEY = cfg["gemini_api_key"]
 
     # Obsługa klucza API aplikacji (do ochrony endpointów)
     if cfg.get("app_api_key"):
@@ -1501,6 +1525,7 @@ def get_llm_config():
         return auth
 
     cfg = _load_llm_config()
+    env_gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
     # Zawsze zwracamy tylko flagi "czy klucz jest ustawiony" — nigdy preview kluczy
     return jsonify({
@@ -1515,6 +1540,7 @@ def get_llm_config():
 
         # Bezpieczne flagi zamiast podglądów kluczy
         "openrouter_key_set": bool(cfg.get("openrouter_key")),
+        "gemini_key_set": bool(cfg.get("gemini_api_key") or env_gemini_key or GEMINI_API_KEY),
         "app_api_key_set": bool(cfg.get("app_api_key")),
     })
 
@@ -1540,6 +1566,8 @@ def save_llm_config():
     # Klucze — zapisujemy tylko jeśli użytkownik je podał (nie nadpisujemy pustymi)
     if data.get("openrouter_key"):
         current["openrouter_key"] = data["openrouter_key"]
+    if data.get("gemini_api_key"):
+        current["gemini_api_key"] = data["gemini_api_key"]
     if "app_api_key" in data:
         current["app_api_key"] = data["app_api_key"] or ""
 
@@ -1908,6 +1936,30 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
                 "url": url,
                 "ms": ms,
                 "error": None if ok else message,
+            }
+
+        if _custom_endpoint_is_openai(url):
+            t0 = time.time()
+            headers = {"Content-Type": "application/json"}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            r = requests.post(
+                _openai_chat_completions_url(url),
+                headers=headers,
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": "Say: OK"}],
+                    "max_tokens": 5,
+                },
+                timeout=20,
+            )
+            ms = int((time.time() - t0) * 1000)
+            return {
+                "ok": r.status_code == 200,
+                "url": url,
+                "ms": ms,
+                "status": r.status_code,
+                "error": None if r.status_code == 200 else (r.text or "")[:200],
             }
 
         headers = {}
@@ -3219,12 +3271,22 @@ MODEL_REGISTRY: dict = {
     },
 }
 
-# Statystyki live (reset przy restarcie)
-_model_live: dict = {
-    mid: {"ping_ok": None, "ping_ms": None, "ping_ts": None,
-          "err_count": 0, "ok_count": 0, "avg_ms": None}
-    for mid in MODEL_REGISTRY
-}
+# Statystyki pingów modeli floty (utrwalane między restartami).
+_persisted_model_live = _load_model_live_stats()
+_model_live: dict = {}
+for _mid in MODEL_REGISTRY:
+    _defaults = {
+        "ping_ok": None,
+        "ping_ms": None,
+        "ping_ts": None,
+        "err_count": 0,
+        "ok_count": 0,
+        "avg_ms": None,
+    }
+    _saved = _persisted_model_live.get(_mid, {})
+    if isinstance(_saved, dict):
+        _defaults.update({k: _saved.get(k) for k in _defaults if k in _saved})
+    _model_live[_mid] = _defaults
 
 
 def _model_score(model_id: str) -> float:
@@ -5378,6 +5440,37 @@ def models_registry_endpoint():
     return jsonify({"success": True, "models": out})
 
 
+@app.route('/api/llm/fleet', methods=['GET'])
+def llm_fleet_endpoint():
+    """Kompatybilny endpoint floty LLM używany przez testy i starszy frontend."""
+    task = request.args.get("task", "general").strip() or "general"
+    models_payload = models_registry_endpoint().get_json() or {}
+    models = models_payload.get("models") or {}
+    providers = []
+    for model_id, info in models.items():
+        providers.append({
+            "id": model_id,
+            "model_id": model_id,
+            "name": info.get("name") or info.get("short") or model_id,
+            "provider": info.get("provider", ""),
+            "score": info.get("score", 0),
+            "ping_ms": (info.get("live") or {}).get("avg_ms") or (info.get("live") or {}).get("ping_ms"),
+            "ping_ok": (info.get("live") or {}).get("ping_ok"),
+            "context_k": info.get("context_k"),
+            "rate_rpm": info.get("rate_rpm"),
+            "rate_day": info.get("rate_day"),
+            "tags": info.get("tags", []),
+        })
+    providers.sort(key=lambda item: item.get("score") or 0, reverse=True)
+    return jsonify({
+        "success": True,
+        "task": task,
+        "auto_route": bool(_load_llm_config().get("fleet_auto_route", False)),
+        "providers": providers,
+        "models": models,
+    })
+
+
 @app.route('/api/models/ping/all', methods=['POST'])
 def models_ping_all():
     """SSE: pinguje wszystkie modele + custom endpointy równolegle i streamuje wyniki."""
@@ -5401,31 +5494,39 @@ def models_ping_all():
         def _ping_model(mid: str):
             t0 = time.time()
             try:
-                res = call_llm(prompt=TEST, system="", stream=False,
-                               provider='openrouter', model=mid)
-                txt = _llm_response_text(res)
+                r = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {_pick_openrouter_key()}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost",
+                        "X-Title": "AI Analiza Dokumentów",
+                    },
+                    json={
+                        "model": mid,
+                        "messages": [{"role": "user", "content": TEST}],
+                        "max_tokens": 5,
+                        "temperature": 0.0,
+                    },
+                    timeout=30,
+                )
                 ms  = int((time.time() - t0) * 1000)
+                if r.status_code != 200:
+                    rq.put(('model', mid, False, ms, (r.text or f"HTTP {r.status_code}")[:120]))
+                    return
+                txt = _llm_response_text(r.json())
                 ok  = bool(txt and not txt.startswith('[') )
                 rq.put(('model', mid, ok, ms, None))
             except Exception as exc:
                 rq.put(('model', mid, False, int((time.time() - t0) * 1000), str(exc)[:120]))
 
-        def _ping_custom(endpoint_id: str, endpoint_url: str, endpoint_key: str):
+        def _ping_custom(endpoint_id: str, endpoint_url: str, endpoint_key: str, endpoint_name: str):
             t0 = time.time()
             try:
-                headers = {}
-                if endpoint_key:
-                    headers["Authorization"] = f"Bearer {endpoint_key}"
-                url_clean = endpoint_url.rstrip("/")
-                req = urllib.request.Request(
-                    f"{url_clean}/api/tags",
-                    headers=headers if headers else None,
-                    method="GET"
-                )
-                with urllib.request.urlopen(req, timeout=5) as r:
-                    ms = int((time.time() - t0) * 1000)
-                    ok = r.status == 200
-                    rq.put(('custom', endpoint_id, ok, ms, None))
+                health = _check_custom_endpoint_health(endpoint_url, endpoint_key, endpoint_name)
+                ms = int(health.get("ms") or ((time.time() - t0) * 1000))
+                ok = bool(health.get("ok"))
+                rq.put(('custom', endpoint_id, ok, ms, health.get("error")))
             except Exception as exc:
                 ms = int((time.time() - t0) * 1000)
                 rq.put(('custom', endpoint_id, False, ms, str(exc)[:120]))
@@ -5433,7 +5534,11 @@ def models_ping_all():
         threads = [threading.Thread(target=_ping_model, args=(mid,), daemon=True)
                    for mid in MODEL_REGISTRY]
         threads.extend([
-            threading.Thread(target=_ping_custom, args=(e['id'], e['url'], e.get('key', '')), daemon=True)
+            threading.Thread(
+                target=_ping_custom,
+                args=(e['id'], e['url'], e.get('key', ''), e.get('name', '')),
+                daemon=True,
+            )
             for e in custom_endpoints
         ])
         for t in threads: t.start()
@@ -5455,6 +5560,7 @@ def models_ping_all():
                     live['avg_ms'] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
                 else:
                     live['err_count'] += 1
+                _save_model_live_stats(_model_live)
                 score = _model_score(eid)
                 live_copy = dict(live)
                 yield sse('result', {

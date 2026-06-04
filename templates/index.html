@@ -1392,6 +1392,18 @@ table { margin: 0; }
           <label class="form-label small fw-bold mb-1">Model Gemini</label>
           <input type="text" id="cfgGeminiModel" class="form-control form-control-sm font-monospace" placeholder="gemini-2.0-flash">
         </div>
+        <div class="col-md-6" id="cfgGeminiKeyWrap">
+          <label class="form-label small fw-bold mb-1">
+            Gemini API Key
+            <span id="cfgGeminiKeyStatus" class="text-muted small"></span>
+          </label>
+          <input type="password" id="cfgGeminiKey" class="form-control form-control-sm font-monospace"
+            placeholder="AIza… (zostaw puste, by nie zmieniać)" autocomplete="off">
+          <div class="form-text" style="font-size:0.75rem;">
+            Wymagany dla <strong>Audyt logów</strong> i providera Gemini.
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>
+          </div>
+        </div>
         <!-- OpenRouter -->
         <div class="col-md-6" id="cfgOrKeyWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">OpenRouter API Key <span id="cfgOrKeyStatus" class="text-muted small"></span></label>
@@ -6452,6 +6464,12 @@ function llmConfigLoad() {
             document.getElementById('cfgOllamaUrl').value = d.ollama_url || '';
             document.getElementById('cfgLlmModel').value  = d.llm_model  || '';
             document.getElementById('cfgGeminiModel').value = d.gemini_model || '';
+            document.getElementById('cfgGeminiKey').value = '';
+            const gKeyStatus = document.getElementById('cfgGeminiKeyStatus');
+            if (gKeyStatus) {
+                gKeyStatus.textContent = d.gemini_key_set ? '(ustawiony)' : '(nie ustawiony)';
+                gKeyStatus.style.color = d.gemini_key_set ? '#166534' : '#991b1b';
+            }
             document.getElementById('cfgOrKey').value     = '';  // nigdy nie pokazuj klucza
             const kStatus = document.getElementById('cfgOrKeyStatus');
             kStatus.textContent = d.openrouter_key_set ? '(ustawiony)' : '(nie ustawiony)';
@@ -6513,6 +6531,9 @@ function llmConfigSave() {
     const appKey = document.getElementById('cfgAppKey').value.trim();
     payload.app_api_key = appKey;  // puste = wyczyść
 
+    const geminiKey = document.getElementById('cfgGeminiKey').value.trim();
+    if (geminiKey) payload.gemini_api_key = geminiKey;
+
     if (provider === 'openrouter') {
         const key = document.getElementById('cfgOrKey').value.trim();
         if (key) payload.openrouter_key = key;
@@ -6545,6 +6566,7 @@ function llmConfigSave() {
         status.style.color = d.success ? '#166534' : '#991b1b';
         if (d.success) {
             llmConfigLoad();
+            if (document.getElementById('tabAudit')?.style.display !== 'none') auditTabInit();
             document.getElementById('llmProviderSelect').value = payload.provider;
             onLlmProviderChange();
         }
@@ -6962,6 +6984,13 @@ function fleetLoad() {
         .catch(() => {});
 }
 
+function _fleetPingText(live, withIcon = false) {
+    const avg = live?.avg_ms;
+    const ping = live?.ping_ms;
+    const text = avg != null ? `${avg} ms (avg)` : (ping != null ? `${ping} ms` : '—');
+    return withIcon ? `⏱ ${text}` : text;
+}
+
 function _fleetRender(models) {
     const grid = document.getElementById('fleetCards');
     grid.innerHTML = '';
@@ -6971,7 +7000,7 @@ function _fleetRender(models) {
             ? (live.avg_ms > 8000 ? 'slow' : 'ok')
             : live.ping_ok === false ? 'err' : 'unk';
         const statusLabel = {ok:'✓ online', slow:'⚠ wolny', err:'✗ błąd', unk:'? nieznany'}[status];
-        const pingText = live.ping_ms != null ? live.avg_ms + ' ms (avg)' : '—';
+        const pingText = _fleetPingText(live);
 
         const tiers = n => Array.from({length:3}, (_,i) =>
             `<div class="fleet-tier-pip${i < n ? ' filled' : ''}"></div>`).join('');
@@ -7031,7 +7060,7 @@ function _fleetUpdateRank(models) {
     const tbody = document.getElementById('fleetRankBody');
     tbody.innerHTML = rows.map((m, i) => {
         const live = m.live || {};
-        const ping = live.avg_ms != null ? live.avg_ms + ' ms' : (live.ping_ms != null ? live.ping_ms + ' ms' : '—');
+        const ping = _fleetPingText(live);
         const ok = live.ping_ok;
         const dot = ok === true ? '🟢' : ok === false ? '🔴' : '⚫';
         const tags = (m.tags||[]).slice(0,3).join(', ');
@@ -7337,6 +7366,15 @@ function providerTest(id, btn) {
 // ============================================================
 // AUDYT LOGÓW — Google Gemini (bezpośrednie API)
 // ============================================================
+function openGeminiConfig() {
+    showTab('collections');
+    llmConfigLoad();
+    setTimeout(() => {
+        const el = document.getElementById('cfgGeminiKey');
+        if (el) el.focus();
+    }, 150);
+}
+
 let auditAbortController = null;
 let auditLastReport = '';
 let auditLastMeta = null;
@@ -7352,9 +7390,10 @@ function auditTabInit() {
             const geminiHealth = health && health.gemini ? health.gemini : null;
             if (!info.success || !info.gemini_configured) {
                 banner.classList.remove('d-none');
-                banner.innerHTML = '⚠️ Brak <code>GEMINI_API_KEY</code> w .env. Dodaj klucz z '
-                    + '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> '
-                    + 'i zrestartuj aplikację (<code>./restart-app.sh --user</code>).';
+                banner.innerHTML = '⚠️ Brak klucza Gemini. Ustaw go w '
+                    + '<button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="openGeminiConfig()">Konfiguracja LLM → Gemini API Key</button> '
+                    + 'lub w pliku <code>.env</code> (<code>GEMINI_API_KEY=AIza…</code>). '
+                    + 'Po zapisie odśwież tę zakładkę.';
                 if (runBtn) runBtn.disabled = true;
             } else if (!geminiHealth || !geminiHealth.ok) {
                 banner.classList.remove('d-none');
@@ -7444,7 +7483,7 @@ function renderAuditBrowseEntries(d) {
 
     const list = document.getElementById('auditBrowseList');
     if (!d.entries || !d.entries.length) {
-        list.innerHTML = '<div class="p-2 text-muted small">Brak plików tekstowych/logów w tym folderze.</div>';
+        list.innerHTML = '<div class="p-2 text-muted small">Brak plików .log/.txt w tym folderze — wejdź do podfolderu lub wpisz pełną ścieżkę pliku powyżej.</div>';
         return;
     }
 
