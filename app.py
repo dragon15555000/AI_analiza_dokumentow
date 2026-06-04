@@ -20,6 +20,7 @@ import logging
 import requests   # ← dodane dla lepszej obsługi rozłączeń klienta w streamach SSE
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
+from prompts import SEARCH_MODES, MODEL_REGISTRY, VERIFY_SYSTEM_PROMPT, VERIFY_PROMPT_TEMPLATE, DETECTIVE_PROMPT_TEMPLATE, DEFAULT_PROMPT_TEMPLATE, CHAT_CONTEXT_BLOCK_TEMPLATE
 
 # Wczytaj .env jeśli istnieje
 _env_path = Path(__file__).parent / ".env"
@@ -3470,119 +3471,6 @@ def get_embeddings_batch(texts: list, batch_size: int = 6) -> list:
                 raise EmbeddingError(f"Błąd batch embeddingu: {e}") from e
 
     return results
-
-SEARCH_MODES = {
-    "normal": {
-        "label": "Standardowy",
-        "system": (
-            "Jesteś precyzyjnym asystentem analityczno-śledczym. Odpowiadaj zawsze po polsku, "
-            "krótko, konkretnie i wyłącznie na podstawie dostarczonych dokumentów. "
-            "Jeśli w dokumentach znajdują się liczby, kwoty, nazwy firm, nazwiska lub paragrafy, podaj je w pierwszej kolejności."
-        ),
-        "prompt_suffix": "Podaj zwięzłą syntezę dowodów:"
-    },
-    "detective": {
-        "label": "Detektyw — briefing śledczy",
-        "min_limit": 12,
-        "max_per_file": 2,
-        "system": (
-            "Jesteś doświadczonym analitykiem śledczym (forensics dokumentów, zamówienia publiczne, finanse). "
-            "Piszesz jak kolega z zespołu śledczego: konkretnie, po polsku, z odniesieniami do plików źródłowych. "
-            "Porównujesz fakty MIĘDZY dokumentami — szukasz rozbieżności kwot, dat, stron umowy, numerów postępowań, "
-            "brakujących załączników, podejrzanych zbieżności czasowych i powtarzających się podmiotów. "
-            "Nie wymyślaj faktów: jeśli czegoś nie ma w kontekście, napisz [BRAK DOWODU] i co sprawdzić. "
-            "Każde istotne znalezisko oznacz jednym tagiem: [ANOMALIA], [NIESPÓJNOŚĆ], [ROZBIEŻNOŚĆ], "
-            "[PODEJRZANE], [WYMAGA SPRAWDZENIA]. "
-            "Na końcu zawsze dodaj krótką sekcję z 2–4 pytaniami do dalszej analizy użytkownika."
-        ),
-        "prompt_suffix": (
-            "Przygotuj briefing śledczy w podanym formacie sekcji. "
-            "Priorytet: porównania między dokumentami i konkretne cytaty (plik + sens treści)."
-        ),
-    },
-    "legal": {
-        "label": "Prawny — przepisy",
-        "system": (
-            "Jesteś prawnikiem specjalizującym się w prawie zamówień publicznych i spółkach komunalnych. "
-            "Identyfikuj każde odwołanie do ustaw, rozporządzeń i przepisów w dokumentach. "
-            "Dla każdego przepisu oceń: (1) czy jest aktualny na dzień dokumentu, "
-            "(2) czy rzeczywiście dotyczy tej organizacji / branży i kontekstu sprawy, "
-            "(3) czy jest zastosowany prawidłowo w kontekście. "
-            "Flaguj błędy: [PRZEPIS NIEAKTUALNY], [PRZEPIS NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE], [PRZEPIS NIEZGODNY]. "
-            "Odpowiadaj wyłącznie po polsku."
-        ),
-        "prompt_suffix": "Oceń prawidłowość powołanych przepisów prawnych:"
-    },
-    "inconsistency": {
-        "label": "Niespójności",
-        "system": (
-            "Jesteś audytorem dokumentacji. Szukasz SPRZECZNOŚCI i NIESPÓJNOŚCI w treści dokumentów. "
-            "Gdzie ta sama liczba, fakt, data lub stwierdzenie pojawia się inaczej w różnych dokumentach? "
-            "Format odpowiedzi: 'Dokument A twierdzi: [X]. Dokument B twierdzi: [Y]. SPRZECZNOŚĆ: [opis].' "
-            "Wskazuj też wewnętrzne niespójności w jednym dokumencie. "
-            "Odpowiadaj wyłącznie po polsku."
-        ),
-        "prompt_suffix": "Znajdź sprzeczności i niespójności między dokumentami:"
-    },
-    "extract": {
-        "label": "Ekstrakcja danych",
-        "system": (
-            "Jesteś ekstrakatorem danych strukturalnych. Z dokumentów wyciągasz ustrukturyzowane fakty. "
-            "Zwróć WYŁĄCZNIE tabelę Markdown z kolumnami: | Typ | Wartość | Dokument | Kontekst |. "
-            "Typy: KWOTA, DATA, OSOBA, FIRMA, UMOWA, PARAGRAF, UCHWAŁA, KARA, PRZETARG, INNE. "
-            "Każdy znaleziony fakt to osobny wiersz. Minimum 5 wierszy jeśli dane pozwalają. "
-            "Odpowiadaj wyłącznie po polsku. Nie pisz nic poza tabelą."
-        ),
-        "prompt_suffix": "Wyciągnij ustrukturyzowane dane z dokumentów jako tabela Markdown:"
-    }
-}
-
-# ---- Model Registry ----
-MODEL_REGISTRY: dict = {
-    "meta-llama/llama-3.3-70b-instruct:free": {
-        "name": "Llama 3.3 70B", "short": "Llama 70B", "provider": "Meta",
-        "icon": "🌟", "context_k": 128, "speed_tier": 2, "quality_tier": 3,
-        "free": True, "rate_rpm": 20, "rate_day": 200,
-        "tags": ["analiza", "prawo", "długi_kontekst", "raporty", "rozumowanie"],
-    },
-    "google/gemini-2.0-flash-exp:free": {
-        "name": "Gemini 2.0 Flash", "short": "Gemini Flash", "provider": "Google",
-        "icon": "⚡", "context_k": 1000, "speed_tier": 1, "quality_tier": 2,
-        "free": True, "rate_rpm": 15, "rate_day": 1500,
-        "tags": ["szybkość", "bardzo_długi_kontekst", "podsumowania"],
-    },
-    "mistralai/mistral-7b-instruct:free": {
-        "name": "Mistral 7B", "short": "Mistral 7B", "provider": "Mistral AI",
-        "icon": "🎯", "context_k": 32, "speed_tier": 1, "quality_tier": 1,
-        "free": True, "rate_rpm": 30, "rate_day": 500,
-        "tags": ["szybkość", "krótkie_pytania", "klasyfikacja"],
-    },
-    "qwen/qwen-2.5-7b-instruct:free": {
-        "name": "Qwen 2.5 7B", "short": "Qwen 7B", "provider": "Alibaba",
-        "icon": "🔷", "context_k": 128, "speed_tier": 1, "quality_tier": 2,
-        "free": True, "rate_rpm": 20, "rate_day": 300,
-        "tags": ["dane_strukturalne", "tabele", "kod", "ekstrakcja"],
-    },
-    "meta-llama/llama-3.1-8b-instruct:free": {
-        "name": "Llama 3.1 8B", "short": "Llama 8B", "provider": "Meta",
-        "icon": "🏃", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
-        "free": True, "rate_rpm": 20, "rate_day": 200,
-        "tags": ["szybkość", "klasyfikacja", "ekstrakcja", "fragmenty"],
-    },
-    "deepseek/deepseek-r1:free": {
-        "name": "DeepSeek R1", "short": "DeepSeek R1", "provider": "DeepSeek",
-        "icon": "🧠", "context_k": 64, "speed_tier": 3, "quality_tier": 3,
-        "free": True, "rate_rpm": 10, "rate_day": 100,
-        "tags": ["rozumowanie", "matematyka", "analiza_krok_po_kroku"],
-    },
-    "microsoft/phi-3-mini-128k-instruct:free": {
-        "name": "Phi-3 Mini 128k", "short": "Phi-3 Mini", "provider": "Microsoft",
-        "icon": "🔬", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
-        "free": True, "rate_rpm": 20, "rate_day": 200,
-        "tags": ["szybkość", "długi_kontekst", "fragmenty"],
-    },
-}
-
 # Statystyki pingów modeli floty (utrwalane między restartami).
 _persisted_model_live = _load_model_live_stats()
 _model_live: dict = {}
@@ -3774,33 +3662,24 @@ def _build_search_prompt(
     )
     chat_block = ""
     if chat_context and chat_context.strip():
-        chat_block = (
-            f"\n\nHISTORIA ROZMOWY (kontekst użytkownika — nie traktuj jako faktów, "
-            f"tylko jako kierunek analizy):\n{_sanitize_for_prompt(chat_context.strip(), 2500)}\n"
+        chat_block = CHAT_CONTEXT_BLOCK_TEMPLATE.format(
+            chat_context=_sanitize_for_prompt(chat_context.strip(), 2500)
         )
 
     if mode == "detective":
-        prompt = (
-            f"FRAGMENTY DOKUMENTÓW (jedyne źródło faktów):\n{context_str}\n"
-            f"{chat_block}\n"
-            f"PYTANIE / ZLECENIE ANALITYKA:\n{query_text}\n\n"
-            f"{cfg['prompt_suffix']}\n\n"
-            "FORMAT ODPOWIEDZI (nagłówki dokładnie tak):\n"
-            "## Co wiemy z dokumentów\n"
-            "(2–4 zdania: najważniejsze fakty z odniesieniem do plików)\n\n"
-            "## Analiza śledcza\n"
-            "(porównania między dokumentami; przy każdym znalezisku tag + plik + cytat/skrót)\n\n"
-            "## Wnioski i ryzyka\n"
-            "(co jest najbardziej podejrzane lub wymaga audytu)\n\n"
-            "## Pytania do dalszej analizy\n"
-            "(2–4 konkretne pytania, które użytkownik może zadać w kolejnym kroku)\n"
+        prompt = DETECTIVE_PROMPT_TEMPLATE.format(
+            contexts=context_str,
+            chat_block=chat_block,
+            query=query_text,
+            prompt_suffix=cfg['prompt_suffix'],
+            format=cfg.get('format', '')
         )
     else:
-        prompt = (
-            f"KONTEKST Z DOKUMENTÓW:\n{context_str}\n"
-            f"{chat_block}\n"
-            f"ZAPYTANIE: {query_text}\n\n"
-            f"{cfg['prompt_suffix']}"
+        prompt = DEFAULT_PROMPT_TEMPLATE.format(
+            contexts=context_str,
+            chat_block=chat_block,
+            query=query_text,
+            prompt_suffix=cfg['prompt_suffix']
         )
     return prompt, cfg["system"]
 
@@ -3852,25 +3731,11 @@ def verify_answer(answer: str, contexts: list, query: str, provider: str | None 
         for c in contexts
     ]
     context_str = "\n\n".join([f"[{c['file']}]: {c['text']}" for c in sanitized_contexts])
-    system = (
-        "Jesteś rygorystycznym weryfikatorem faktów śledczych. Twoja rola to KRYTYCZNA OCENA odpowiedzi "
-        "innego asystenta. Masz dostęp do oryginalnych dokumentów — to jedyne źródło prawdy. "
-        "NIE ufasz odpowiedzi asystenta — sprawdzasz każde twierdzenie. "
-        "Odpowiadaj wyłącznie po polsku. Bądź precyzyjny i bezlitosny wobec nieścisłości."
-    )
-    prompt = (
-        f"ORYGINALNE DOKUMENTY (źródło prawdy):\n{context_str}\n\n"
-        f"ZAPYTANIE UŻYTKOWNIKA: {query}\n\n"
-        f"ODPOWIEDŹ ASYSTENTA DO WERYFIKACJI:\n{answer}\n\n"
-        "Zadanie: sprawdź KAŻDE twierdzenie faktyczne w odpowiedzi asystenta.\n"
-        "Format obowiązkowy — każde twierdzenie w osobnej linii:\n"
-        "✓ [POTWIERDZONE] <twierdzenie> → <cytat z dokumentu>\n"
-        "⚠ [CZĘŚCIOWE] <twierdzenie> → <co jest nieprecyzyjne>\n"
-        "✗ [BRAK PODSTAW] <twierdzenie> → <czego brak w dokumentach>\n\n"
-        "Na końcu jedna linia:\n"
-        "WERDYKT: WIARYGODNA | CZĘŚCIOWO WIARYGODNA | ZAWIERA HALUCYNACJE\n"
-        "UZASADNIENIE: <jedno zdanie>\n\n"
-        "Weryfikacja:"
+    system = VERIFY_SYSTEM_PROMPT
+    prompt = VERIFY_PROMPT_TEMPLATE.format(
+        contexts=context_str,
+        query=query,
+        answer=answer
     )
 
     try:
@@ -8196,6 +8061,8 @@ def sql_vectorize():
                 active_cols = _sql_text_columns(conn, table, dialect)
             if not active_cols:
                 yield sse("error", {"error": f"Brak kolumn do wektoryzacji w tabeli {table}"})
+                _finish_heavy_task(task_id, status="error", error=f"Brak kolumn do wektoryzacji w tabeli {table}")
+                task_id = ""
                 return
 
             total = _sql_table_count(conn, table, dialect)
