@@ -7446,11 +7446,12 @@ window.onload = function() {
 };
 
 // ===== SWARM AGENT =====
-let _swarmSSE = null;
+let _swarmAbort = null;
 let _swarmWorkerCount = 0;
 let _swarmDone = 0;
 let _swarmLastResult = null;
 let _swarmQuery = '';
+let _swarmFinished = false;
 
 document.querySelectorAll('.swarm-mode-card').forEach(card => {
     card.addEventListener('click', () => {
@@ -7461,7 +7462,7 @@ document.querySelectorAll('.swarm-mode-card').forEach(card => {
 });
 
 function stopSwarm() {
-    if (_swarmSSE) { _swarmSSE.close(); _swarmSSE = null; }
+    if (_swarmAbort) { _swarmAbort.abort(); _swarmAbort = null; }
     document.getElementById('swarmBtn').disabled = false;
     document.getElementById('swarmStopBtn').classList.add('d-none');
 }
@@ -7474,6 +7475,7 @@ function runSwarm() {
 
     _swarmQuery = query;
     _swarmLastResult = null;
+    _swarmFinished = false;
     const saveBtn = document.getElementById('swarmSaveBtn');
     if (saveBtn) { saveBtn.style.display = 'none'; saveBtn.textContent = '💾 Zapisz jako raport'; saveBtn.disabled = false; }
 
@@ -7484,9 +7486,10 @@ function runSwarm() {
     document.getElementById('swarmResult').style.display = 'none';
     document.getElementById('swarmWorkerCards').innerHTML = '';
     document.getElementById('swarmProgressBar').style.width = '0%';
-    document.getElementById('swarmProgress').textContent = '';
+    document.getElementById('swarmProgress').textContent = 'Łączenie…';
     document.getElementById('swarmSynthesisCard').classList.add('d-none');
     document.getElementById('swarmSynthesisSpinner').classList.add('d-none');
+    document.getElementById('swarmSynthesisLabel').textContent = '🔀 Orkiestrator syntetyzuje wyniki…';
     document.getElementById('swarmBtn').disabled = true;
     document.getElementById('swarmStopBtn').classList.remove('d-none');
     _swarmWorkerCount = 0; _swarmDone = 0;
@@ -7500,49 +7503,20 @@ function runSwarm() {
     document.getElementById('swarmModeLabel').textContent = modeLabels[mode] || mode;
     document.getElementById('swarmModeDescLabel').textContent = modeDescs[mode] || '';
 
-    const body = JSON.stringify({query, swarm_mode: mode, file_filter: fileFilter});
-    const headers = {'Content-Type': 'application/json'};
-    if (window.API_KEY && window.API_KEY_REQUIRED) headers['X-API-Key'] = window.API_KEY;
+    _swarmAbort = new AbortController();
 
-    // Use fetch + ReadableStream for POST SSE
-    fetch('/agents/swarm/stream', {method:'POST', headers, body})
-    .then(resp => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-        function pump() {
-            return reader.read().then(({done, value}) => {
-                if (done) { stopSwarm(); return; }
-                buf += decoder.decode(value, {stream: true});
-                const lines = buf.split('\n');
-                buf = lines.pop();
-                lines.forEach(line => {
-                    if (!line.startsWith('data:')) return;
-                    try { _swarmHandleEvent(JSON.parse(line.slice(5).trim())); }
-                    catch(e) {}
-                });
-                return pump();
-            });
-        }
-        return pump();
-    })
-    .catch(e => {
-        _swarmShowError('Błąd połączenia: ' + e.message);
-        stopSwarm();
-    });
-}
-
-function _swarmHandleEvent(ev) {
-    const {event, data} = ev;
-    if (!data) return;
-    switch (event) {
-        case 'init':
+    streamSSEPost('/agents/swarm/stream', {query, swarm_mode: mode, file_filter: fileFilter}, {
+        progress: (data) => {
+            if (data.msg) {
+                document.getElementById('swarmProgress').textContent = data.msg;
+            }
+        },
+        init: (data) => {
             _swarmWorkerCount = data.n_workers;
             document.getElementById('swarmProgress').textContent =
                 `${data.total_chunks} fragmentów → ${data.n_workers} agentów`;
-            break;
-        case 'worker_start': {
+        },
+        worker_start: (data) => {
             const card = document.createElement('div');
             card.className = 'col-sm-6 col-lg-4';
             card.id = `swarm-worker-${data.worker_id}`;
@@ -7557,9 +7531,8 @@ function _swarmHandleEvent(ev) {
                     <div id="swarm-preview-${data.worker_id}" class="mt-1" style="font-size:0.75rem;color:#374151;display:none;"></div>
                 </div>`;
             document.getElementById('swarmWorkerCards').appendChild(card);
-            break;
-        }
-        case 'worker_done': {
+        },
+        worker_done: (data) => {
             const wrapper = document.getElementById(`swarm-worker-${data.worker_id}`);
             if (wrapper) {
                 const card = wrapper.querySelector('.swarm-worker-card');
@@ -7570,11 +7543,12 @@ function _swarmHandleEvent(ev) {
             const prev = document.getElementById(`swarm-preview-${data.worker_id}`);
             if (prev) { prev.style.display = 'block'; prev.textContent = data.preview; }
             _swarmDone++;
-            document.getElementById('swarmProgressBar').style.width =
-                Math.round((_swarmDone / _swarmWorkerCount) * 80) + '%';
-            break;
-        }
-        case 'worker_error': {
+            if (_swarmWorkerCount > 0) {
+                document.getElementById('swarmProgressBar').style.width =
+                    Math.round((_swarmDone / _swarmWorkerCount) * 80) + '%';
+            }
+        },
+        worker_error: (data) => {
             const badge = document.getElementById(`swarm-badge-${data.worker_id}`);
             if (badge) { badge.className = 'swarm-worker-badge swarm-badge-err'; badge.textContent = '✗ błąd'; }
             const wrapper = document.getElementById(`swarm-worker-${data.worker_id}`);
@@ -7582,16 +7556,21 @@ function _swarmHandleEvent(ev) {
                 const card = wrapper.querySelector('.swarm-worker-card');
                 card.classList.remove('running'); card.classList.add('error');
             }
-            break;
-        }
-        case 'synthesis_start': {
+            _swarmDone++;
+            if (_swarmWorkerCount > 0) {
+                document.getElementById('swarmProgressBar').style.width =
+                    Math.round((_swarmDone / _swarmWorkerCount) * 80) + '%';
+            }
+        },
+        synthesis_start: () => {
             const sc = document.getElementById('swarmSynthesisCard');
             sc.classList.remove('d-none');
             document.getElementById('swarmSynthesisSpinner').classList.remove('d-none');
             document.getElementById('swarmProgressBar').style.width = '85%';
-            break;
-        }
-        case 'done': {
+            document.getElementById('swarmProgress').textContent = 'Synteza wyników…';
+        },
+        done: (data) => {
+            _swarmFinished = true;
             document.getElementById('swarmProgressBar').style.width = '100%';
             document.getElementById('swarmSynthesisSpinner').classList.add('d-none');
             document.getElementById('swarmSynthesisLabel').textContent = '✅ Synteza zakończona';
@@ -7607,13 +7586,23 @@ function _swarmHandleEvent(ev) {
             const saveBtn = document.getElementById('swarmSaveBtn');
             if (saveBtn) saveBtn.style.display = '';
             stopSwarm();
-            break;
-        }
-        case 'error':
-            _swarmShowError(data.error || 'Nieznany błąd');
+        },
+        error: (data) => {
+            _swarmFinished = true;
+            _swarmShowError(data.error || data.msg || 'Nieznany błąd');
             stopSwarm();
-            break;
-    }
+        },
+    }, _swarmAbort.signal).then(() => {
+        if (!_swarmFinished) {
+            _swarmShowError('Strumień zakończył się bez wyniku — sprawdź logi serwera.');
+            stopSwarm();
+        }
+    }).catch(err => {
+        if (err.name !== 'AbortError') {
+            _swarmShowError('Błąd połączenia: ' + err.message);
+        }
+        stopSwarm();
+    });
 }
 
 function _swarmShowError(msg) {
