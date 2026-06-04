@@ -4595,6 +4595,7 @@ function renderTimeline(data) {
 document.addEventListener('DOMContentLoaded', () => {
     initNetworkFilterListeners();
     initImportOcrUi();
+    initClaudeTestPanel();
     loadTopbarProviders().then(() => {
         restoreLlmProvider();
         refreshFavoriteModelOptions();
