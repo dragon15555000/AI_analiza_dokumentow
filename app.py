@@ -25,6 +25,14 @@ from prompts import SEARCH_MODES, MODEL_REGISTRY, VERIFY_SYSTEM_PROMPT, VERIFY_P
 from sql_safety import _is_sql_safe, _extract_sql_table_refs, _validate_sql_table_refs, DANGEROUS_SQL_KEYWORDS
 from models_fleet import _load_custom_endpoint_stats, _save_custom_endpoint_stats, _get_or_init_endpoint_stats, _load_model_live_stats, _save_model_live_stats, _model_score, _custom_endpoint_score, _set_model_live, _set_MODEL_REGISTRY
 import llm_client
+from llm_client import (
+    call_llm,
+    stream_llm_tokens,
+    get_llm_provider,
+    _is_rate_limit_error,
+    _get_retry_after,
+    _redact_api_keys,
+)
 
 # Wczytaj .env jeśli istnieje
 _env_path = Path(__file__).parent / ".env"
@@ -2203,34 +2211,6 @@ def qdrant_switch():
     return jsonify({"success": True, "mode": mode, "url": new_url})
 
 
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Sprawdza czy wyjątek to 429 Too Many Requests z OpenRouter."""
-    msg = str(exc).lower()
-    if "429" in msg or "too many requests" in msg or "rate limit" in msg:
-        return True
-    # requests HTTPError
-    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
-        try:
-            status = exc.response.status_code
-            if status == 429:
-                return True
-        except Exception:
-            pass
-    return False
-
-
-def _get_retry_after(exc: Exception) -> float | None:
-    """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
-    try:
-        if hasattr(exc, "response") and exc.response is not None:
-            ra = exc.response.headers.get("Retry-After")
-            if ra:
-                return float(ra)
-    except Exception:
-        pass
-    return None
-
-
 def _is_openrouter_no_endpoints_error(exc: Exception) -> bool:
     """Sprawdza czy OpenRouter zwrócił 404 'No endpoints found' dla modelu."""
     if exc is None:
@@ -2869,14 +2849,6 @@ def _gemini_key_from_url_or_value(url: str, key: str = "") -> str:
         return (params.get("key") or [""])[0].strip()
     except Exception:
         return ""
-
-
-def _redact_api_keys(text: str) -> str:
-    """Usuwa klucze API z komunikatów błędów przed zwrotem do UI/logiki API."""
-    redacted = str(text or "")
-    redacted = re.sub(r"([?&]key=)[^&\s\"']+", r"\1[REDACTED]", redacted)
-    redacted = re.sub(r"(x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+", r"\1[REDACTED]", redacted, flags=re.IGNORECASE)
-    return redacted
 
 
 def _gemini_custom_generate_url(endpoint_url: str, key: str, model: str | None = None,
