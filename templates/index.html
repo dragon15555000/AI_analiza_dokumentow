@@ -1390,7 +1390,7 @@ table { margin: 0; }
         </div>
         <div class="col-md-4" id="cfgGeminiModelWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">Model Gemini</label>
-          <input type="text" id="cfgGeminiModel" class="form-control form-control-sm font-monospace" placeholder="gemini-2.5-flash">
+          <input type="text" id="cfgGeminiModel" class="form-control form-control-sm font-monospace" placeholder="gemini-2.0-flash">
         </div>
         <!-- OpenRouter -->
         <div class="col-md-6" id="cfgOrKeyWrap" style="display:none;">
@@ -1605,9 +1605,9 @@ table { margin: 0; }
         <div class="mb-3">
           <label class="form-label small fw-bold">Model Gemini:</label>
           <select id="auditModelSelect" class="form-select form-select-sm">
-            <option value="gemini-2.5-flash">gemini-2.5-flash (zalecany)</option>
-            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+            <option value="gemini-2.0-flash">gemini-2.0-flash (zalecany — tańszy, ~1M ctx)</option>
             <option value="gemini-flash-latest">gemini-flash-latest (alias)</option>
+            <option value="gemini-2.5-flash">gemini-2.5-flash</option>
             <option value="gemini-2.5-pro">gemini-2.5-pro (dokładniejszy)</option>
           </select>
         </div>
@@ -4763,10 +4763,10 @@ function syncLlmModelPickerVisibility() {
         const showTop = (!isOr && !isOpenAiCustom && (isOllamaLike || isGemini));
         topModel.style.display = showTop ? 'inline-block' : 'none';
         if (showTop && isGemini && !topModel.value.trim()) {
-            topModel.value = localStorage.getItem('gemini_model') || 'gemini-2.5-flash';
+            topModel.value = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
         }
         if (showTop && isGemini) {
-            topModel.placeholder = 'gemini-2.5-flash';
+            topModel.placeholder = 'gemini-2.0-flash';
             topModel.title = 'Model Gemini';
         }
     }
@@ -4794,7 +4794,7 @@ function getCurrentLlmModel() {
     if (isGeminiProvider(prov)) {
         const top = document.getElementById('topbarLlmModel');
         if (top && top.value.trim()) return top.value.trim();
-        return localStorage.getItem('gemini_model') || 'gemini-2.5-flash';
+        return localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
     }
     const top = document.getElementById('topbarLlmModel');
     if (top && top.value.trim()) return top.value.trim();
@@ -7230,7 +7230,7 @@ function _providerDefaultRow(type, def) {
     if (type === 'gemini') {
         return `<tr class="table-light">
             <td class="small"><em>.env (domyślny)</em></td>
-            <td class="small text-muted">GEMINI_API_KEY · ${escapeHtml(def.gemini_model || 'gemini-2.5-flash')}</td>
+            <td class="small text-muted">GEMINI_API_KEY · ${escapeHtml(def.gemini_model || 'gemini-2.0-flash')}</td>
             <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;"></span>
                 <span id="provRowStatus_default_gemini" class="small ms-1">aktywny (audyt logów)</span></td>
             <td class="text-end">

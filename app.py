@@ -714,7 +714,8 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
 # Google Gemini (bezpośrednie API — audyt dużych plików / logów)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+# gemini-1.5-* wycofany w API (404) — domyślnie 2.0-flash (tańszy niż 2.5, ~1M ctx)
+GEMINI_MODEL_DEFAULT = "gemini-2.0-flash"
 GEMINI_DEPRECATED_MODELS = frozenset({
     "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
     "gemini-1.5-flash-latest", "gemini-1.5-pro-latest",
@@ -1583,11 +1584,15 @@ def _effective_llm_model(provider: str | None = None) -> str:
 
 
 def _normalize_gemini_model(model: str | None) -> str:
-    """Usuwa prefix models/ i wybiera domyślny model, gdy brak wartości."""
+    """Usuwa prefix models/; wycofane gemini-1.5-* mapuje na GEMINI_MODEL_DEFAULT."""
     raw = (model or GEMINI_MODEL or GEMINI_MODEL_DEFAULT).strip()
     if raw.startswith("models/"):
         raw = raw[7:].strip()
-    return raw or GEMINI_MODEL_DEFAULT
+    if not raw:
+        return GEMINI_MODEL_DEFAULT
+    if raw in GEMINI_DEPRECATED_MODELS:
+        return GEMINI_MODEL_DEFAULT
+    return raw
 
 
 def _list_gemini_generate_models(api_key: str) -> tuple[bool, list[str], str | None]:
@@ -1618,8 +1623,8 @@ def _gemini_model_hint(api_key: str, model: str) -> str:
     normalized = _normalize_gemini_model(model)
     if normalized in GEMINI_DEPRECATED_MODELS:
         base = (
-            f"Model {normalized} jest wycofany w Gemini API. "
-            f"Ustaw GEMINI_MODEL={GEMINI_MODEL_DEFAULT} w .env lub w konfiguracji LLM."
+            f"Model {normalized} jest wycofany w Gemini API "
+            f"(używany automatycznie: {GEMINI_MODEL_DEFAULT})."
         )
     else:
         base = f"Model {normalized} nie istnieje lub nie obsługuje generateContent."
@@ -2119,10 +2124,45 @@ def _openrouter_model_candidates(primary_model: str | None) -> list[str]:
     candidates: list[str] = []
     known_fallbacks = (
         "meta-llama/llama-3.3-70b-instruct:free",
-        "deepseek/deepseek-r1-0528:free",
-        "qwen/qwen3-235b-a22b:free",
+        "openai/gpt-oss-20b:free",
+        "z-ai/glm-4.5-air:free",
+        "qwen/qwen3-coder:free",
+        "meta-llama/llama-3.2-3b-instruct:free",
     )
     for candidate in (primary, OPENROUTER_MODEL, OPENROUTER_MODEL_VERIFY, *known_fallbacks):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _openrouter_live_free_models(limit: int = 12) -> list[str]:
+    """Pobiera aktualne modele :free z OpenRouter; używane tylko w krótkim teście providera."""
+    try:
+        r = requests.get("https://openrouter.ai/api/v1/models", timeout=8)
+        r.raise_for_status()
+        models = r.json().get("data", [])
+        out: list[str] = []
+        for item in models:
+            model_id = str(item.get("id") or "").strip()
+            if not model_id.endswith(":free"):
+                continue
+            architecture = item.get("architecture") or {}
+            output_modalities = architecture.get("output_modalities") or []
+            if output_modalities and "text" not in output_modalities:
+                continue
+            out.append(model_id)
+            if len(out) >= limit:
+                break
+        return out
+    except Exception as exc:
+        logger.debug("Nie udało się pobrać listy modeli OpenRouter: %s", exc)
+        return []
+
+
+def _openrouter_test_model_candidates() -> list[str]:
+    """Modele do testu providera: konfiguracja, aktualne :free, potem stabilne fallbacki."""
+    candidates: list[str] = []
+    for candidate in [*_openrouter_model_candidates(OPENROUTER_MODEL), *_openrouter_live_free_models()]:
         if candidate and candidate not in candidates:
             candidates.append(candidate)
     return candidates
@@ -2135,7 +2175,9 @@ def _test_openrouter_api_key(key: str) -> dict:
 
     t0 = time.time()
     last_error = ""
-    for model in _openrouter_model_candidates(OPENROUTER_MODEL):
+    attempted: list[str] = []
+    for model in _openrouter_test_model_candidates():
+        attempted.append(model)
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -2157,7 +2199,7 @@ def _test_openrouter_api_key(key: str) -> dict:
                 return {"success": True, "ms": ms, "status": 200, "model": model, "error": None}
             last_error = (r.text or f"HTTP {r.status_code}")[:300]
             if (
-                (r.status_code == 404 and "no endpoints found" in last_error.lower())
+                r.status_code == 404
                 or r.status_code in {429, 502, 503, 504}
             ):
                 continue
@@ -2170,6 +2212,7 @@ def _test_openrouter_api_key(key: str) -> dict:
         "ms": int((time.time() - t0) * 1000),
         "status": 404,
         "model": None,
+        "attempted_models": attempted[:10],
         "error": last_error or "Brak działającego endpointu OpenRouter dla skonfigurowanych modeli",
     }
 
