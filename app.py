@@ -3521,6 +3521,131 @@ def task_stream(task_id: str):
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) -> dict:
+    """
+    Work function dla background import (wywoływana przez task_queue).
+    Zamiast yield'ować SSE, aktualizuje task progress.
+    """
+    folder_path = Path(folder_str)
+    qdrant = get_qdrant_client()
+    imported = 0
+    skipped = 0
+    total_chunks = 0
+    new_chunks = 0
+    ocr_count = 0
+
+    try:
+        files = _find_files_safe(folder_path.resolve(), exts)
+        if not files:
+            update_task(task_id, done=0, total=0, progress_pct=100)
+            return {"count": 0, "chunks": 0, "skipped": 0}
+
+        update_task(task_id, total=len(files))
+
+        for i, f_path in enumerate(files):
+            update_task(
+                task_id,
+                done=i,
+                total=len(files),
+                progress_pct=round(i / len(files) * 100) if files else 0,
+                current_item=str(f_path),
+            )
+
+            try:
+                ext_l = f_path.suffix.lower()
+                used_ocr = (force_ocr and ext_l == '.pdf') or ext_l in {
+                    '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'
+                }
+                text = extract_text(f_path, force_ocr=force_ocr)
+                if used_ocr and text and len(text.strip()) >= 10:
+                    ocr_count += 1
+                if not text or len(text.strip()) < 10:
+                    skipped += 1
+                    continue
+
+                chunks = make_chunks(text)
+                file_new = 0
+
+                file_meta = extract_file_metadata(f_path)
+
+                # Deduplikacja
+                chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
+                existing_ids = set()
+                for batch_start in range(0, len(chunk_ids), 100):
+                    batch = chunk_ids[batch_start:batch_start+100]
+                    found = qdrant.retrieve(collection_name=ACTIVE_COLLECTION, ids=batch,
+                                           with_payload=False, with_vectors=False)
+                    existing_ids.update(p.id for p in found)
+
+                new_chunks_data = [(cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
+                                   if cid not in existing_ids]
+                total_chunks += len(chunks)
+
+                # Batch embeddings
+                BATCH = 6
+                embed_failed = False
+                for b in range(0, len(new_chunks_data), BATCH):
+                    batch_items = new_chunks_data[b:b+BATCH]
+                    batch_texts  = [item[1] for item in batch_items]
+                    batch_ids    = [item[0] for item in batch_items]
+                    try:
+                        vectors = get_embeddings_batch(batch_texts, batch_size=BATCH)
+                    except EmbeddingError as e:
+                        skipped += 1
+                        embed_failed = True
+                        break
+
+                    points  = [
+                        PointStruct(
+                            id=cid,
+                            vector=vec,
+                            payload={
+                                "file": f_path.name,
+                                "text": txt,
+                                "full_path": str(f_path),
+                                "metadata": file_meta
+                            }
+                        )
+                        for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
+                        if vec and any(v != 0.0 for v in vec)
+                    ]
+                    if points:
+                        qdrant.upsert(collection_name=ACTIVE_COLLECTION, points=points)
+                    new_chunks += len(points)
+                    file_new  += len(points)
+
+                if embed_failed:
+                    continue
+
+                imported += 1
+                update_task(
+                    task_id,
+                    done=i + 1,
+                    total=len(files),
+                    progress_pct=round((i + 1) / len(files) * 100) if files else 100,
+                    current_item=str(f_path),
+                )
+                time.sleep(0.02)
+
+            except Exception as e:
+                skipped += 1
+                logger.error(f"import file {f_path.name}: {e}")
+
+        update_task(task_id, done=len(files), total=len(files), progress_pct=100, current_item=None)
+
+        return {
+            "count": imported,
+            "chunks": total_chunks,
+            "new_chunks": new_chunks,
+            "skipped": skipped,
+            "ocr_count": ocr_count,
+        }
+
+    except Exception as e:
+        logger.exception("_import_work_fn error")
+        raise
+
+
 @app.route('/import/stream')
 def import_stream():
     folder = request.args.get('folder', '').strip()
@@ -3528,7 +3653,52 @@ def import_stream():
         folder = _normalize_browse_path(folder)
     exts = request.args.getlist('ext') or ['docx','pdf','xlsx','xls','csv','md','json']
     force_ocr = request.args.get('force_ocr', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+    async_mode = request.args.get('async', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
+    # === ASYNC MODE (background task queue) ===
+    if async_mode:
+        try:
+            folder_path = Path(folder).expanduser()
+            if not folder or not folder_path.exists():
+                return jsonify({"success": False, "error": f"Ścieżka nie istnieje: {folder}"}), 400
+            if not folder_path.is_dir() or not _path_is_allowed(folder_path):
+                return jsonify({"success": False, "error": "Ścieżka niedozwolona lub poza SEARCH_ROOTS"}), 403
+
+            files = _find_files_safe(folder_path.resolve(), exts)
+            if not files:
+                return jsonify({
+                    "success": True,
+                    "queued": False,
+                    "task_id": None,
+                    "message": "Brak kompatybilnych plików w folderze"
+                })
+
+            # Submit to background task queue
+            queued, task = submit_task(
+                kind="document_import",
+                label=f"Import: {folder_path.name}",
+                work_fn=lambda tid: _import_work_fn(tid, str(folder_path), exts, force_ocr),
+                meta={
+                    "folder": str(folder_path),
+                    "ext": exts,
+                    "force_ocr": force_ocr,
+                    "file_count": len(files),
+                }
+            )
+
+            return jsonify({
+                "success": True,
+                "queued": queued,
+                "task_id": task.id,
+                "task": task.to_dict(),
+                "message": "Task submitted to queue" if queued else "Task will start soon"
+            })
+
+        except Exception as e:
+            logger.error(f"import_stream async error: {e}")
+            return jsonify({"success": False, "error": str(e)[:200]}), 500
+
+    # === SYNC MODE (blocking SSE stream) ===
     def generate():
         def sse(event, data):
             import json as _json
