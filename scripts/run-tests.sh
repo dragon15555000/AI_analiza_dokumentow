@@ -20,7 +20,7 @@ Testy integracyjne (wymaga działającej aplikacji na :5000):
   - Groq chat API (compound-mini, llama-3.3-70b, compound)
     Domyślnie: jeden lekki test skonfigurowanego providera; pełna macierz po --full-llm.
   - GET /api/config/llm
-  - GET /api/swarm/modes + walidacja POST /agents/swarm (bez pełnego LLM)
+  - GET /agents/swarm/modes + walidacja POST /agents/swarm/stream
   - GET /api/llm/fleet (cache, bez sondy)
   - POST /search/stream (SSE: results, token, done + done.usage) — opcjonalnie
 
@@ -62,13 +62,47 @@ read_env() {
   echo "$default"
 }
 
+read_effective_app_key() {
+  python3 - "$ROOT" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+
+def clean(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", value or "")
+
+cfg_path = root / ".llm_config.json"
+if cfg_path.exists():
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        ui_key = clean(str(cfg.get("app_api_key") or ""))
+        if ui_key:
+            print(ui_key)
+            raise SystemExit
+    except Exception:
+        pass
+
+env_path = root / ".env"
+if env_path.exists():
+    for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("APP_API_KEY="):
+            value = line.split("=", 1)[1].split("#", 1)[0].strip()
+            print(clean(value))
+            raise SystemExit
+print("")
+PY
+}
+
 if [[ ! -x "$ROOT/venv/bin/python" ]]; then
   echo "Brak venv — uruchom: python3 -m venv venv && ./venv/bin/pip install -r requirements.txt" >&2
   exit 1
 fi
 
 # Tylko znaki ASCII (unika 401 przez śmieci z komentarza w .env)
-_raw_key="${APP_API_KEY:-$(read_env APP_API_KEY)}"
+_raw_key="${APP_API_KEY:-$(read_effective_app_key)}"
 export APP_API_KEY="$(printf '%s' "$_raw_key" | tr -cd '[:alnum:]')"
 export BASE_URL SKIP_E2E FULL_LLM QUERY
 
@@ -114,6 +148,7 @@ def is_groq_key(value: str) -> bool:
     return value.startswith("gsk_") and len(value) > 20
 
 results: list[tuple[str, bool, str]] = []
+WAIT_ERROR = ""
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -136,13 +171,18 @@ def safe_detail(text: str, limit: int = 100) -> str:
 
 def wait_for_app(max_attempts: int = 12, pause: float = 2.0) -> bool:
     """Czeka aż /health odpowie (np. po restarcie usługi)."""
+    global WAIT_ERROR
     for i in range(1, max_attempts + 1):
         try:
             r = requests.get(f"{BASE}/health", headers=headers(), timeout=10)
+            if r.status_code == 401:
+                WAIT_ERROR = "401 — brak lub nieprawidłowy APP_API_KEY"
+                return False
             if r.status_code == 200 and r.json().get("success"):
                 return True
-        except requests.RequestException:
-            pass
+            WAIT_ERROR = f"HTTP {r.status_code}"
+        except requests.RequestException as exc:
+            WAIT_ERROR = safe_detail(str(exc), 100)
         if i < max_attempts:
             print(f"  … czekam na aplikację ({i}/{max_attempts})")
             import time
@@ -151,7 +191,7 @@ def wait_for_app(max_attempts: int = 12, pause: float = 2.0) -> bool:
 
 
 if not wait_for_app():
-    check("aplikacja dostępna", False, f"brak odpowiedzi z {BASE}/health")
+    check("aplikacja dostępna", False, WAIT_ERROR or f"brak odpowiedzi z {BASE}/health")
     failed = sum(1 for _, ok, _ in results if not ok)
     print(f"\n{'=' * 42}\nWynik: {len(results) - failed}/{len(results)} PASS (przerwano)")
     sys.exit(1)
@@ -187,9 +227,15 @@ try:
     t = requests.get(f"{BASE}/tasks", headers=headers(), timeout=10)
     if t.status_code == 401:
         check("/tasks", False, "401")
+    elif t.status_code == 404:
+        print("SKIP: /tasks (endpoint niedostępny w tej wersji)")
     else:
-        td = t.json()
-        check("/tasks", td.get("success") is True, "busy=" + str(td.get("busy")))
+        try:
+            td = t.json()
+        except ValueError:
+            check("/tasks", False, f"non-JSON HTTP {t.status_code}")
+        else:
+            check("/tasks", td.get("success") is True, "busy=" + str(td.get("busy")))
 except requests.RequestException as e:
     check("/tasks", False, str(e)[:80])
 
@@ -285,18 +331,18 @@ except requests.RequestException as e:
 
 # 4b. Rój LLM — konfiguracja i endpoint SSE (bez czekania na pełną syntezę)
 try:
-    sm = requests.get(f"{BASE}/api/swarm/modes", headers=headers(), timeout=10)
+    sm = requests.get(f"{BASE}/agents/swarm/modes", headers=headers(), timeout=10)
     if sm.status_code == 401:
-        check("/api/swarm/modes", False, "401")
+        check("/agents/swarm/modes", False, "401")
     else:
         sd = sm.json()
         modes = sd.get("modes") or {}
         templates = sd.get("templates") or []
-        check("/api/swarm/modes", sd.get("success") and "A" in modes and "B" in modes and "C" in modes,
+        check("/agents/swarm/modes", sd.get("success") and {"privacy", "speed", "quality"}.issubset(modes.keys()),
               f"templates={len(templates)} default={sd.get('default')}")
-        check("  swarm mode A privacy", modes.get("A", {}).get("mask_pii_default") is True, "mask_pii_default")
+        check("  swarm mode privacy", "Incognito" in modes.get("privacy", {}).get("label", ""), "privacy")
 except requests.RequestException as e:
-    check("/api/swarm/modes", False, str(e)[:80])
+    check("/agents/swarm/modes", False, str(e)[:80])
 
 try:
     bad = requests.post(

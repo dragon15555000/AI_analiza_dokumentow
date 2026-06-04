@@ -5450,6 +5450,10 @@ def agents_swarm_stream():
     swarm_mode = data.get('swarm_mode', 'quality')
     file_filter = data.get('file_filter') or None
 
+    def sse(event, d):
+        import json as _j
+        return f"event: {event}\ndata: {_j.dumps(d, ensure_ascii=False)}\n\n"
+
     if not query:
         def _err():
             yield sse('error', {'error': 'Zapytanie jest puste'})
@@ -5459,10 +5463,6 @@ def agents_swarm_stream():
     cfg = SWARM_MODES.get(swarm_mode, SWARM_MODES['quality'])
 
     def generate():
-        def sse(event, d):
-            import json as _j
-            return f"event: {event}\ndata: {_j.dumps(d, ensure_ascii=False)}\n\n"
-
         try:
             yield sse('progress', {'msg': 'Pobieranie fragmentów z bazy wektorowej…', 'step': 1})
 
