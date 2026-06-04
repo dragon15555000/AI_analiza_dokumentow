@@ -759,6 +759,9 @@ def _call_openrouter_once(prompt: str, system: str, model: str,
                     logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
                     time.sleep(wait)
                 continue
+            if _is_openrouter_quota_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA:
+                logger.warning("OpenRouter 402/quota (non-stream) → fallback do Ollama")
+                return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="402/quota")
             if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
                 try:
                     status = e.response.status_code
@@ -766,18 +769,14 @@ def _call_openrouter_once(prompt: str, system: str, model: str,
                     status = None
                 if status == 400:
                     logger.warning("OpenRouter 400 → fallback do Ollama")
-                    result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-                    if isinstance(result, dict):
-                        return result
-                    return {"response": str(result)}
+                    return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="400")
             break
 
-    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
-        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-        if isinstance(result, dict):
-            return result
-        return {"response": str(result)}
+    if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        return _fallback_openrouter_to_ollama(
+            prompt, system, stream=False,
+            reason="OpenRouter rate limit/quota (non-stream)",
+        )
 
     raise last_error if last_error else RuntimeError("OpenRouter call failed")
 
@@ -849,12 +848,16 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
                     logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
                     time.sleep(wait)
                 continue
+            if _is_openrouter_quota_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA:
+                logger.warning("OpenRouter 402/quota (stream) → fallback do Ollama")
+                last_error = e
+                break
             break
 
     err_msg = str(last_error) if last_error else "nieznany błąd"
 
-    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+    if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        logger.info("OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
         if isinstance(meta, dict):
             meta["provider_used"] = "ollama"
             meta["model_used"] = LLM_MODEL
@@ -891,6 +894,8 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
     if _is_rate_limit_error(last_error):
         friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
         yield friendly
+    elif _is_openrouter_quota_error(last_error):
+        yield "[Błąd OpenRouter: brak kredytów (402). Doładuj konto na openrouter.ai lub użyj Ollama."
     else:
         yield f"[Błąd OpenRouter streaming: {err_msg}]"
 
@@ -935,12 +940,10 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                     continue
                 raise
 
-        if _is_openrouter_no_endpoints_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            logger.info("OpenRouter no-endpoints → fallback do Ollama")
+        if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            logger.info("OpenRouter no-endpoints/limit → fallback do Ollama")
             return _call_ollama(prompt, system, stream=True, model=LLM_MODEL)
 
-        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            return _call_ollama(prompt, system, stream=True, model=LLM_MODEL)
         raise last_error if last_error else RuntimeError("OpenRouter call failed")
 
     last_error = None
@@ -953,6 +956,10 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                 logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
                 continue
 
+            if _is_openrouter_quota_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA:
+                logger.warning("OpenRouter 402/quota → fallback do Ollama")
+                return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="402/quota")
+
             if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
                 try:
                     status = e.response.status_code
@@ -960,28 +967,16 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                     status = None
                 if status == 400:
                     logger.warning("OpenRouter 400 → fallback do Ollama")
-                    result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-                    if isinstance(result, dict):
-                        return result
-                    return {"response": str(result)}
-            if _is_rate_limit_error(e):
-                # 429 nadal obsługujemy na poziomie wywołania modelu; tutaj nie przełączamy modeli.
+                    return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="400")
+            if _is_rate_limit_error(e) or _is_openrouter_quota_error(e):
                 break
             raise
 
-    if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info("OpenRouter rate limit (non-stream) → fallback do Ollama")
-        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-        if isinstance(result, dict):
-            return result
-        return {"response": str(result)}
-
-    if _is_openrouter_no_endpoints_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info("OpenRouter no-endpoints (non-stream) → fallback do Ollama")
-        result = _call_ollama(prompt, system, stream=False, model=LLM_MODEL)
-        if isinstance(result, dict):
-            return result
-        return {"response": str(result)}
+    if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+        return _fallback_openrouter_to_ollama(
+            prompt, system, stream=False,
+            reason="OpenRouter limit/quota (non-stream)",
+        )
 
     raise last_error if last_error else RuntimeError("OpenRouter call failed")
 
@@ -1431,6 +1426,39 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
+def _is_openrouter_quota_error(exc: Exception) -> bool:
+    """402/403 — brak kredytów lub wyczerpany limit konta OpenRouter."""
+    if exc is None:
+        return False
+    msg = str(exc).lower()
+    if any(x in msg for x in ("402", "403", "payment required", "insufficient credit", "insufficient balance")):
+        return True
+    if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
+        try:
+            if exc.response.status_code in (402, 403):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _openrouter_should_fallback_to_ollama(exc: Exception) -> bool:
+    return (
+        _is_rate_limit_error(exc)
+        or _is_openrouter_quota_error(exc)
+        or _is_openrouter_no_endpoints_error(exc)
+    )
+
+
+def _fallback_openrouter_to_ollama(prompt: str, system: str, *, stream: bool, reason: str) -> dict | requests.Response:
+    """Wspólny fallback OpenRouter → lokalna Ollama."""
+    logger.info("%s → fallback do Ollama (%s)", reason, LLM_MODEL)
+    result = _call_ollama(prompt, system, stream=stream, model=LLM_MODEL)
+    if isinstance(result, dict):
+        return result
+    return {"response": str(result)}
+
+
 
 def _get_retry_after(exc: Exception) -> float | None:
     """Próbuje wyciągnąć Retry-After z nagłówków odpowiedzi."""
@@ -1743,8 +1771,8 @@ def stream_llm_tokens(prompt: str, system: str = "",
                 yield f"[Błąd fallback na Ollama: {fb_err}]"
                 return
 
-        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+        if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
+            logger.info("OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
             ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
             ollama_payload = {
                 "model": LLM_MODEL,
@@ -1776,6 +1804,8 @@ def stream_llm_tokens(prompt: str, system: str = "",
         if _is_rate_limit_error(last_error):
             friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
             yield friendly
+        elif _is_openrouter_quota_error(last_error):
+            yield "[Błąd OpenRouter: brak kredytów (402). Doładuj konto na openrouter.ai lub użyj Ollama."
         elif last_error is not None:
             yield f"[Błąd OpenRouter streaming: {last_error}]"
 

@@ -148,11 +148,17 @@ MODEL_REGISTRY: dict = {
         "free": True, "rate_rpm": 20, "rate_day": 200,
         "tags": ["analiza", "prawo", "długi_kontekst", "raporty", "rozumowanie"],
     },
-    "google/gemini-2.0-flash-exp:free": {
-        "name": "Gemini 2.0 Flash", "short": "Gemini Flash", "provider": "Google",
-        "icon": "⚡", "context_k": 1000, "speed_tier": 1, "quality_tier": 2,
-        "free": True, "rate_rpm": 15, "rate_day": 1500,
-        "tags": ["szybkość", "bardzo_długi_kontekst", "podsumowania"],
+    "meta-llama/llama-3.2-3b-instruct:free": {
+        "name": "Llama 3.2 3B", "short": "Llama 3.2 3B", "provider": "Meta",
+        "icon": "⚡", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
+        "free": True, "rate_rpm": 30, "rate_day": 500,
+        "tags": ["szybkość", "krótkie_pytania", "klasyfikacja", "swarm"],
+    },
+    "openai/gpt-oss-20b:free": {
+        "name": "GPT-OSS 20B", "short": "GPT-OSS 20B", "provider": "OpenAI",
+        "icon": "🏃", "context_k": 128, "speed_tier": 2, "quality_tier": 2,
+        "free": True, "rate_rpm": 20, "rate_day": 300,
+        "tags": ["analiza", "ekstrakcja", "swarm"],
     },
     "mistralai/mistral-7b-instruct:free": {
         "name": "Mistral 7B", "short": "Mistral 7B", "provider": "Mistral AI",
@@ -160,8 +166,8 @@ MODEL_REGISTRY: dict = {
         "free": True, "rate_rpm": 30, "rate_day": 500,
         "tags": ["szybkość", "krótkie_pytania", "klasyfikacja"],
     },
-    "qwen/qwen-2.5-7b-instruct:free": {
-        "name": "Qwen 2.5 7B", "short": "Qwen 7B", "provider": "Alibaba",
+    "qwen/qwen3-coder:free": {
+        "name": "Qwen3 Coder", "short": "Qwen3 Coder", "provider": "Alibaba",
         "icon": "🔷", "context_k": 128, "speed_tier": 1, "quality_tier": 2,
         "free": True, "rate_rpm": 20, "rate_day": 300,
         "tags": ["dane_strukturalne", "tabele", "kod", "ekstrakcja"],
@@ -172,15 +178,9 @@ MODEL_REGISTRY: dict = {
         "free": True, "rate_rpm": 20, "rate_day": 200,
         "tags": ["szybkość", "klasyfikacja", "ekstrakcja", "fragmenty"],
     },
-    "deepseek/deepseek-r1:free": {
-        "name": "DeepSeek R1", "short": "DeepSeek R1", "provider": "DeepSeek",
-        "icon": "🧠", "context_k": 64, "speed_tier": 3, "quality_tier": 3,
-        "free": True, "rate_rpm": 10, "rate_day": 100,
-        "tags": ["rozumowanie", "matematyka", "analiza_krok_po_kroku"],
-    },
-    "microsoft/phi-3-mini-128k-instruct:free": {
-        "name": "Phi-3 Mini 128k", "short": "Phi-3 Mini", "provider": "Microsoft",
-        "icon": "🔬", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
+    "z-ai/glm-4.5-air:free": {
+        "name": "GLM 4.5 Air", "short": "GLM 4.5", "provider": "Z.AI",
+        "icon": "🔬", "context_k": 128, "speed_tier": 2, "quality_tier": 2,
         "free": True, "rate_rpm": 20, "rate_day": 200,
         "tags": ["szybkość", "długi_kontekst", "fragmenty"],
     },

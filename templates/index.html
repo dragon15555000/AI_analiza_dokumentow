@@ -1908,6 +1908,8 @@ table { margin: 0; }
     </div>
   </div>
 
+  <div id="fleetOrBanner" class="alert alert-warning py-2 px-3 small d-none mb-3"></div>
+
   <!-- Karty modeli -->
   <div id="fleetCards" class="row g-3 mb-4"></div>
 
@@ -7626,7 +7628,22 @@ let _fleetPingTotal = 0;
 function fleetLoad() {
     fetch('/api/models/registry')
         .then(r => r.json())
-        .then(d => { if (d.success) _fleetRender(d.models); })
+        .then(d => {
+            if (!d.success) return;
+            const banner = document.getElementById('fleetOrBanner');
+            if (banner) {
+                if (d.openrouter_unhealthy) {
+                    banner.classList.remove('d-none');
+                    banner.innerHTML = '⚠️ <strong>OpenRouter niedostępny</strong> (401/402 — sprawdź klucz lub kredyty w '
+                        + '<a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">OpenRouter</a>). '
+                        + 'Rój agentów użyje <strong>custom endpointów</strong> (clude, gem1.5, groq) i Ollama.';
+                } else {
+                    banner.classList.add('d-none');
+                    banner.textContent = '';
+                }
+            }
+            _fleetRender(d.models);
+        })
         .catch(() => {});
 }
 
@@ -7647,6 +7664,10 @@ function _fleetRender(models) {
             : live.ping_ok === false ? 'err' : 'unk';
         const statusLabel = {ok:'✓ online', slow:'⚠ wolny', err:'✗ błąd', unk:'? nieznany'}[status];
         const pingText = _fleetPingText(live);
+        const safeId = mid.replace(/\//g,'_').replace(/:/g,'-');
+        const errLine = live.ping_err
+            ? `<div class="text-danger mt-1" style="font-size:0.68rem;line-height:1.3;" id="fleet-err-${safeId}">${escapeHtml(live.ping_err)}</div>`
+            : `<div class="text-danger mt-1 d-none" style="font-size:0.68rem;line-height:1.3;" id="fleet-err-${safeId}"></div>`;
 
         const tiers = n => Array.from({length:3}, (_,i) =>
             `<div class="fleet-tier-pip${i < n ? ' filled' : ''}"></div>`).join('');
@@ -7657,7 +7678,7 @@ function _fleetRender(models) {
 
         const col = document.createElement('div');
         col.className = 'col-sm-6 col-lg-4 col-xl-3';
-        col.id = `fleet-card-${mid.replace(/\//g,'_').replace(/:/g,'-')}`;
+        col.id = `fleet-card-${safeId}`;
         col.innerHTML = `
           <div class="fleet-card fleet-${status}">
             <div class="d-flex align-items-start justify-content-between mb-2">
@@ -7669,13 +7690,14 @@ function _fleetRender(models) {
                 </div>
               </div>
               <div class="d-flex align-items-center gap-1">
-                <div class="fleet-status-dot fleet-dot-${status}" id="fleet-dot-${mid.replace(/\//g,'_').replace(/:/g,'-')}"></div>
-                <span style="font-size:0.69rem;color:var(--c-muted);" id="fleet-status-lbl-${mid.replace(/\//g,'_').replace(/:/g,'-')}">${statusLabel}</span>
+                <div class="fleet-status-dot fleet-dot-${status}" id="fleet-dot-${safeId}"></div>
+                <span style="font-size:0.69rem;color:var(--c-muted);" id="fleet-status-lbl-${safeId}">${statusLabel}</span>
               </div>
             </div>
+            ${errLine}
             <div class="d-flex gap-3 mb-2" style="font-size:0.75rem;color:var(--c-muted);">
               <span title="Okno kontekstu">📄 ${m.context_k}k</span>
-              <span title="Ping" id="fleet-ping-${mid.replace(/\//g,'_').replace(/:/g,'-')}">⏱ ${pingText}</span>
+              <span title="Ping" id="fleet-ping-${safeId}">⏱ ${pingText}</span>
               <span title="RPM limit">🔢 ${m.rate_rpm}/min</span>
             </div>
             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -7689,7 +7711,7 @@ function _fleetRender(models) {
               </div>
               <div>
                 <div class="small text-muted" style="font-size:0.68rem;">Wynik</div>
-                <div class="fw-bold" style="font-size:0.88rem;color:var(--c-accent);" id="fleet-score-${mid.replace(/\//g,'_').replace(/:/g,'-')}">${m.score||'—'}</div>
+                <div class="fw-bold" style="font-size:0.88rem;color:var(--c-accent);" id="fleet-score-${safeId}">${m.score||'—'}</div>
               </div>
             </div>
             <div class="d-flex flex-wrap gap-1">${tags}</div>
@@ -7791,11 +7813,22 @@ function fleetPingAll() {
                                 if (lbl) lbl.textContent = '✗ błąd';
                                 if (card) { card.classList.remove('fleet-unk','fleet-ok','fleet-slow','fleet-err'); card.classList.add('fleet-err'); }
                             }
+                            const errEl = document.getElementById(`fleet-err-${safeId}`);
+                            if (errEl) {
+                                if (ev.data.err) {
+                                    errEl.textContent = ev.data.err;
+                                    errEl.classList.remove('d-none');
+                                } else {
+                                    errEl.textContent = '';
+                                    errEl.classList.add('d-none');
+                                }
+                            }
                             if (ping) ping.textContent = `⏱ ${ev.data.ms} ms`;
                             if (score) score.textContent = ev.data.score || (ev.data.avg_ms ? Math.round(70 - ev.data.avg_ms/1000) : '—');
                         } else if (ev.event === 'done') {
                             document.getElementById('fleetPingBtn').disabled = false;
                             document.getElementById('fleetPingProgress').style.display = 'none';
+                            fleetLoad();
                         }
                     } catch(e) {}
                 });

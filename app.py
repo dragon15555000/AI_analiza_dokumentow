@@ -47,6 +47,7 @@ from llm_client import (
     _gemini_response_text,
     _custom_endpoint_is_anthropic,
     _test_claude_api,
+    _test_openrouter_api_key,
 )
 from task_queue import submit_task, get_task, update_task, cancel_task, get_task_status
 
@@ -2394,6 +2395,7 @@ for _mid in MODEL_REGISTRY:
         "ping_ok": None,
         "ping_ms": None,
         "ping_ts": None,
+        "ping_err": None,
         "err_count": 0,
         "ok_count": 0,
         "avg_ms": None,
@@ -4674,6 +4676,72 @@ def collection_profile():
 # ===== MULTI-AGENT SWARM =====
 _SWARM_OR_SEMAPHORE = threading.Semaphore(2)
 
+
+def _format_swarm_worker_error(err: str) -> str:
+    low = (err or "").lower()
+    if "402" in low or "payment required" in low:
+        return (
+            "OpenRouter: brak kredytów (402). Doładuj konto na openrouter.ai "
+            "lub agent spróbuje lokalnej Ollama."
+        )
+    if "429" in low or "rate limit" in low:
+        return "OpenRouter: limit RPM (429) — odczekaj chwilę lub użyj Ollama."
+    return err or "Nieznany błąd"
+
+
+def _swarm_worker_llm(prompt: str, model_id: str, model_name: str) -> tuple[str, str]:
+    """Wywołanie LLM dla workera roju: custom endpoint, OpenRouter, potem Ollama."""
+    system = "Jesteś analitykiem dokumentów. Odpowiadaj po polsku, zwięźle i konkretnie."
+
+    if _swarm_is_custom_endpoint(model_id):
+        with _SWARM_OR_SEMAPHORE:
+            result = call_llm(
+                prompt=prompt,
+                system=system,
+                stream=False,
+                provider=model_id,
+                model=None,
+            )
+        text = _llm_response_text(result)
+        if isinstance(text, str) and text.strip() and not text.startswith("[Błąd"):
+            return text, model_name
+        raise RuntimeError((text or "Brak odpowiedzi custom endpoint")[:200])
+
+    or_err = None
+    with _SWARM_OR_SEMAPHORE:
+        try:
+            result = call_llm(
+                prompt=prompt,
+                system=system,
+                stream=False,
+                provider="openrouter",
+                model=model_id,
+            )
+            text = _llm_response_text(result)
+            if isinstance(text, str) and text.strip() and not text.startswith("[Błąd") and not text.startswith("[RATE_LIMIT]"):
+                return text, model_name
+            or_err = (text or "Brak odpowiedzi OpenRouter")[:200]
+        except Exception as exc:
+            or_err = str(exc)[:200]
+
+    try:
+        with _SWARM_OR_SEMAPHORE:
+            result = call_llm(
+                prompt=prompt,
+                system=system,
+                stream=False,
+                provider="ollama",
+                model=LLM_MODEL,
+            )
+        text = _llm_response_text(result)
+        if isinstance(text, str) and text.strip() and not text.startswith("[Błąd"):
+            label = f"{model_name} → Ollama ({LLM_MODEL})"
+            return text, label
+    except Exception as exc:
+        raise RuntimeError(f"{_format_swarm_worker_error(or_err)}; Ollama: {exc}") from exc
+
+    raise RuntimeError(_format_swarm_worker_error(or_err or "Brak odpowiedzi LLM"))
+
 def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
     """Dzieli chunki na grupy workerów wg trybu."""
     import random as _rnd
@@ -4692,10 +4760,18 @@ def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
 
 def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
     """Zwraca liste (model_id, model_name) dla kazdego workera.
-    Inteligentnie wybiera custom endpointy jesli sa dostepne i maja wysoki score."""
+    Inteligentnie wybiera custom endpointy jesli OpenRouter jest niedostepny."""
     import random as _rnd
-    pool = list(FREE_MODELS_LIST)
+    online_custom = _swarm_online_custom_endpoints(limit=max(n_workers, 4))
 
+    if online_custom and _openrouter_fleet_unhealthy():
+        if cfg.get("use_random_models"):
+            pool = list(online_custom)
+            _rnd.shuffle(pool)
+            return [pool[i % len(pool)] for i in range(n_workers)]
+        return [online_custom[i % len(online_custom)] for i in range(n_workers)]
+
+    pool = list(FREE_MODELS_LIST)
     custom_endpoints = _get_best_custom_endpoints_wrapper(limit=2)
     if custom_endpoints:
         pool.extend(custom_endpoints)
@@ -4705,6 +4781,13 @@ def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
         return [pool[i % len(pool)] for i in range(n_workers)]
 
     preferred = cfg.get("preferred_model", pool[0] if pool else FREE_MODELS_LIST[0])
+    if online_custom and preferred[0].endswith(":free"):
+        # Posz interleave: custom + OpenRouter free
+        mixed = []
+        for i in range(n_workers):
+            mixed.append(online_custom[i % len(online_custom)] if i % 2 == 0 else preferred)
+        return mixed
+
     return [preferred] * n_workers
 
 
@@ -4779,22 +4862,10 @@ def agents_swarm_stream():
                         f"Jeśli w tych fragmentach brakuje odpowiedzi — napisz krótko: "
                         f"'Brak danych w tym fragmencie.'"
                     )
-                    with _SWARM_OR_SEMAPHORE:
-                        result = call_llm(
-                            prompt=prompt,
-                            system="Jesteś analitykiem dokumentów. Odpowiadaj po polsku, zwięźle i konkretnie.",
-                            stream=False,
-                            provider='openrouter',
-                            model=model_id,
-                        )
-                    text = _llm_response_text(result)
-                    if isinstance(text, str) and (
-                        text.startswith("[Błąd") or text.startswith("[RATE_LIMIT]")
-                    ):
-                        return ('error', worker_id, None, model_name, text[:200])
-                    return ('done', worker_id, text, model_name, None)
+                    text, used_name = _swarm_worker_llm(prompt, model_id, model_name)
+                    return ('done', worker_id, text, used_name, None)
                 except Exception as exc:
-                    return ('error', worker_id, None, model_name, str(exc)[:200])
+                    return ('error', worker_id, None, model_name, _format_swarm_worker_error(str(exc)))
 
             partial: dict[int, str] = {}
             worker_timeout = 240
@@ -4841,7 +4912,10 @@ def agents_swarm_stream():
 
             if not any(partial.get(i) for i in range(n_workers)):
                 yield sse('error', {
-                    'error': 'Żaden agent nie zwrócił wyniku — sprawdź limity OpenRouter (429) lub uruchom ponownie za chwilę.',
+                    'error': (
+                        'Żaden agent nie zwrócił wyniku — sprawdź kredyty OpenRouter (402), '
+                        'limity RPM (429) lub uruchom ponownie (fallback: Ollama).'
+                    ),
                 })
                 return
 
@@ -4915,6 +4989,75 @@ def agents_swarm_modes():
 
 # ===== MODEL FLEET =====
 
+_FLEET_PING_SEMAPHORE = threading.Semaphore(3)
+
+
+def _format_openrouter_ping_error(status: int, body: str) -> str:
+    """Czytelny komunikat błędu ping OpenRouter dla Floty."""
+    msg = ""
+    try:
+        payload = json.loads(body or "{}")
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                msg = (err.get("message") or "").strip()
+            elif isinstance(err, str):
+                msg = err.strip()
+    except Exception:
+        msg = (body or "").strip()[:120]
+
+    if status == 401:
+        return f"OpenRouter 401: nieprawidłowy klucz API ({msg or 'User not found'})"
+    if status == 402:
+        return f"OpenRouter 402: brak kredytów ({msg or 'Payment Required'})"
+    if status == 429:
+        return f"OpenRouter 429: limit RPM ({msg or 'Too Many Requests'})"
+    if status == 404 and "no endpoints" in (msg or body or "").lower():
+        return f"OpenRouter 404: model niedostępny ({msg or 'No endpoints found'})"
+    if msg:
+        return f"OpenRouter HTTP {status}: {msg[:120]}"
+    return f"OpenRouter HTTP {status}"
+
+
+def _openrouter_fleet_unhealthy() -> bool:
+    """True gdy ostatni ping wskazuje na martwy klucz / brak kredytów OpenRouter."""
+    if not OPENROUTER_API_KEY:
+        return True
+    bad_markers = ("401", "402", "403", "user not found", "payment", "invalid", "unauthorized")
+    checked = 0
+    failed = 0
+    for mid in MODEL_REGISTRY:
+        live = _model_live.get(mid, {})
+        if live.get("ping_ok") is None:
+            continue
+        checked += 1
+        if live.get("ping_ok") is False:
+            err = (live.get("ping_err") or "").lower()
+            if any(x in err for x in bad_markers):
+                failed += 1
+    return checked > 0 and failed >= max(1, checked // 2)
+
+
+def _swarm_is_custom_endpoint(model_id: str) -> bool:
+    pool = _load_provider_pool()
+    for ep in pool.get("custom_endpoints", []):
+        if ep.get("id") == model_id and ep.get("active", True):
+            return True
+    return False
+
+
+def _swarm_online_custom_endpoints(limit: int = 6) -> list[tuple[str, str]]:
+    """Custom endpointy z Floty (pomija te z ostatnim ping_ok=False)."""
+    stats_all = _load_custom_endpoint_stats()
+    out: list[tuple[str, str]] = []
+    for eid, name in _get_best_custom_endpoints_wrapper(limit=limit):
+        st = stats_all.get(eid, {})
+        if st.get("ping_ok") is False:
+            continue
+        out.append((eid, name))
+    return out
+
+
 @app.route('/api/models/registry', methods=['GET'])
 def models_registry_endpoint():
     """Zwraca rejestr modeli + live statystyki + custom endpointy."""
@@ -4951,7 +5094,7 @@ def models_registry_endpoint():
             "score": _custom_endpoint_score(eid)
         }
 
-    return jsonify({"success": True, "models": out})
+    return jsonify({"success": True, "models": out, "openrouter_unhealthy": _openrouter_fleet_unhealthy()})
 
 
 @app.route('/api/llm/fleet', methods=['GET'])
@@ -5006,30 +5149,32 @@ def models_ping_all():
         def _ping_model(mid: str):
             t0 = time.time()
             try:
-                r = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {_pick_openrouter_key()}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "http://localhost",
-                        "X-Title": "AI Analiza Dokumentów",
-                    },
-                    json={
-                        "model": mid,
-                        "messages": [{"role": "user", "content": TEST}],
-                        "max_tokens": 5,
-                        "temperature": 0.0,
-                    },
-                    timeout=30,
-                )
-                ms  = int((time.time() - t0) * 1000)
+                with _FLEET_PING_SEMAPHORE:
+                    r = requests.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {_pick_openrouter_key()}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "http://localhost",
+                            "X-Title": "AI Analiza Dokumentów",
+                        },
+                        json={
+                            "model": mid,
+                            "messages": [{"role": "user", "content": TEST}],
+                            "max_tokens": 5,
+                            "temperature": 0.0,
+                        },
+                        timeout=30,
+                    )
+                ms = int((time.time() - t0) * 1000)
                 if r.status_code != 200:
-                    return ('model', mid, False, ms, (r.text or f"HTTP {r.status_code}")[:120])
+                    err = _format_openrouter_ping_error(r.status_code, r.text or "")
+                    return ('model', mid, False, ms, err)
                 txt = _llm_response_text(r.json())
-                ok  = bool(txt and not txt.startswith('['))
-                return ('model', mid, ok, ms, None)
+                ok = bool(txt and not txt.startswith('['))
+                return ('model', mid, ok, ms, None if ok else "Pusta odpowiedź modelu")
             except Exception as exc:
-                return ('model', mid, False, int((time.time() - t0) * 1000), str(exc)[:120])
+                return ('model', mid, False, int((time.time() - t0) * 1000), str(exc)[:160])
 
         def _ping_custom(endpoint_id: str, endpoint_url: str, endpoint_key: str, endpoint_name: str):
             t0 = time.time()
@@ -5071,6 +5216,7 @@ def models_ping_all():
                         live = _model_live[eid]
                         live['ping_ok'] = ok; live['ping_ms'] = ms
                         live['ping_ts'] = time.time()
+                        live['ping_err'] = None if ok else (err or "Błąd ping")
                         if ok:
                             live['ok_count'] += 1
                             prev = live.get('avg_ms')
