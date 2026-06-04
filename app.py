@@ -2288,6 +2288,15 @@ SWARM_MODES = {
     },
 }
 
+SWARM_DEFAULT_SEARCH_LIMIT = 20
+SWARM_DEFAULT_MAX_CHARS_PER_CHUNK = 1200
+SWARM_SEARCH_LIMIT_MIN = 3
+SWARM_SEARCH_LIMIT_MAX = 40
+SWARM_CHUNKS_PER_WORKER_MIN = 1
+SWARM_CHUNKS_PER_WORKER_MAX = 10
+SWARM_CHARS_PER_CHUNK_MIN = 300
+SWARM_CHARS_PER_CHUNK_MAX = 2500
+
 # ---- Cache embeddingów (SQLite) ----
 _CACHE_DB_PATH = Path(__file__).parent / "embedding_cache.db"
 
@@ -4760,11 +4769,58 @@ def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
     if cfg.get("shuffle_chunks"):
         _rnd.shuffle(data)
     data = data[:n_workers * max_per]
-    n = min(n_workers, len(data))
+    n = min(n_workers, len(data)) if data else 0
+    if n == 0:
+        return []
     groups: list[list] = [[] for _ in range(n)]
     for i, chunk in enumerate(data):
         groups[i % n].append(chunk)
     return [g for g in groups if g]
+
+
+def _swarm_clamp_int(value, default: int, min_v: int, max_v: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(min_v, min(max_v, n))
+
+
+def _build_swarm_run_cfg(mode_key: str, data: dict) -> dict:
+    """Kopia trybu roju z nadpisaniem limitów fragmentów z UI."""
+    base = SWARM_MODES.get(mode_key, SWARM_MODES["quality"])
+    cfg = dict(base)
+    cfg["search_limit"] = _swarm_clamp_int(
+        data.get("search_limit"),
+        int(base.get("search_limit") or SWARM_DEFAULT_SEARCH_LIMIT),
+        SWARM_SEARCH_LIMIT_MIN,
+        SWARM_SEARCH_LIMIT_MAX,
+    )
+    cfg["max_chunks_per_worker"] = _swarm_clamp_int(
+        data.get("max_chunks_per_worker"),
+        int(base.get("max_chunks_per_worker") or 3),
+        SWARM_CHUNKS_PER_WORKER_MIN,
+        SWARM_CHUNKS_PER_WORKER_MAX,
+    )
+    cfg["max_chars_per_chunk"] = _swarm_clamp_int(
+        data.get("max_chars_per_chunk"),
+        SWARM_DEFAULT_MAX_CHARS_PER_CHUNK,
+        SWARM_CHARS_PER_CHUNK_MIN,
+        SWARM_CHARS_PER_CHUNK_MAX,
+    )
+    return cfg
+
+
+def _prepare_swarm_context_chunks(contexts: list, max_chars_per_chunk: int) -> list[dict]:
+    """Skraca tekst chunków wysyłany do agentów LLM."""
+    limit = max(SWARM_CHARS_PER_CHUNK_MIN, int(max_chars_per_chunk or SWARM_DEFAULT_MAX_CHARS_PER_CHUNK))
+    return [
+        {
+            "file": c.get("file", ""),
+            "text": _sanitize_for_prompt(c.get("text", ""), limit),
+        }
+        for c in contexts
+    ]
 
 
 def _assign_swarm_models(n_workers: int, cfg: dict) -> list[tuple]:
@@ -4819,15 +4875,18 @@ def agents_swarm_stream():
         return Response(stream_with_context(_err()), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
-    cfg = SWARM_MODES.get(swarm_mode, SWARM_MODES['quality'])
+    cfg = _build_swarm_run_cfg(swarm_mode, data)
 
     def generate():
         try:
             yield sse('progress', {'msg': 'Pobieranie fragmentów z bazy wektorowej…', 'step': 1})
 
             client = get_qdrant_client()
+            search_limit = cfg.get("search_limit", SWARM_DEFAULT_SEARCH_LIMIT)
             try:
-                raw_contexts, _ = _retrieve_search_contexts(client, query, 20, file_filter, 'detective')
+                raw_contexts, _ = _retrieve_search_contexts(
+                    client, query, search_limit, file_filter, 'detective',
+                )
             except EmbeddingError as e:
                 yield sse('error', {'error': str(e)})
                 return
@@ -4836,9 +4895,15 @@ def agents_swarm_stream():
                 yield sse('error', {'error': 'Brak dokumentów w bazie dla tego zapytania.'})
                 return
 
-            groups = _split_chunks_for_swarm(raw_contexts, cfg)
+            max_chars = cfg.get("max_chars_per_chunk", SWARM_DEFAULT_MAX_CHARS_PER_CHUNK)
+            prepared = _prepare_swarm_context_chunks(raw_contexts, max_chars)
+            groups = _split_chunks_for_swarm(prepared, cfg)
             n_workers = len(groups)
+            if n_workers == 0:
+                yield sse('error', {'error': 'Brak fragmentów do analizy po zastosowaniu limitów.'})
+                return
             models = _assign_swarm_models(n_workers, cfg)
+            chunks_used = sum(len(g) for g in groups)
 
             yield sse('init', {
                 'n_workers': n_workers,
@@ -4846,6 +4911,10 @@ def agents_swarm_stream():
                 'mode_label': cfg['label'],
                 'mode_desc': cfg['desc'],
                 'total_chunks': len(raw_contexts),
+                'chunks_used': chunks_used,
+                'search_limit': search_limit,
+                'max_chunks_per_worker': cfg.get('max_chunks_per_worker'),
+                'max_chars_per_chunk': max_chars,
             })
 
             for i, ((model_id, model_name), group) in enumerate(zip(models, groups)):
@@ -4992,7 +5061,24 @@ def agents_swarm_modes():
     """Zwraca definicje trybów swarm do UI."""
     return jsonify({
         "success": True,
-        "modes": {k: {"label": v["label"], "desc": v["desc"]} for k, v in SWARM_MODES.items()},
+        "defaults": {
+            "search_limit": SWARM_DEFAULT_SEARCH_LIMIT,
+            "max_chars_per_chunk": SWARM_DEFAULT_MAX_CHARS_PER_CHUNK,
+            "limits": {
+                "search_limit": [SWARM_SEARCH_LIMIT_MIN, SWARM_SEARCH_LIMIT_MAX],
+                "max_chunks_per_worker": [SWARM_CHUNKS_PER_WORKER_MIN, SWARM_CHUNKS_PER_WORKER_MAX],
+                "max_chars_per_chunk": [SWARM_CHARS_PER_CHUNK_MIN, SWARM_CHARS_PER_CHUNK_MAX],
+            },
+        },
+        "modes": {
+            k: {
+                "label": v["label"],
+                "desc": v["desc"],
+                "workers": v.get("workers"),
+                "max_chunks_per_worker": v.get("max_chunks_per_worker"),
+            }
+            for k, v in SWARM_MODES.items()
+        },
     })
 
 

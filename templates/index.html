@@ -1813,6 +1813,33 @@ table { margin: 0; }
           <input type="text" id="swarmFileFilter" class="form-control form-control-sm" placeholder="nazwa_pliku.pdf">
         </div>
 
+        <!-- Limity fragmentów -->
+        <div class="mb-3 p-2 rounded" style="background:#f8fafc;border:1px solid #e2e8f0;">
+          <div class="fw-bold small mb-2" style="color:var(--c-text);">📦 Fragmenty wysyłane do agentów</div>
+          <div class="mb-2">
+            <label class="form-label small mb-0" for="swarmSearchLimit">
+              Z wyszukiwania (max): <span id="swarmSearchLimitVal">20</span>
+            </label>
+            <input type="range" class="form-range" id="swarmSearchLimit" min="3" max="40" value="20"
+              oninput="swarmUpdateChunkLabels()">
+          </div>
+          <div class="mb-2">
+            <label class="form-label small mb-0" for="swarmMaxChunksPerWorker">
+              Chunków na agenta: <span id="swarmMaxChunksPerWorkerVal">6</span>
+            </label>
+            <input type="range" class="form-range" id="swarmMaxChunksPerWorker" min="1" max="10" value="6"
+              oninput="swarmUpdateChunkLabels()">
+          </div>
+          <div class="mb-1">
+            <label class="form-label small mb-0" for="swarmMaxCharsPerChunk">
+              Znaków na chunk: <span id="swarmMaxCharsPerChunkVal">1200</span>
+            </label>
+            <input type="range" class="form-range" id="swarmMaxCharsPerChunk" min="300" max="2500" step="100" value="1200"
+              oninput="swarmUpdateChunkLabels()">
+          </div>
+          <div class="small text-muted" id="swarmChunkHint">Mniejsze wartości = mniej tokenów, szybsze i tańsze wywołania.</div>
+        </div>
+
         <button class="btn btn-primary w-100" onclick="runSwarm()" id="swarmBtn">
           🚀 Uruchom rój
         </button>
@@ -2163,6 +2190,7 @@ function showTab(name) {
     else if (name === 'collections') llmConfigLoad();
     if (name === 'compare') renderCompareFileList();
     if (name === 'audit') auditTabInit();
+    if (name === 'swarm') swarmInitChunkControls();
     if (name === 'fleet') { fleetLoad(); providersLoad(); }
     if (name === 'reports') {
         setTimeout(() => {
@@ -7460,8 +7488,61 @@ document.querySelectorAll('.swarm-mode-card').forEach(card => {
         document.querySelectorAll('.swarm-mode-card').forEach(c => c.classList.remove('active'));
         card.classList.add('active');
         card.querySelector('input[type=radio]').checked = true;
+        swarmApplyModeChunkDefaults(card.dataset.mode);
     });
 });
+
+const SWARM_MODE_CHUNK_DEFAULTS = { quality: 6, speed: 5, privacy: 4 };
+
+function swarmUpdateChunkLabels() {
+    const sl = document.getElementById('swarmSearchLimit');
+    const cpw = document.getElementById('swarmMaxChunksPerWorker');
+    const cc = document.getElementById('swarmMaxCharsPerChunk');
+    if (sl) document.getElementById('swarmSearchLimitVal').textContent = sl.value;
+    if (cpw) document.getElementById('swarmMaxChunksPerWorkerVal').textContent = cpw.value;
+    if (cc) document.getElementById('swarmMaxCharsPerChunkVal').textContent = cc.value;
+    if (sl && cpw) {
+        const hint = document.getElementById('swarmChunkHint');
+        const mode = document.querySelector('input[name="swarmMode"]:checked')?.value || 'quality';
+        const workers = { quality: 3, speed: 4, privacy: 5 }[mode] || 3;
+        const used = Math.min(parseInt(sl.value, 10), workers * parseInt(cpw.value, 10));
+        if (hint) {
+            hint.textContent = `Szacunek: do ${used} fragmentów w roju (tryb ${mode}, max ${cpw.value}/agent, ${cc?.value || 1200} znak/chunk).`;
+        }
+    }
+    localStorage.setItem('swarm_search_limit', sl?.value || '20');
+    localStorage.setItem('swarm_max_chunks_per_worker', cpw?.value || '6');
+    localStorage.setItem('swarm_max_chars_per_chunk', cc?.value || '1200');
+}
+
+function swarmApplyModeChunkDefaults(mode) {
+    const cpw = document.getElementById('swarmMaxChunksPerWorker');
+    if (cpw && !localStorage.getItem('swarm_chunks_manual')) {
+        cpw.value = SWARM_MODE_CHUNK_DEFAULTS[mode] || 5;
+    }
+    swarmUpdateChunkLabels();
+}
+
+function swarmInitChunkControls() {
+    const sl = document.getElementById('swarmSearchLimit');
+    const cpw = document.getElementById('swarmMaxChunksPerWorker');
+    const cc = document.getElementById('swarmMaxCharsPerChunk');
+    if (sl && localStorage.getItem('swarm_search_limit')) sl.value = localStorage.getItem('swarm_search_limit');
+    if (cpw && localStorage.getItem('swarm_max_chunks_per_worker')) {
+        cpw.value = localStorage.getItem('swarm_max_chunks_per_worker');
+    } else if (cpw) {
+        const mode = document.querySelector('input[name="swarmMode"]:checked')?.value || 'quality';
+        cpw.value = SWARM_MODE_CHUNK_DEFAULTS[mode] || 6;
+    }
+    if (cc && localStorage.getItem('swarm_max_chars_per_chunk')) cc.value = localStorage.getItem('swarm_max_chars_per_chunk');
+    ['swarmSearchLimit', 'swarmMaxChunksPerWorker', 'swarmMaxCharsPerChunk'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => localStorage.setItem('swarm_chunks_manual', '1'));
+    });
+    swarmUpdateChunkLabels();
+}
+
+document.addEventListener('DOMContentLoaded', () => { swarmInitChunkControls(); });
 
 function stopSwarm() {
     if (_swarmAbort) { _swarmAbort.abort(); _swarmAbort = null; }
@@ -7507,7 +7588,18 @@ function runSwarm() {
 
     _swarmAbort = new AbortController();
 
-    streamSSEPost('/agents/swarm/stream', {query, swarm_mode: mode, file_filter: fileFilter}, {
+    const searchLimit = parseInt(document.getElementById('swarmSearchLimit')?.value || '20', 10);
+    const maxChunksPerWorker = parseInt(document.getElementById('swarmMaxChunksPerWorker')?.value || '6', 10);
+    const maxCharsPerChunk = parseInt(document.getElementById('swarmMaxCharsPerChunk')?.value || '1200', 10);
+
+    streamSSEPost('/agents/swarm/stream', {
+        query,
+        swarm_mode: mode,
+        file_filter: fileFilter,
+        search_limit: searchLimit,
+        max_chunks_per_worker: maxChunksPerWorker,
+        max_chars_per_chunk: maxCharsPerChunk,
+    }, {
         progress: (data) => {
             if (data.msg) {
                 document.getElementById('swarmProgress').textContent = data.msg;
@@ -7515,8 +7607,10 @@ function runSwarm() {
         },
         init: (data) => {
             _swarmWorkerCount = data.n_workers;
+            const used = data.chunks_used != null ? data.chunks_used : data.total_chunks;
+            const perChunk = data.max_chars_per_chunk ? ` · ${data.max_chars_per_chunk} zn/chunk` : '';
             document.getElementById('swarmProgress').textContent =
-                `${data.total_chunks} fragmentów → ${data.n_workers} agentów`;
+                `${used}/${data.total_chunks} fragmentów → ${data.n_workers} agentów${perChunk}`;
         },
         worker_start: (data) => {
             const card = document.createElement('div');
