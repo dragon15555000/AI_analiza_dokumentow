@@ -2829,25 +2829,18 @@ def _redact_api_keys(text: str) -> str:
 
 def _gemini_custom_generate_url(endpoint_url: str, key: str, model: str | None = None,
                                 stream: bool = False) -> str:
-    """Buduje pełny URL Gemini: /v1beta/models/{model}:generateContent."""
+    """Buduje kanoniczny URL Gemini — ignoruje wycofany model wpisany w custom endpoint URL."""
     method = "streamGenerateContent" if stream else "generateContent"
-    raw = (endpoint_url or "").strip().replace("{api_key}", key or "")
     effective_model = _normalize_gemini_model(model or GEMINI_MODEL)
+    base = f"{GEMINI_API_BASE}/models/{effective_model}:{method}"
 
-    if "generativelanguage.googleapis.com" not in raw.lower():
-        raw = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:{method}"
+    raw = (endpoint_url or "").strip()
+    params: dict[str, str] = {}
+    if raw:
+        parsed = urllib.parse.urlparse(raw.replace("{api_key}", key or ""))
+        params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+        params.pop("key", None)
 
-    parsed = urllib.parse.urlparse(raw)
-    base = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-    if "/models/" not in base:
-        base = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:{method}"
-    elif ":generateContent" in base or ":streamGenerateContent" in base:
-        base = re.sub(r":(?:streamGenerateContent|generateContent)$", f":{method}", base)
-    else:
-        base = base.rstrip("/") + f":{method}"
-
-    params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-    params.pop("key", None)
     if stream:
         params["alt"] = "sse"
     query = urllib.parse.urlencode(params)
