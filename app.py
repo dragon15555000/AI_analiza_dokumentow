@@ -714,7 +714,12 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
 # Google Gemini (bezpośrednie API — audyt dużych plików / logów)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+GEMINI_DEPRECATED_MODELS = frozenset({
+    "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
+    "gemini-1.5-flash-latest", "gemini-1.5-pro-latest",
+})
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", GEMINI_MODEL_DEFAULT).strip() or GEMINI_MODEL_DEFAULT
 try:
     GEMINI_AUDIT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("GEMINI_AUDIT_MAX_BYTES", str(12 * 1024 * 1024))))
 except ValueError:
@@ -1577,12 +1582,65 @@ def _effective_llm_model(provider: str | None = None) -> str:
     return LLM_MODEL
 
 
-def _gemini_generate_url(model: str, stream: bool = False) -> str:
+def _normalize_gemini_model(model: str | None) -> str:
+    """Usuwa prefix models/ i wybiera domyślny model, gdy brak wartości."""
+    raw = (model or GEMINI_MODEL or GEMINI_MODEL_DEFAULT).strip()
+    if raw.startswith("models/"):
+        raw = raw[7:].strip()
+    return raw or GEMINI_MODEL_DEFAULT
+
+
+def _list_gemini_generate_models(api_key: str) -> tuple[bool, list[str], str | None]:
+    """Zwraca krótkie nazwy modeli obsługujących generateContent."""
+    if not api_key:
+        return False, [], "Brak klucza API"
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        response = _gemini_request_with_retry("GET", url, timeout=8, max_retries=2)
+        data = response.json()
+        names: list[str] = []
+        for entry in data.get("models", []):
+            methods = entry.get("supportedGenerationMethods") or []
+            if "generateContent" not in methods:
+                continue
+            full_name = (entry.get("name") or "").strip()
+            if full_name.startswith("models/"):
+                full_name = full_name[7:]
+            if full_name:
+                names.append(full_name)
+        return True, names, None
+    except Exception as exc:
+        return False, [], str(exc)[:200]
+
+
+def _gemini_model_hint(api_key: str, model: str) -> str:
+    """Sugestia modelu po 404 — gemini-1.5-* jest wycofany od 2025."""
+    normalized = _normalize_gemini_model(model)
+    if normalized in GEMINI_DEPRECATED_MODELS:
+        base = (
+            f"Model {normalized} jest wycofany w Gemini API. "
+            f"Ustaw GEMINI_MODEL={GEMINI_MODEL_DEFAULT} w .env lub w konfiguracji LLM."
+        )
+    else:
+        base = f"Model {normalized} nie istnieje lub nie obsługuje generateContent."
+    ok, models, list_err = _list_gemini_generate_models(api_key)
+    if ok and models:
+        flash = [m for m in models if "flash" in m.lower()][:5]
+        sample = flash or models[:5]
+        return base + " Dostępne m.in.: " + ", ".join(sample) + "."
+    if list_err:
+        return base + f" (lista modeli: {list_err})"
+    return base
+
+
+def _gemini_generate_url(model: str, stream: bool = False, api_key: str | None = None) -> str:
     action = "streamGenerateContent" if stream else "generateContent"
     suffix = "?alt=sse" if stream else ""
+    key = (api_key or GEMINI_API_KEY).strip()
+    effective_model = _normalize_gemini_model(model)
     return (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{action}{suffix}"
-        f"?key={GEMINI_API_KEY}"
+        f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:{action}{suffix}"
+        f"?key={key}"
     )
 
 
@@ -1642,29 +1700,34 @@ def _gemini_request_with_retry(method: str, url: str, *, timeout: int = 60,
 
 
 def _check_gemini_health() -> dict:
-    """Lekkie sprawdzenie Gemini API (lista modeli)."""
+    """Sprawdza klucz Gemini i dostępność skonfigurowanego modelu."""
     if not GEMINI_API_KEY:
         return {"ok": False, "error": "Brak GEMINI_API_KEY"}
+    configured = _normalize_gemini_model(GEMINI_MODEL)
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-        response = _gemini_request_with_retry("GET", url, timeout=8, max_retries=2)
-        data = response.json()
-        models = [m.get("name", "") for m in data.get("models", [])]
-        has_model = any(GEMINI_MODEL in m for m in models)
-        return {
-            "ok": True,
+        ok, models, list_err = _list_gemini_generate_models(GEMINI_API_KEY)
+        if not ok:
+            return {"ok": False, "model": configured, "error": list_err or "Nie udało się pobrać listy modeli"}
+        has_model = configured in models
+        result = {
+            "ok": has_model,
             "models_available": len(models),
             "has_configured_model": has_model,
-            "model": GEMINI_MODEL,
-            "error": None,
+            "model": configured,
+            "deprecated_model": configured in GEMINI_DEPRECATED_MODELS,
+            "error": None if has_model else _gemini_model_hint(GEMINI_API_KEY, configured),
         }
+        if not has_model:
+            flash = [m for m in models if "flash" in m.lower()][:5]
+            result["suggested_models"] = flash or models[:5]
+        return result
     except requests.HTTPError as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status == 429:
-            return {"ok": False, "model": GEMINI_MODEL, "error": "Limit RPM Gemini (429)"}
-        return {"ok": False, "model": GEMINI_MODEL, "error": str(exc)[:120]}
+            return {"ok": False, "model": configured, "error": "Limit RPM Gemini (429)"}
+        return {"ok": False, "model": configured, "error": str(exc)[:120]}
     except Exception as e:
-        return {"ok": False, "model": GEMINI_MODEL, "error": str(e)[:120]}
+        return {"ok": False, "model": configured, "error": str(e)[:120]}
 
 
 def _redact_sensitive_log_text(text: str) -> str:
@@ -1701,7 +1764,7 @@ def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = Non
     if not GEMINI_API_KEY:
         yield "Błąd: Brak GEMINI_API_KEY w .env"
         return
-    effective_model = model or GEMINI_MODEL
+    effective_model = _normalize_gemini_model(model)
     url = _gemini_generate_url(effective_model, stream=True)
     payload: dict = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -1715,8 +1778,11 @@ def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = Non
     try:
         with _gemini_request_with_retry("POST", url, json=payload, stream=True, timeout=600, max_retries=3) as r:
             if r.status_code >= 400:
-                err_body = (r.text or "")[:400]
-                yield f"[Błąd Gemini streaming: HTTP {r.status_code} — {err_body}]"
+                if r.status_code == 404:
+                    yield f"[Błąd Gemini: {_gemini_model_hint(GEMINI_API_KEY, effective_model)}]"
+                else:
+                    err_body = (r.text or "")[:400]
+                    yield f"[Błąd Gemini streaming: HTTP {r.status_code} — {err_body}]"
                 return
             r.raise_for_status()
             for line in r.iter_lines(decode_unicode=True):
@@ -1746,7 +1812,7 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
                  max_tokens: int = 8192, temperature: float = 0.2):
     if not GEMINI_API_KEY:
         raise RuntimeError("Brak GEMINI_API_KEY w .env")
-    effective_model = model or GEMINI_MODEL
+    effective_model = _normalize_gemini_model(model)
     if stream:
         return _gemini_request_with_retry(
             "POST",
@@ -2051,10 +2117,61 @@ def _openrouter_model_candidates(primary_model: str | None) -> list[str]:
     """Zwraca listę modeli OpenRouter do wypróbowania w kolejności preferencji."""
     primary = (primary_model or OPENROUTER_MODEL or "").strip()
     candidates: list[str] = []
-    for candidate in (primary, OPENROUTER_MODEL, OPENROUTER_MODEL_VERIFY):
+    known_fallbacks = (
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "deepseek/deepseek-r1-0528:free",
+        "qwen/qwen3-235b-a22b:free",
+    )
+    for candidate in (primary, OPENROUTER_MODEL, OPENROUTER_MODEL_VERIFY, *known_fallbacks):
         if candidate and candidate not in candidates:
             candidates.append(candidate)
     return candidates
+
+
+def _test_openrouter_api_key(key: str) -> dict:
+    """Krótki test OpenRouter z fallbackiem modeli, odporny na 404 No endpoints found."""
+    if not key:
+        return {"success": False, "error": "Brak klucza", "ms": 0}
+
+    t0 = time.time()
+    last_error = ""
+    for model in _openrouter_model_candidates(OPENROUTER_MODEL):
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost",
+                    "X-Title": "AI Analiza Dokumentów",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Say: OK"}],
+                    "max_tokens": 5,
+                },
+                timeout=20,
+            )
+            ms = int((time.time() - t0) * 1000)
+            if r.status_code == 200:
+                return {"success": True, "ms": ms, "status": 200, "model": model, "error": None}
+            last_error = (r.text or f"HTTP {r.status_code}")[:300]
+            if (
+                (r.status_code == 404 and "no endpoints found" in last_error.lower())
+                or r.status_code in {429, 502, 503, 504}
+            ):
+                continue
+            return {"success": False, "ms": ms, "status": r.status_code, "model": model, "error": last_error}
+        except requests.RequestException as exc:
+            last_error = str(exc)[:300]
+
+    return {
+        "success": False,
+        "ms": int((time.time() - t0) * 1000),
+        "status": 404,
+        "model": None,
+        "error": last_error or "Brak działającego endpointu OpenRouter dla skonfigurowanych modeli",
+    }
 
 
 def _call_openrouter_once(prompt: str, system: str, model: str,
@@ -2548,24 +2665,25 @@ def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
 
 
 def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str, int]:
-    """Test Gemini API — GET pojedynczego modelu."""
+    """Test Gemini API — weryfikuje model z listy generateContent."""
     if not api_key:
         return False, "Brak klucza API", 0
-    effective_model = (model or GEMINI_MODEL).strip()
+    effective_model = _normalize_gemini_model(model)
     t0 = time.time()
     try:
-        test_url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{effective_model}?key={api_key}"
-        )
-        r = _gemini_request_with_retry("GET", test_url, timeout=8, max_retries=2)
+        ok, models, list_err = _list_gemini_generate_models(api_key)
         ms = int((time.time() - t0) * 1000)
-        if r.status_code == 200:
+        if not ok:
+            return False, list_err or "Nie udało się pobrać listy modeli", ms
+        if effective_model in models:
             return True, "OK", ms
-        return False, (r.text or f"HTTP {r.status_code}")[:200], ms
+        return False, _gemini_model_hint(api_key, effective_model), ms
     except Exception as exc:
         ms = int((time.time() - t0) * 1000)
-        return False, str(exc)[:200], ms
+        err = str(exc)
+        if "404" in err:
+            return False, _gemini_model_hint(api_key, effective_model), ms
+        return False, err[:200], ms
 
 
 def _custom_endpoint_is_openai(url: str) -> bool:
@@ -5500,20 +5618,7 @@ def providers_test(entry_id: str):
     try:
         if ptype == "openrouter_keys":
             key = entry.get("key", "")
-            if not key:
-                return jsonify({"success": False, "error": "Brak klucza", "ms": 0})
-            r = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": "meta-llama/llama-3.1-8b-instruct:free",
-                      "messages": [{"role": "user", "content": "Say: OK"}],
-                      "max_tokens": 5},
-                timeout=20,
-            )
-            ms = int((time.time() - t0) * 1000)
-            ok = r.status_code == 200
-            return jsonify({"success": ok, "ms": ms, "status": r.status_code,
-                           "error": None if ok else r.text[:200]})
+            return jsonify(_test_openrouter_api_key(key))
         elif ptype == "ollama_urls":
             url = entry.get("url", "").rstrip("/")
             key = entry.get("key", "")
