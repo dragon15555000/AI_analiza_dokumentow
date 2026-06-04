@@ -29,10 +29,17 @@ from llm_client import (
     call_llm,
     stream_llm_tokens,
     get_llm_provider,
+    _normalize_gemini_model,
+    _list_gemini_generate_models,
+    _gemini_model_hint,
+    _check_gemini_health,
+    _check_ollama_health,
+    _check_openrouter_health,
     _is_rate_limit_error,
     _get_retry_after,
     _redact_api_keys,
 )
+from task_queue import submit_task, get_task, update_task, cancel_task, get_task_status
 
 # Wczytaj .env jeśli istnieje
 _env_path = Path(__file__).parent / ".env"
@@ -1522,6 +1529,7 @@ def _apply_llm_config(cfg: dict):
         OPENROUTER_API_KEY=OPENROUTER_API_KEY,
         OPENROUTER_MODEL=OPENROUTER_MODEL,
         OPENROUTER_MODEL_VERIFY=OPENROUTER_MODEL_VERIFY,
+        OPENROUTER_MAX_RETRIES=OPENROUTER_MAX_RETRIES,
         LLM_MODEL=LLM_MODEL,
         GEMINI_MODEL=GEMINI_MODEL,
         GEMINI_API_KEY=GEMINI_API_KEY,
@@ -3425,13 +3433,92 @@ def api_drives():
 
 @app.route('/tasks', methods=['GET'])
 def tasks_status():
-    current, history = _tasks_snapshot()
+    """Pobierz status wszystkich tasków (queued, running, finished)."""
+    status = get_task_status()
     return jsonify({
         "success": True,
-        "busy": current is not None,
-        "current": current,
-        "history": history,
+        "queued": [t.to_dict() for t in status["queued"]],
+        "running": [t.to_dict() for t in status["running"]],
+        "finished": [t.to_dict() for t in status["finished"]],
+        "stats": {
+            "total_queued": len(status["queued"]),
+            "total_running": len(status["running"]),
+            "total_finished": len(status["finished"]),
+        }
     })
+
+
+@app.route('/tasks/<task_id>', methods=['GET'])
+def task_detail(task_id: str):
+    """Pobierz szczegóły jednego taska."""
+    task = get_task(task_id)
+    if not task:
+        return jsonify({"success": False, "error": "Task not found"}), 404
+    return jsonify({
+        "success": True,
+        "task": task.to_dict()
+    })
+
+
+@app.route('/tasks/<task_id>', methods=['DELETE'])
+def task_cancel(task_id: str):
+    """Anuluj task (jeśli queued) lub oznacz jako cancelled (jeśli running)."""
+    cancelled = cancel_task(task_id)
+    return jsonify({
+        "success": cancelled,
+        "message": "Task cancelled" if cancelled else "Task not found"
+    })
+
+
+@app.route('/tasks/<task_id>/stream', methods=['GET'])
+def task_stream(task_id: str):
+    """SSE stream z live updates dla jednego taska."""
+    def generate():
+        def sse(event: str, data: dict) -> str:
+            import json as _json
+            return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+        last_sent = {"progress_pct": -1, "done": -1, "status": ""}
+        max_idle_iterations = 0
+
+        while max_idle_iterations < 600:  # max 10 minut bez zmian (600 * 1s)
+            try:
+                task = get_task(task_id)
+                if not task:
+                    yield sse("error", {"msg": "Task not found"})
+                    break
+
+                # Sprawdź czy coś się zmieniło
+                changed = (
+                    last_sent["progress_pct"] != task.progress_pct or
+                    last_sent["done"] != task.done or
+                    last_sent["status"] != task.status.value
+                )
+
+                if changed:
+                    max_idle_iterations = 0
+                    last_sent["progress_pct"] = task.progress_pct
+                    last_sent["done"] = task.done
+                    last_sent["status"] = task.status.value
+
+                    yield sse("update", task.to_dict())
+
+                    # Jeśli task się skończył, wyślij done event
+                    if task.status.value in ["completed", "failed", "cancelled"]:
+                        yield sse("done", {"status": task.status.value, "error": task.error})
+                        break
+                else:
+                    max_idle_iterations += 1
+
+                time.sleep(1)
+
+            except Exception as e:
+                logger.error(f"task_stream error: {e}")
+                yield sse("error", {"msg": str(e)[:200]})
+                break
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route('/import/stream')
