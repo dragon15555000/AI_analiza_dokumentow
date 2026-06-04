@@ -8328,7 +8328,7 @@ def health():
     light = request.args.get("light", "0") == "1"
     try:
         q = _check_qdrant_health()
-        ocr = _ocr_health_status() if not light else {"available": False}
+        ocr = _ocr_health_status()
         parsers = _file_parsers_health() if not light else {}
         ollama_h = {"ok": True} if light else _check_ollama_health()
         or_h = {"ok": True} if light else _check_openrouter_health()
