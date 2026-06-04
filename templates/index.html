@@ -1457,16 +1457,16 @@ table { margin: 0; }
 
       <div class="mb-3">
         <button type="button" class="btn btn-primary w-100" id="btnWinFolderPick" onclick="pickFolderWindows()">
-          📂 Wybierz folder w Windows (C:, G: — Google Drive)
+          📂 Wybierz folder w Windows (dowolny dysk)
         </button>
-        <div class="small text-muted mt-1">Otwiera standardowe okno Windows — dysk lokalny C:, Google Drive G:, OneDrive itd.</div>
+        <div class="small text-muted mt-1">Otwiera standardowe okno Windows — dyski lokalne, Google Drive, OneDrive itd.</div>
       </div>
 
       <div class="mb-2">
         <label class="small fw-bold text-muted">Lub wpisz ścieżkę (Windows lub WSL):</label>
         <div class="input-group input-group-sm">
           <input type="text" id="browsePathInput" class="form-control font-monospace" value=""
-            placeholder='C:\Users\...\folder  lub  G:\Mój dysk\...  lub  /mnt/c/...'
+            placeholder='C:\Users\...\folder  lub  D:\...\folder  lub  /mnt/c/...'
             onkeydown="if(event.key==='Enter') browseDir(this.value)">
           <button class="btn btn-outline-secondary" onclick="browseDir(document.getElementById('browsePathInput').value)">Idź</button>
         </div>

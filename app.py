@@ -1005,22 +1005,52 @@ def _persist_active_collection(name: str) -> None:
         logger.warning("Nie zapisano aktywnej kolekcji: %s", e)
 
 
+def _iter_mounted_windows_drives() -> list[Path]:
+    """Zwraca zamontowane dyski Windows w WSL: /mnt/c, /mnt/d, ..."""
+    mnt = Path("/mnt")
+    try:
+        if not mnt.is_dir():
+            return []
+        drives = [
+            p.resolve()
+            for p in mnt.iterdir()
+            if p.is_dir() and re.fullmatch(r"[a-z]", p.name, re.IGNORECASE)
+        ]
+        return sorted(drives, key=lambda p: p.name.lower())
+    except OSError as e:
+        logger.debug("Nie można odczytać /mnt: %s", e)
+        return []
+
+
 def _resolve_allowed_roots() -> list[Path]:
     roots: list[Path] = []
-    for raw in SEARCH_ROOTS:
+    seen: set[str] = set()
+
+    def add_root(path: Path) -> None:
         try:
-            p = Path(raw).expanduser().resolve()
-            if p.exists():
-                roots.append(p)
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return
+        if not resolved.exists():
+            return
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            roots.append(resolved)
+
+    for raw in SEARCH_ROOTS:
+        raw = raw.strip()
+        if raw in {"/mnt/*", "/mnt/[a-z]", "/mnt/[A-Za-z]"}:
+            for drive in _iter_mounted_windows_drives():
+                add_root(drive)
+            continue
+        try:
+            add_root(Path(raw))
         except OSError:
             continue
     if not roots:
-        for fallback in (Path.home(), Path("/mnt"), Path(__file__).parent.resolve()):
-            try:
-                if fallback.exists():
-                    roots.append(fallback.resolve())
-            except OSError:
-                continue
+        for fallback in [Path.home(), *_iter_mounted_windows_drives(), Path(__file__).parent.resolve()]:
+            add_root(fallback)
     return roots
 
 
@@ -1181,8 +1211,15 @@ def _friendly_root_label(p: Path) -> str:
     return name if name else s
 
 
+def _root_kind_and_icon(path: Path) -> tuple[str, str]:
+    s = str(path)
+    if re.match(r"/mnt/[a-z]$", s, re.IGNORECASE):
+        return "drive", "💾"
+    return "root", "📂"
+
+
 def _discover_browse_roots() -> list[dict]:
-    """Punkty startowe — Google Drive, dysk C: (lokalny) + SEARCH_ROOTS."""
+    """Punkty startowe importu: Google Drive, profil Windows i dozwolone dyski /mnt/<litera>."""
     drives: list[dict] = []
     seen: set[str] = set()
 
@@ -1215,6 +1252,26 @@ def _discover_browse_roots() -> list[dict]:
                 "priority": 1,
             })
 
+    for drive in _iter_mounted_windows_drives():
+        if not _path_is_allowed(drive):
+            continue
+        try:
+            sp = str(drive.resolve())
+        except OSError:
+            sp = str(drive)
+        if sp in seen or (gd and sp == "/mnt/g"):
+            continue
+        seen.add(sp)
+        drives.append({
+            "path": sp,
+            "label": _friendly_root_label(drive),
+            "kind": "drive",
+            "icon": "💾",
+            "accessible": _dir_is_readable(drive),
+            "importable": True,
+            "priority": 2,
+        })
+
     for i, root in enumerate(_resolve_allowed_roots()):
         try:
             sp = str(root.resolve())
@@ -1227,16 +1284,15 @@ def _discover_browse_roots() -> list[dict]:
         if profile and sp == str(profile):
             continue
         seen.add(sp)
-        m = re.match(r"/mnt/([a-z])$", sp, re.IGNORECASE)
-        icon = "💾" if m else "📂"
+        kind, icon = _root_kind_and_icon(root)
         drives.append({
             "path": sp,
             "label": _friendly_root_label(root),
-            "kind": "root",
+            "kind": kind,
             "icon": icon,
             "accessible": _dir_is_readable(root),
             "importable": True,
-            "priority": i + 2,
+            "priority": i + 3,
         })
 
     drives.sort(key=lambda d: (d["priority"], not d["accessible"]))
