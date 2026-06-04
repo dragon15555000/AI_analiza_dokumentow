@@ -2240,7 +2240,9 @@ SUGGESTIONS_TTL = 1800  # 30 minut
 # ---- Multi-agent Swarm ----
 FREE_MODELS_LIST = [
     ("meta-llama/llama-3.3-70b-instruct:free",  "Llama 3.3 70B ★"),
-    ("google/gemini-2.0-flash-exp:free",         "Gemini 2.0 Flash"),
+    ("meta-llama/llama-3.2-3b-instruct:free",    "Llama 3.2 3B"),
+    ("openai/gpt-oss-20b:free",                  "GPT-OSS 20B"),
+    ("qwen/qwen3-coder:free",                    "Qwen3 Coder"),
     ("mistralai/mistral-7b-instruct:free",       "Mistral 7B"),
     ("qwen/qwen-2.5-7b-instruct:free",           "Qwen 2.5 7B"),
     ("meta-llama/llama-3.1-8b-instruct:free",    "Llama 3.1 8B"),
@@ -2259,13 +2261,13 @@ SWARM_MODES = {
     },
     "speed": {
         "label": "⚡ Szybkość",
-        "desc": "Maksymalny paralelizm z najszybszym modelem. Wyniki streamowane na bieżąco.",
+        "desc": "Maksymalny paralelizm z lekkim modelem free. Wyniki streamowane na bieżąco.",
         "workers": 4,
         "shuffle_chunks": False,
         "use_random_models": False,
-        "preferred_model": ("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash"),
+        "preferred_model": ("meta-llama/llama-3.2-3b-instruct:free", "Llama 3.2 3B"),
         "max_chunks_per_worker": 5,
-        "synthesis_model": "google/gemini-2.0-flash-exp:free",
+        "synthesis_model": "meta-llama/llama-3.3-70b-instruct:free",
         "hierarchical": False,
     },
     "quality": {
@@ -4670,6 +4672,7 @@ def collection_profile():
 
 
 # ===== MULTI-AGENT SWARM =====
+_SWARM_OR_SEMAPHORE = threading.Semaphore(2)
 
 def _split_chunks_for_swarm(chunks: list, cfg: dict) -> list[list]:
     """Dzieli chunki na grupy workerów wg trybu."""
@@ -4764,6 +4767,8 @@ def agents_swarm_stream():
             # Równoległe wywołania LLM (ThreadPoolExecutor)
             def _run_worker(worker_id: int, context_chunks: list, model_id: str, model_name: str):
                 try:
+                    # Rozłóż równoległe wywołania OpenRouter (free tier ma niski RPM).
+                    time.sleep(worker_id * 1.5)
                     ctx = "\n\n---\n\n".join(
                         f"[{c['file']}]\n{c['text']}" for c in context_chunks
                     )
@@ -4774,20 +4779,25 @@ def agents_swarm_stream():
                         f"Jeśli w tych fragmentach brakuje odpowiedzi — napisz krótko: "
                         f"'Brak danych w tym fragmencie.'"
                     )
-                    result = call_llm(
-                        prompt=prompt,
-                        system="Jesteś analitykiem dokumentów. Odpowiadaj po polsku, zwięźle i konkretnie.",
-                        stream=False,
-                        provider='openrouter',
-                        model=model_id,
-                    )
+                    with _SWARM_OR_SEMAPHORE:
+                        result = call_llm(
+                            prompt=prompt,
+                            system="Jesteś analitykiem dokumentów. Odpowiadaj po polsku, zwięźle i konkretnie.",
+                            stream=False,
+                            provider='openrouter',
+                            model=model_id,
+                        )
                     text = _llm_response_text(result)
+                    if isinstance(text, str) and (
+                        text.startswith("[Błąd") or text.startswith("[RATE_LIMIT]")
+                    ):
+                        return ('error', worker_id, None, model_name, text[:200])
                     return ('done', worker_id, text, model_name, None)
                 except Exception as exc:
                     return ('error', worker_id, None, model_name, str(exc)[:200])
 
             partial: dict[int, str] = {}
-            worker_timeout = 120
+            worker_timeout = 240
             with ThreadPoolExecutor(max_workers=max(1, n_workers)) as ex:
                 futures = {
                     ex.submit(_run_worker, i, group, model_id, model_name): i
@@ -4829,8 +4839,14 @@ def agents_swarm_stream():
                             'error': f'Timeout — brak odpowiedzi w {worker_timeout} s',
                         })
 
+            if not any(partial.get(i) for i in range(n_workers)):
+                yield sse('error', {
+                    'error': 'Żaden agent nie zwrócił wyniku — sprawdź limity OpenRouter (429) lub uruchom ponownie za chwilę.',
+                })
+                return
+
             if len(partial) < n_workers:
-                yield sse('error', {'error': 'Timeout — workery nie odpowiedziały w czasie 120 s.'})
+                yield sse('error', {'error': f'Timeout — workery nie odpowiedziały w czasie {worker_timeout} s.'})
                 return
 
             # Synteza

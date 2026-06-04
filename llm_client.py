@@ -91,6 +91,17 @@ def _pick_ollama_url() -> str:
     return active[0]["url"] if active else OLLAMA_URL
 
 
+def _ollama_url_for_provider(provider: str | None = None) -> str:
+    """URL Ollama dla providera ollama / ollama:<id> albo domyślny z puli."""
+    if provider and str(provider).startswith("ollama:"):
+        oid = str(provider).split(":", 1)[1]
+        pool = _load_provider_pool()
+        for entry in pool.get("ollama_urls", []):
+            if entry.get("id") == oid and entry.get("active", True) and entry.get("url"):
+                return entry["url"]
+    return _pick_ollama_url()
+
+
 def _sync_llm_client_config(**kwargs):
     """Synchronizuje zmienne konfiguracyjne LLM (wywoływane przez app.py)."""
     global GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL

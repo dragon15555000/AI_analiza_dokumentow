@@ -1783,7 +1783,7 @@ table { margin: 0; }
                 <span style="font-size:1.3rem;line-height:1;">⚡</span>
                 <div>
                   <div class="fw-bold" style="font-size:0.88rem;">Szybkość</div>
-                  <div class="small text-muted">Maksymalny paralelizm z najszybszym modelem. Wyniki streamowane na bieżąco.</div>
+                  <div class="small text-muted">Maksymalny paralelizm z Llama 3.2 3B (OpenRouter free). Wyniki na bieżąco.</div>
                 </div>
               </div>
             </label>
@@ -1824,10 +1824,10 @@ table { margin: 0; }
         <div class="fw-bold mb-2" style="color:var(--c-muted);">Dostępne modele (darmowe):</div>
         <div id="swarmModelLegend" style="display:flex;flex-direction:column;gap:4px;">
           <span>🌟 Llama 3.3 70B — najlepsza jakość</span>
-          <span>⚡ Gemini 2.0 Flash — najszybszy</span>
+          <span>⚡ Llama 3.2 3B — najszybszy (tryb Szybkość)</span>
           <span>🎯 Mistral 7B — niezawodny</span>
-          <span>🔷 Qwen 2.5 7B — solidny</span>
-          <span>🏃 Llama 3.1 8B — bardzo szybki</span>
+          <span>🔷 Qwen3 Coder — solidny</span>
+          <span>🏃 GPT-OSS 20B — alternatywa free</span>
         </div>
       </div>
     </div>
@@ -7497,7 +7497,7 @@ function runSwarm() {
     const modeLabels = {quality:'🎯 Jakość', speed:'⚡ Szybkość', privacy:'🔒 Incognito'};
     const modeDescs  = {
         quality:'Hierarchiczna synteza przez Llama 3.3 70B',
-        speed:'Maksymalny paralelizm, Gemini Flash',
+        speed:'Maksymalny paralelizm, Llama 3.2 3B (OpenRouter free)',
         privacy:'Losowe modele, potasowane fragmenty'
     };
     document.getElementById('swarmModeLabel').textContent = modeLabels[mode] || mode;
@@ -7555,6 +7555,12 @@ function runSwarm() {
             if (wrapper) {
                 const card = wrapper.querySelector('.swarm-worker-card');
                 card.classList.remove('running'); card.classList.add('error');
+            }
+            const prev = document.getElementById(`swarm-preview-${data.worker_id}`);
+            if (prev && data.error) {
+                prev.style.display = 'block';
+                prev.style.color = '#b91c1c';
+                prev.textContent = data.error;
             }
             _swarmDone++;
             if (_swarmWorkerCount > 0) {
