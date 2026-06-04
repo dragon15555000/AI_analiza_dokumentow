@@ -710,6 +710,7 @@ except ValueError:
     OPENROUTER_MAX_RETRIES = 3
 
 DEFAULT_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").lower()   # openrouter (domyślnie dla LLM) | ollama (tylko dla importu/embeddings)
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
 # Google Gemini (bezpośrednie API — audyt dużych plików / logów)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -1397,7 +1398,7 @@ def _apply_llm_config(cfg: dict):
     """Nadpisuje globalne zmienne LLM konfiguracją z pliku."""
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
-    global OLLAMA_URL, LLM_MODEL, APP_API_KEY
+    global OLLAMA_URL, LLM_MODEL, APP_API_KEY, GEMINI_MODEL
 
     if cfg.get("provider"):
         DEFAULT_LLM_PROVIDER = cfg["provider"]
@@ -1413,6 +1414,8 @@ def _apply_llm_config(cfg: dict):
         OLLAMA_URL = cfg["ollama_url"]
     if cfg.get("llm_model"):
         LLM_MODEL = cfg["llm_model"]
+    if cfg.get("gemini_model"):
+        GEMINI_MODEL = cfg["gemini_model"]
 
     # Obsługa klucza API aplikacji (do ochrony endpointów)
     if cfg.get("app_api_key"):
@@ -1443,6 +1446,7 @@ def get_llm_config():
         "provider": cfg.get("provider", DEFAULT_LLM_PROVIDER),
         "ollama_url": cfg.get("ollama_url", OLLAMA_URL),
         "llm_model": cfg.get("llm_model", LLM_MODEL),
+        "gemini_model": cfg.get("gemini_model", GEMINI_MODEL),
         "openrouter_model": cfg.get("openrouter_model", OPENROUTER_MODEL),
         "openrouter_model_verify": cfg.get("openrouter_model_verify", OPENROUTER_MODEL_VERIFY),
         "openrouter_fallback": cfg.get("openrouter_fallback", OPENROUTER_FALLBACK_TO_OLLAMA),
@@ -1464,7 +1468,7 @@ def save_llm_config():
     current = _load_llm_config()
 
     # Aktualizuj tylko dozwolone pola
-    allowed = ["provider", "ollama_url", "llm_model", "openrouter_model",
+    allowed = ["provider", "ollama_url", "llm_model", "gemini_model", "openrouter_model",
                "openrouter_model_verify", "openrouter_fallback"]
 
     for k in allowed:
@@ -1505,6 +1509,18 @@ def get_llm_provider(request_provider: str | None = None) -> str:
     return DEFAULT_LLM_PROVIDER
 
 
+def _effective_llm_model(provider: str | None = None) -> str:
+    """Model pokazywany w diagnostyce dla aktywnego providera."""
+    prov = (provider or DEFAULT_LLM_PROVIDER or "").strip().lower()
+    if prov == "openrouter":
+        return OPENROUTER_MODEL
+    if prov == "gemini":
+        return GEMINI_MODEL
+    if prov == "groq":
+        return GROQ_MODEL
+    return LLM_MODEL
+
+
 def _gemini_generate_url(model: str, stream: bool = False) -> str:
     action = "streamGenerateContent" if stream else "generateContent"
     suffix = "?alt=sse" if stream else ""
@@ -1516,8 +1532,7 @@ def _gemini_generate_url(model: str, stream: bool = False) -> str:
 
 def _is_gemini_base_url(url: str, provider_name: str = "") -> bool:
     """Sprawdza czy URL/provider wskazuje na natywne API Gemini."""
-    haystack = f"{url or ''} {provider_name or ''}".lower()
-    return "generativelanguage.googleapis.com" in haystack or "gemini" in haystack
+    return _custom_endpoint_is_gemini(url, provider_name)
 
 
 def _gemini_request_with_retry(method: str, url: str, *, timeout: int = 60,
@@ -1754,23 +1769,18 @@ def _check_openrouter_health() -> dict:
         return {"ok": False, "error": str(e)[:120]}
 
 
-def _check_custom_endpoint_health(url: str, key: str = "") -> dict:
-    """Sprawdza czy custom endpoint działa (GET /api/tags)."""
+def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> dict:
+    """Sprawdza czy custom endpoint działa (Gemini, OpenAI-compatible lub Ollama /api/tags)."""
     if not url:
         return {"ok": False, "error": "Brak URL"}
     try:
-        if _is_gemini_base_url(url):
-            if not key:
-                return {"ok": False, "url": url, "error": "Brak klucza Gemini"}
-            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-            response = _gemini_request_with_retry("GET", gemini_url, timeout=8, max_retries=2)
-            data = response.json()
-            models = [m.get("name", "") for m in data.get("models", [])]
+        if _custom_endpoint_is_gemini(url, name):
+            ok, message, ms = _test_gemini_api(key)
             return {
-                "ok": True,
+                "ok": ok,
                 "url": url,
-                "models_available": len(models),
-                "error": None,
+                "ms": ms,
+                "error": None if ok else message,
             }
 
         headers = {}
@@ -2470,8 +2480,42 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str,
         return r.json()
 
 
+def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
+    """Czy URL/nazwa wskazuje na natywne API Google Gemini."""
+    u = (url or "").lower()
+    n = (name or "").lower().strip()
+    if "generativelanguage.googleapis.com" in u:
+        return True
+    if n in ("g1.5f", "gemini") or n.startswith("gemini-"):
+        return True
+    return False
+
+
+def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str, int]:
+    """Test Gemini API — GET pojedynczego modelu."""
+    if not api_key:
+        return False, "Brak klucza API", 0
+    effective_model = (model or GEMINI_MODEL).strip()
+    t0 = time.time()
+    try:
+        test_url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{effective_model}?key={api_key}"
+        )
+        r = _gemini_request_with_retry("GET", test_url, timeout=8, max_retries=2)
+        ms = int((time.time() - t0) * 1000)
+        if r.status_code == 200:
+            return True, "OK", ms
+        return False, (r.text or f"HTTP {r.status_code}")[:200], ms
+    except Exception as exc:
+        ms = int((time.time() - t0) * 1000)
+        return False, str(exc)[:200], ms
+
+
 def _custom_endpoint_is_openai(url: str) -> bool:
     """Czy URL wskazuje na OpenAI-compatible API (Groq, LM Studio, itp.)."""
+    if _custom_endpoint_is_gemini(url):
+        return False
     u = (url or "").lower().rstrip("/")
     return "openai/v1" in u or u.endswith("/v1")
 
@@ -5272,7 +5316,11 @@ def providers_list():
     for entry in safe.get("custom_endpoints", []):
         k = entry.get("key", "")
         entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
-        entry["api_type"] = "openai" if _custom_endpoint_is_openai(entry.get("url", "")) else "ollama"
+        entry["api_type"] = (
+            "gemini" if _custom_endpoint_is_gemini(entry.get("url", ""), entry.get("name", ""))
+            else "openai" if _custom_endpoint_is_openai(entry.get("url", ""))
+            else "ollama"
+        )
         if "key" in entry:
             del entry["key"]
     pool_or = [e for e in pool.get("openrouter_keys", []) if e.get("active")]
@@ -5281,6 +5329,8 @@ def providers_list():
     safe["defaults"] = {
         "openrouter_key_set": bool(OPENROUTER_API_KEY),
         "ollama_url": OLLAMA_URL,
+        "gemini_key_set": bool(GEMINI_API_KEY),
+        "gemini_model": GEMINI_MODEL,
         "pool_active_keys": len(pool_or),
         "pool_active_ollamas": len(pool_ol),
         "active_keys": len(pool_or) if pool_or else (1 if OPENROUTER_API_KEY else 0),
@@ -5384,6 +5434,9 @@ def providers_test(entry_id: str):
             entry = {"key": OPENROUTER_API_KEY}; ptype = "openrouter_keys"
         elif entry_id == "default_ollama":
             entry = {"url": OLLAMA_URL}; ptype = "ollama_urls"
+        elif entry_id == "default_gemini":
+            ok, message, ms = _test_gemini_api(GEMINI_API_KEY)
+            return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
         else:
             return jsonify({"success": False, "error": "Nie znaleziono"}), 404
 
@@ -5405,31 +5458,23 @@ def providers_test(entry_id: str):
             ok = r.status_code == 200
             return jsonify({"success": ok, "ms": ms, "status": r.status_code,
                            "error": None if ok else r.text[:200]})
-        elif ptype in ("ollama_urls", "custom_endpoints"):
+        elif ptype == "ollama_urls":
             url = entry.get("url", "").rstrip("/")
             key = entry.get("key", "")
-            if ptype == "custom_endpoints" and _is_gemini_base_url(url):
-                if not key:
-                    return jsonify({"success": False, "error": "Brak klucza", "ms": 0})
-                try:
-                    r = _gemini_request_with_retry(
-                        "GET",
-                        "https://generativelanguage.googleapis.com/v1beta/models?key=" + key,
-                        timeout=8,
-                        max_retries=2,
-                    )
-                    ms = int((time.time() - t0) * 1000)
-                    data = r.json()
-                    return jsonify({
-                        "success": True,
-                        "ms": ms,
-                        "status": r.status_code,
-                        "models_available": len(data.get("models", [])),
-                    })
-                except Exception as exc:
-                    ms = int((time.time() - t0) * 1000)
-                    return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
-            elif ptype == "custom_endpoints" and _custom_endpoint_is_openai(url):
+            headers = {}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            r = requests.get(f"{url}/api/tags", headers=headers, timeout=8)
+            ms = int((time.time() - t0) * 1000)
+            return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
+        elif ptype == "custom_endpoints":
+            url = entry.get("url", "").rstrip("/")
+            key = entry.get("key", "")
+            name = entry.get("name", "") or entry.get("label", "")
+            if _custom_endpoint_is_gemini(url, name):
+                ok, message, ms = _test_gemini_api(key)
+                return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
+            elif _custom_endpoint_is_openai(url):
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
@@ -5441,13 +5486,16 @@ def providers_test(entry_id: str):
                           "max_tokens": 5},
                     timeout=20,
                 )
+                ms = int((time.time() - t0) * 1000)
+                return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code,
+                               "error": None if r.status_code == 200 else r.text[:200]})
             else:
                 headers = {}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
                 r = requests.get(f"{url}/api/tags", headers=headers, timeout=8)
-            ms = int((time.time() - t0) * 1000)
-            return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
+                ms = int((time.time() - t0) * 1000)
+                return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
     except Exception as exc:
         ms = int((time.time() - t0) * 1000)
         return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
@@ -7708,6 +7756,7 @@ def health():
 
             # Inne przydatne dla UI
             "provider": DEFAULT_LLM_PROVIDER,
+            "llm_model": _effective_llm_model(DEFAULT_LLM_PROVIDER),
             "gemini_configured": bool(GEMINI_API_KEY),
             "gemini_model": GEMINI_MODEL,
             "gemini": _check_gemini_health(),
