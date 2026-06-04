@@ -29,11 +29,15 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_MODEL = None
 GEMINI_MODEL_DEFAULT = "gemini-2.0-flash"
 GEMINI_DEPRECATED_MODELS = {"gemini-1.5-pro", "gemini-1.5-flash"}
+GEMINI_MAX_RETRIES = 5
+GEMINI_RETRY_INITIAL_DELAY = 2.5
 GEMINI_RETRY_MAX_WAIT_SEC = 60.0
 
 OPENROUTER_API_KEY = None
 OPENROUTER_MODEL = None
 OPENROUTER_MODEL_VERIFY = None
+OPENROUTER_FALLBACK_TO_OLLAMA = True
+OPENROUTER_MAX_RETRIES = 3
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 OLLAMA_URL = "http://localhost:11434"
@@ -49,6 +53,8 @@ CLAUDE_API_BASE = "https://api.anthropic.com/v1"
 
 # Funkcje z app.py które będą ustawiane dynamicznie
 _load_provider_pool_func = None
+_openrouter_rr_idx = 0
+_openrouter_rr_lock = threading.Lock()
 
 
 def _set_load_provider_pool(func):
@@ -64,10 +70,31 @@ def _load_provider_pool():
     return _load_provider_pool_func()
 
 
+def _pick_openrouter_key() -> str:
+    """Zwraca aktywny klucz OpenRouter z puli, z fallbackiem do .env."""
+    global _openrouter_rr_idx
+    pool = _load_provider_pool()
+    active = [e for e in pool.get("openrouter_keys", []) if e.get("active") and e.get("key")]
+    if not active:
+        return (OPENROUTER_API_KEY or "").strip()
+    with _openrouter_rr_lock:
+        idx = _openrouter_rr_idx % len(active)
+        _openrouter_rr_idx = (idx + 1) % len(active)
+    return active[idx]["key"]
+
+
+def _pick_ollama_url() -> str:
+    """Zwraca pierwszy aktywny adres Ollama z puli albo domyślny OLLAMA_URL."""
+    pool = _load_provider_pool()
+    active = [e for e in pool.get("ollama_urls", []) if e.get("active") and e.get("url")]
+    return active[0]["url"] if active else OLLAMA_URL
+
+
 def _sync_llm_client_config(**kwargs):
     """Synchronizuje zmienne konfiguracyjne LLM (wywoływane przez app.py)."""
     global GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL
-    global OPENROUTER_MODEL_VERIFY, LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER
+    global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OPENROUTER_MAX_RETRIES
+    global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER
     global ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     GEMINI_API_KEY = kwargs.get('GEMINI_API_KEY', GEMINI_API_KEY)
@@ -75,6 +102,8 @@ def _sync_llm_client_config(**kwargs):
     OPENROUTER_API_KEY = kwargs.get('OPENROUTER_API_KEY', OPENROUTER_API_KEY)
     OPENROUTER_MODEL = kwargs.get('OPENROUTER_MODEL', OPENROUTER_MODEL)
     OPENROUTER_MODEL_VERIFY = kwargs.get('OPENROUTER_MODEL_VERIFY', OPENROUTER_MODEL_VERIFY)
+    OPENROUTER_FALLBACK_TO_OLLAMA = kwargs.get('OPENROUTER_FALLBACK_TO_OLLAMA', OPENROUTER_FALLBACK_TO_OLLAMA)
+    OPENROUTER_MAX_RETRIES = kwargs.get('OPENROUTER_MAX_RETRIES', OPENROUTER_MAX_RETRIES)
     LLM_MODEL = kwargs.get('LLM_MODEL', LLM_MODEL)
     GROQ_MODEL = kwargs.get('GROQ_MODEL', GROQ_MODEL)
     DEFAULT_LLM_PROVIDER = kwargs.get('DEFAULT_LLM_PROVIDER', DEFAULT_LLM_PROVIDER)
@@ -446,8 +475,11 @@ def _call_claude(prompt: str, system: str, stream: bool, model: str,
     logger.info("Wysyłam zapytanie do Claude (model: %s)", effective_model)
     r = requests.post(f"{CLAUDE_API_BASE}/messages", headers=headers, json=payload, timeout=300)
     if r.status_code != 200:
-        logger.error("Błąd Claude API (%s): %s", r.status_code, r.text[:300])
-        r.raise_for_status()
+        detail = _redact_api_keys(r.text or "")[:500]
+        logger.error("Błąd Claude API (%s): %s", r.status_code, detail)
+        raise RuntimeError(
+            f"Claude API {r.status_code}: {detail}" if detail else f"Claude API {r.status_code}"
+        )
 
     data = r.json()
     text_parts = []

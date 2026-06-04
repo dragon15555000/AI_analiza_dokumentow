@@ -2159,10 +2159,18 @@ let healthInterval = null;
 function updateHealthStatus() {
     if (typeof isHeavyVectorizing !== 'undefined' && isHeavyVectorizing) return;
 
-    fetch('/health?light=1')
-        .then(r => r.json())
+    fetchHealth(false)
         .then(d => {
-            if (!d.success) return;
+            if (!d || d.success === false) {
+                if (d && d._authError) {
+                    const statusEl = document.getElementById('statStatus');
+                    if (statusEl) {
+                        statusEl.textContent = 'BRAK KLUCZA';
+                        statusEl.className = 'text-danger';
+                    }
+                }
+                return;
+            }
 
             // Wektory
             const vectorsEl = document.getElementById('statVectors');
@@ -3661,6 +3669,30 @@ async function fetchJson(url, options = {}) {
         throw new Error('Nieprawidłowy typ odpowiedzi: ' + (ct || 'brak content-type'));
     }
     return res.json();
+}
+
+function isApiKeyError(msg) {
+    return /klucz API|X-API-Key|\b401\b/i.test(msg || '');
+}
+
+function promptAppApiKey() {
+    const k = prompt('Podaj klucz API (APP_API_KEY z pliku .env):');
+    if (k) sessionStorage.setItem('app_api_key', k.trim());
+    return !!k;
+}
+
+/** /health z obsługą 401 (brak X-API-Key w sessionStorage). */
+async function fetchHealth(full = true) {
+    const url = full ? '/health' : '/health?light=1';
+    try {
+        return await fetchJson(url);
+    } catch (e) {
+        const msg = e.message || String(e);
+        if (isApiKeyError(msg)) {
+            return { success: false, error: msg, _authError: true };
+        }
+        throw e;
+    }
 }
 
 /** SSE POST (sieć powiązań, wyszukiwanie) — strumień z ciałem JSON. */
@@ -6472,8 +6504,42 @@ function showStartupChecklist(d) {
     connectionsBody.innerHTML = '';
     componentsBody.innerHTML = '';
 
-    // Ogólny status
     const overallEl = document.getElementById('startupOverallStatus');
+
+    if (d.success === false) {
+        const msg = d.error || 'Nie udało się pobrać diagnostyki z /health';
+        const authErr = d._authError || isApiKeyError(msg);
+        if (overallEl) {
+            overallEl.innerHTML = authErr
+                ? `<strong style="color:#991b1b;">🔐 Wymagany klucz API</strong>`
+                : `<strong style="color:#991b1b;">❌ Błąd diagnostyki</strong>`;
+            overallEl.style.background = '#fef2f2';
+            overallEl.style.borderLeft = '4px solid #ef4444';
+        }
+        const detail = authErr
+            ? `${msg} Wprowadź APP_API_KEY z pliku .env (zapisany w sessionStorage tej karty).`
+            : msg;
+        connectionsBody.append(buildCheckRow(authErr ? 'Klucz API' : 'Błąd', authErr ? 'no_key' : 'error', detail));
+        if (authErr && window.API_KEY_REQUIRED) {
+            const tr = document.createElement('tr');
+            tr.style.borderBottom = '1px solid #f1f5f9';
+            const td = document.createElement('td');
+            td.colSpan = 3;
+            td.style.cssText = 'padding:8px 4px;';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-warning';
+            btn.textContent = '🔑 Wprowadź klucz API i odśwież';
+            btn.onclick = () => { if (promptAppApiKey()) refreshStartupChecklist(); };
+            td.appendChild(btn);
+            tr.appendChild(td);
+            connectionsBody.appendChild(tr);
+        }
+        modal.style.display = 'flex';
+        return;
+    }
+
+    // Ogólny status
     if (overallEl) {
         const overall = d.overall || 'degraded';
         if (overall === 'ok') {
@@ -6616,20 +6682,32 @@ function closeStartupModal() {
     document.getElementById('startupModal').style.display = 'none';
 }
 
-function refreshStartupChecklist() {
+async function refreshStartupChecklist() {
     const modal = document.getElementById('startupModal');
-    if (modal) modal.style.display = 'none'; // chwilowe ukrycie na czas fetch
-    fetch('/health')
-        .then(r => r.json())
-        .then(d => showStartupChecklist(d))
-        .catch(() => {
-            if (modal) modal.style.display = 'flex';
-            alert('Nie udało się odświeżyć diagnostyki');
-        });
+    try {
+        const d = await fetchHealth(true);
+        showStartupChecklist(d);
+    } catch (e) {
+        if (modal) modal.style.display = 'flex';
+        showStartupChecklist({ success: false, error: e.message || 'Nie udało się odświeżyć diagnostyki' });
+    }
 }
 
 function copyDiagnostics() {
     const data = window._lastHealthData || {};
+    if (data.success === false) {
+        const text = [
+            `Wersja: ?`,
+            `Czas: ${new Date().toLocaleString('pl-PL')}`,
+            `Ogólny status: error`,
+            '',
+            '=== Błąd ===',
+            data.error || 'Nie udało się pobrać /health',
+            data._authError ? '(Brak lub nieprawidłowy klucz API — ustaw APP_API_KEY w sessionStorage)' : '',
+        ].filter(Boolean).join('\n');
+        navigator.clipboard.writeText(text).catch(() => prompt('Skopiuj poniższy tekst:', text));
+        return;
+    }
     const text = [
         `Wersja: ${data.version || '?'}`,
         `Czas: ${new Date().toLocaleString('pl-PL')}`,
@@ -7022,12 +7100,13 @@ function llmConfigSave() {
     });
 }
 
-function openDiagnostics() {
-    // Używa /health (bogate dane dla modala diagnostycznego: qdrant/llm/ocr/sql/parsers + statusy)
-    fetch('/health')
-        .then(r => r.json())
-        .then(d => showStartupChecklist(d))
-        .catch(() => {});
+async function openDiagnostics() {
+    try {
+        const d = await fetchHealth(true);
+        showStartupChecklist(d);
+    } catch (e) {
+        showStartupChecklist({ success: false, error: e.message || 'Błąd połączenia z /health' });
+    }
 }
 
 // Wsparcie dla opcji A — ręczne włączenie zakładki SQL z modala diagnostycznego (pierwsza konfiguracja)
@@ -7090,11 +7169,12 @@ function restartService() {
             document.getElementById('restartOverlayMsg').textContent = 'Czekam na ponowne uruchomienie…';
             // Poll until server responds
             const poll = setInterval(() => {
-                fetch('/health', {signal: AbortSignal.timeout(2000)})
-                    .then(r => r.json())
-                    .then(() => {
-                        clearInterval(poll);
-                        location.reload();
+                fetchHealth(true)
+                    .then(d => {
+                        if (d && d.success !== false) {
+                            clearInterval(poll);
+                            location.reload();
+                        }
                     })
                     .catch(() => {});
             }, 2000);
@@ -7229,10 +7309,9 @@ window.onload = function() {
     setTimeout(() => loadSuggestions(false), 2000);
     setTimeout(() => loadCollectionProfile(), 3000);
     // Pokaż checklistę startową (bogaty modal diagnostyczny)
-    fetch('/health')
-        .then(r => r.json())
+    fetchHealth(true)
         .then(d => showStartupChecklist(d))
-        .catch(() => {});
+        .catch(e => showStartupChecklist({ success: false, error: e.message }));
 };
 
 // ===== SWARM AGENT =====
@@ -7867,13 +7946,21 @@ let auditLastMeta = null;
 
 function auditTabInit() {
     Promise.all([
-        fetch('/audit/info').then(r => r.json()),
-        fetch('/health').then(r => r.json()),
+        fetchJson('/audit/info'),
+        fetchHealth(true),
     ])
         .then(([info, health]) => {
             const banner = document.getElementById('auditConfigBanner');
             const runBtn = document.getElementById('auditRunBtn');
-            const geminiHealth = health && health.gemini ? health.gemini : null;
+            if (!health || health.success === false) {
+                banner.classList.remove('d-none');
+                banner.textContent = health && health._authError
+                    ? '⚠️ Brak klucza API aplikacji — wprowadź APP_API_KEY (przycisk ⚙️ → Wprowadź klucz API).'
+                    : '⚠️ Nie udało się pobrać statusu Gemini z /health.';
+                if (runBtn) runBtn.disabled = true;
+                return;
+            }
+            const geminiHealth = health.gemini ? health.gemini : null;
             if (!info.success || !info.gemini_configured) {
                 banner.classList.remove('d-none');
                 banner.innerHTML = '⚠️ Brak klucza Gemini. Ustaw go w '
