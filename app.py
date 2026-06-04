@@ -598,12 +598,6 @@ def _save_sql_config(cfg: dict) -> None:
     SQL_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
-def _llm_response_text(result) -> str:
-    if isinstance(result, dict):
-        return (result.get("response") or "").strip()
-    return str(result).strip()
-
-
 def _clean_llm_sql(raw: str) -> str:
     sql = re.sub(r"^```\w*\n?", "", raw or "", flags=re.MULTILINE)
     sql = re.sub(r"```$", "", sql.strip()).strip()
@@ -684,6 +678,10 @@ except ValueError:
     GEMINI_RETRY_INITIAL_DELAY = 2.5
 GEMINI_RETRY_MAX_WAIT_SEC = 60.0
 
+# Anthropic Claude (bezpośrednie API)
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022").strip()
+
 SEARCH_ROOTS      = [p.strip() for p in os.environ.get("SEARCH_ROOTS", "").split(':') if p.strip()]
 
 # ---- Swarm Reports (persystencja wyników roju) ----
@@ -746,6 +744,8 @@ llm_client._sync_llm_client_config(
     LLM_MODEL=LLM_MODEL,
     GROQ_MODEL=GROQ_MODEL,
     DEFAULT_LLM_PROVIDER=DEFAULT_LLM_PROVIDER,
+    ANTHROPIC_API_KEY=ANTHROPIC_API_KEY,
+    CLAUDE_MODEL=CLAUDE_MODEL,
 )
 
 _HEAVY_TASK_HISTORY_LIMIT = 20
@@ -1493,6 +1493,7 @@ def _apply_llm_config(cfg: dict):
     global DEFAULT_LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
     global OLLAMA_URL, LLM_MODEL, APP_API_KEY, GEMINI_MODEL, GEMINI_API_KEY
+    global ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     if cfg.get("provider"):
         DEFAULT_LLM_PROVIDER = cfg["provider"]
@@ -1524,6 +1525,8 @@ def _apply_llm_config(cfg: dict):
         LLM_MODEL=LLM_MODEL,
         GEMINI_MODEL=GEMINI_MODEL,
         GEMINI_API_KEY=GEMINI_API_KEY,
+        ANTHROPIC_API_KEY=ANTHROPIC_API_KEY,
+        CLAUDE_MODEL=CLAUDE_MODEL,
     )
 
 
@@ -1602,6 +1605,36 @@ def save_llm_config():
     return jsonify({"success": True, "message": "Konfiguracja LLM zapisana"})
 
 
+@app.route('/claude_test', methods=['POST'])
+def claude_test():
+    """Testowy endpoint integracji z Anthropic Claude."""
+    auth = _require_api_key()
+    if auth:
+        return auth
+    try:
+        data = request.get_json() or {}
+        user_message = (data.get("message") or "Cześć Claude, jak się masz?").strip()
+        if not user_message:
+            return jsonify({"success": False, "error": "Pole message jest puste"}), 400
+
+        result = call_llm(
+            prompt=user_message,
+            system="Jesteś pomocnym asystentem AI. Odpowiadaj zwięźle i po polsku.",
+            stream=False,
+            provider="claude",
+            model=data.get("model") or None,
+        )
+        return jsonify({
+            "success": True,
+            "response": _llm_response_text(result),
+            "model": data.get("model") or CLAUDE_MODEL,
+            "usage": _llm_usage_from_result(result),
+        })
+    except Exception as e:
+        logger.exception("claude_test error")
+        return jsonify({"success": False, "error": str(e)[:300]}), 500
+
+
 # ============================================================
 # LLM PROVIDER ABSTRACTION (Ollama <-> OpenRouter)
 # ============================================================
@@ -1615,6 +1648,8 @@ def get_llm_provider(request_provider: str | None = None) -> str:
             return "openrouter"
         if pl == "gemini":
             return "gemini"
+        if pl == "claude":
+            return "claude"
         if pl == "ollama" or pl.startswith("ollama:"):
             return "ollama"
         pool = _load_provider_pool()
@@ -1951,299 +1986,6 @@ def qdrant_switch():
         _qdrant_client = None
     logger.info(f"Przełączono Qdrant → {mode} ({new_url})")
     return jsonify({"success": True, "mode": mode, "url": new_url})
-
-
-def call_llm(prompt: str, system: str = "", stream: bool = False,
-             provider: str | None = None, model: str | None = None,
-             max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
-    """
-    Uniwersalna funkcja do wywoływania LLM.
-    Zwraca dict dla non-stream lub Response dla stream.
-    provider moze byc: 'openrouter', 'ollama', lub custom endpoint ID.
-    """
-    pool = _load_provider_pool()
-    custom_endpoint = None
-    if provider:
-        for endpoint in pool.get("custom_endpoints", []):
-            if endpoint.get("id") == provider and endpoint.get("active", True):
-                custom_endpoint = endpoint
-                break
-
-    if custom_endpoint:
-        return _call_custom_endpoint(
-            custom_endpoint.get("url", ""),
-            custom_endpoint.get("key", ""),
-            prompt, system, stream, model or LLM_MODEL,
-            max_tokens, temperature,
-        )
-
-    prov = get_llm_provider(provider)
-
-    if prov == "gemini":
-        return _call_gemini(
-            prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature
-        )
-
-    if prov == "openrouter":
-        if not OPENROUTER_API_KEY:
-            raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
-        return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
-    else:
-        return _call_ollama(prompt, system, stream, model or LLM_MODEL, provider=provider)
-
-
-def _llm_usage_from_result(result) -> dict:
-    """Wyciąga usage z wyniku call_llm(); zwraca pusty dict, jeśli provider nie podał metryk."""
-    if not isinstance(result, dict):
-        return {}
-
-    usage_src = result.get("usage")
-    if not isinstance(usage_src, dict):
-        raw = result.get("raw")
-        if isinstance(raw, dict):
-            usage_src = raw.get("usage") if isinstance(raw.get("usage"), dict) else raw
-
-    if not isinstance(usage_src, dict):
-        return {}
-
-    def _as_int(value):
-        try:
-            if value is None:
-                return None
-            if isinstance(value, bool):
-                return int(value)
-            if isinstance(value, (int, float)):
-                return max(0, int(value))
-            text = str(value).strip()
-            if not text:
-                return None
-            return max(0, int(float(text)))
-        except Exception:
-            return None
-
-    prompt_tokens = _as_int(
-        usage_src.get("prompt_tokens")
-        or usage_src.get("input_tokens")
-        or usage_src.get("prompt_eval_count")
-    )
-    completion_tokens = _as_int(
-        usage_src.get("completion_tokens")
-        or usage_src.get("output_tokens")
-        or usage_src.get("eval_count")
-    )
-    total_tokens = _as_int(usage_src.get("total_tokens"))
-
-    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
-        total_tokens = prompt_tokens + completion_tokens
-
-    usage = {}
-    if prompt_tokens is not None:
-        usage["prompt_tokens"] = prompt_tokens
-    if completion_tokens is not None:
-        usage["completion_tokens"] = completion_tokens
-    if total_tokens is not None:
-        usage["total_tokens"] = total_tokens
-    return usage
-
-
-def stream_llm_tokens(prompt: str, system: str = "",
-                      provider: str | None = None, model: str | None = None,
-                      max_tokens: int = 2000, temperature: float = 0.2,
-                      meta: dict | None = None):
-    """
-    Generator zwracający kolejne tokeny tekstu z LLM (Ollama, OpenRouter, custom endpoint).
-    Używany w streamingowych endpointach.
-    provider moze byc: 'openrouter', 'ollama', lub custom endpoint ID.
-    """
-    pool = _load_provider_pool()
-    custom_endpoint = None
-    if provider:
-        for endpoint in pool.get("custom_endpoints", []):
-            if endpoint.get("id") == provider and endpoint.get("active", True):
-                custom_endpoint = endpoint
-                break
-
-    if custom_endpoint:
-        url_base = custom_endpoint.get("url", "")
-        if _custom_endpoint_is_gemini(url_base, custom_endpoint.get("name", "")):
-            yield from _stream_gemini_custom_endpoint(
-                url_base,
-                custom_endpoint.get("key", ""),
-                prompt, system,
-                model or GEMINI_MODEL,
-                max_tokens, temperature,
-            )
-            return
-        if _custom_endpoint_is_openai(url_base):
-            yield from _stream_openai_compatible(
-                url_base,
-                custom_endpoint.get("key", ""),
-                prompt, system,
-                model or LLM_MODEL,
-                max_tokens, temperature,
-            )
-            return
-        url = url_base.rstrip("/") + "/api/generate"
-        key = custom_endpoint.get("key", "")
-        headers = {}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        payload = {
-            "model": model or LLM_MODEL,
-            "prompt": prompt,
-            "system": system,
-            "stream": True,
-            "options": {"temperature": temperature}
-        }
-        try:
-            with requests.post(url, json=payload, headers=headers, stream=True, timeout=300) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        token = data.get("response", "")
-                        if token:
-                            yield token
-                        if data.get("done", False):
-                            break
-                    except Exception:
-                        continue
-        except Exception as e:
-            yield f"[Blad custom endpoint: {str(e)}]"
-        return
-
-    prov = get_llm_provider(provider)
-    effective_model = model or (OPENROUTER_MODEL if prov == "openrouter" else LLM_MODEL)
-
-    if prov == "gemini":
-        yield from _stream_gemini_tokens(
-            prompt, system, model or GEMINI_MODEL, max_tokens, temperature
-        )
-        return
-
-    if prov == "openrouter":
-        if not OPENROUTER_API_KEY:
-            yield "Błąd: Brak klucza OPENROUTER_API_KEY"
-            return
-        last_error = None
-        for candidate in _openrouter_model_candidates(effective_model):
-            try:
-                yield from _stream_openrouter_once(
-                    prompt, system, candidate, max_tokens, temperature, meta=meta
-                )
-                if isinstance(meta, dict) and meta.get("provider_used") == "openrouter":
-                    meta["model_used"] = meta.get("model_used") or candidate
-                    meta["fallback_used"] = bool(candidate != effective_model)
-                    if candidate != effective_model and meta.get("fallback_reason") is None:
-                        meta["fallback_reason"] = "openrouter_model_unavailable"
-                return
-            except Exception as e:
-                last_error = e
-                if _is_openrouter_no_endpoints_error(e):
-                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
-                    continue
-                raise
-
-        if _is_openrouter_no_endpoints_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            logger.info("OpenRouter no-endpoints → fallback do Ollama")
-            if isinstance(meta, dict):
-                meta["provider_used"] = "ollama"
-                meta["model_used"] = LLM_MODEL
-                meta["fallback_used"] = True
-                meta["fallback_reason"] = "openrouter_no_endpoints"
-            ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
-            ollama_payload = {
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "system": system,
-                "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2}
-            }
-            try:
-                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
-                    r.raise_for_status()
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            tok = data.get("response", "")
-                            if tok:
-                                yield tok
-                            if data.get("done", False):
-                                return
-                        except Exception:
-                            continue
-                return
-            except Exception as fb_err:
-                yield f"[Błąd fallback na Ollama: {fb_err}]"
-                return
-
-        if _is_rate_limit_error(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            logger.info("OpenRouter rate limit → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
-            ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
-            ollama_payload = {
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "system": system,
-                "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2}
-            }
-            try:
-                with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
-                    r.raise_for_status()
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            tok = data.get("response", "")
-                            if tok:
-                                yield tok
-                            if data.get("done", False):
-                                return
-                        except Exception:
-                            continue
-                return
-            except Exception as fb_err:
-                yield f"[Błąd fallback na Ollama: {fb_err}]"
-                return
-
-        if _is_rate_limit_error(last_error):
-            friendly = "[RATE_LIMIT] Przekroczono limit zapytań OpenRouter. Poczekaj chwilę lub przełącz na Ollama w ustawieniach."
-            yield friendly
-        elif last_error is not None:
-            yield f"[Błąd OpenRouter streaming: {last_error}]"
-
-    else:
-        # Ollama streaming
-        url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
-        payload = {
-            "model": effective_model,
-            "prompt": prompt,
-            "system": system,
-            "stream": True,
-            "options": {"temperature": temperature}
-        }
-        try:
-            with requests.post(url, json=payload, stream=True, timeout=300) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        token = data.get("response", "")
-                        if token:
-                            yield token
-                        if data.get("done", False):
-                            break
-                    except Exception:
-                        continue
-        except Exception as e:
-            yield f"[Błąd Ollama streaming: {str(e)}]"
 
 
 def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
