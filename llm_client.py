@@ -43,6 +43,10 @@ GROQ_MODEL = None
 
 DEFAULT_LLM_PROVIDER = "openrouter"
 
+ANTHROPIC_API_KEY = None
+CLAUDE_MODEL = "claude-3-5-sonnet-20241022"
+CLAUDE_API_BASE = "https://api.anthropic.com/v1"
+
 # Funkcje z app.py które będą ustawiane dynamicznie
 _load_provider_pool_func = None
 
@@ -64,6 +68,7 @@ def _sync_llm_client_config(**kwargs):
     """Synchronizuje zmienne konfiguracyjne LLM (wywoływane przez app.py)."""
     global GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER
+    global ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     GEMINI_API_KEY = kwargs.get('GEMINI_API_KEY', GEMINI_API_KEY)
     GEMINI_MODEL = kwargs.get('GEMINI_MODEL', GEMINI_MODEL)
@@ -73,6 +78,8 @@ def _sync_llm_client_config(**kwargs):
     LLM_MODEL = kwargs.get('LLM_MODEL', LLM_MODEL)
     GROQ_MODEL = kwargs.get('GROQ_MODEL', GROQ_MODEL)
     DEFAULT_LLM_PROVIDER = kwargs.get('DEFAULT_LLM_PROVIDER', DEFAULT_LLM_PROVIDER)
+    ANTHROPIC_API_KEY = kwargs.get('ANTHROPIC_API_KEY', ANTHROPIC_API_KEY)
+    CLAUDE_MODEL = kwargs.get('CLAUDE_MODEL', CLAUDE_MODEL)
 
 
 
@@ -85,6 +92,8 @@ def get_llm_provider(request_provider: str | None = None) -> str:
             return "openrouter"
         if pl == "gemini":
             return "gemini"
+        if pl == "claude":
+            return "claude"
         if pl == "ollama" or pl.startswith("ollama:"):
             return "ollama"
         pool = _load_provider_pool()
@@ -102,6 +111,8 @@ def _effective_llm_model(provider: str | None = None) -> str:
         return OPENROUTER_MODEL
     if prov == "gemini":
         return GEMINI_MODEL
+    if prov == "claude":
+        return CLAUDE_MODEL
     if prov == "groq":
         return GROQ_MODEL
     return LLM_MODEL
@@ -407,6 +418,51 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
             if part.get("text"):
                 text_parts.append(part["text"])
     return {"response": "".join(text_parts), "raw": data}
+
+
+def _call_claude(prompt: str, system: str, stream: bool, model: str,
+                 max_tokens: int = 4096, temperature: float = 0.2):
+    """Wywołanie API Anthropic (Claude) — system prompt jako osobne pole."""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("Brak ANTHROPIC_API_KEY — ustaw w .env lub przekaż przez _sync_llm_client_config")
+    if stream:
+        raise RuntimeError("Claude streaming nie jest jeszcze obsługiwane")
+
+    effective_model = (model or CLAUDE_MODEL or "").strip()
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": effective_model,
+        "max_tokens": max(1, int(max_tokens or 4096)),
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system:
+        payload["system"] = system
+
+    logger.info("Wysyłam zapytanie do Claude (model: %s)", effective_model)
+    r = requests.post(f"{CLAUDE_API_BASE}/messages", headers=headers, json=payload, timeout=300)
+    if r.status_code != 200:
+        logger.error("Błąd Claude API (%s): %s", r.status_code, r.text[:300])
+        r.raise_for_status()
+
+    data = r.json()
+    text_parts = []
+    for block in data.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            text_parts.append(block["text"])
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return {
+        "response": "".join(text_parts),
+        "raw": data,
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens"),
+            "completion_tokens": usage.get("output_tokens"),
+        },
+    }
 
 
 # ---- Rate limit helpers (OpenRouter) ----
@@ -1316,6 +1372,11 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
     if prov == "gemini":
         return _call_gemini(
             prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature
+        )
+
+    if prov == "claude":
+        return _call_claude(
+            prompt, system, stream, model or CLAUDE_MODEL, max_tokens, temperature
         )
 
     if prov == "openrouter":

@@ -4972,6 +4972,54 @@ def providers_test(entry_id: str):
         return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
 
 
+@app.route('/claude_test', methods=['POST'])
+def claude_test():
+    """Krótki test integracji Claude Anthropic przez llm_client."""
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    system = (data.get("system") or "").strip() or (
+        "Jesteś pomocnym asystentem. Odpowiadaj po polsku, zwięźle i konkretnie."
+    )
+    model = (data.get("model") or "").strip() or None
+
+    if not message:
+        return jsonify({"success": False, "status": "error", "message": "Brak wiadomości do wysłania"}), 400
+    if len(message) > 8000:
+        return jsonify({"success": False, "status": "error", "message": "Wiadomość jest zbyt długa"}), 400
+
+    try:
+        result = call_llm(
+            prompt=message,
+            system=system,
+            stream=False,
+            provider="claude",
+            model=model,
+            max_tokens=1024,
+            temperature=0.2,
+        )
+        response_text = ""
+        usage = {}
+        if isinstance(result, dict):
+            response_text = (result.get("response") or "").strip()
+            usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        if not response_text:
+            response_text = "Claude nie zwrócił treści odpowiedzi."
+        return jsonify({
+            "success": True,
+            "status": "success",
+            "response": response_text,
+            "usage": usage,
+            "model": model or llm_client.CLAUDE_MODEL,
+        })
+    except Exception as exc:
+        logger.exception("claude_test error")
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "message": _redact_api_keys(str(exc))[:500],
+        }), 500
+
+
 # ===== SWARM REPORTS API =====
 
 @app.route('/api/swarm/reports', methods=['POST'])
