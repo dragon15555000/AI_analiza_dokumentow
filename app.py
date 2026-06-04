@@ -4945,6 +4945,10 @@ def providers_test(entry_id: str):
 @app.route('/claude_test', methods=['POST'])
 def claude_test():
     """Krótki test integracji Claude Anthropic przez llm_client."""
+    auth = _require_api_key()
+    if auth:
+        return auth
+
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
     system = (data.get("system") or "").strip() or (
@@ -4953,9 +4957,9 @@ def claude_test():
     model = (data.get("model") or "").strip() or None
 
     if not message:
-        return jsonify({"success": False, "status": "error", "message": "Brak wiadomości do wysłania"}), 400
+        return jsonify({"success": False, "status": "error", "error": "Brak wiadomości do wysłania", "message": "Brak wiadomości do wysłania"}), 400
     if len(message) > 8000:
-        return jsonify({"success": False, "status": "error", "message": "Wiadomość jest zbyt długa"}), 400
+        return jsonify({"success": False, "status": "error", "error": "Wiadomość jest zbyt długa", "message": "Wiadomość jest zbyt długa"}), 400
 
     try:
         result = call_llm(
@@ -4986,6 +4990,7 @@ def claude_test():
         return jsonify({
             "success": False,
             "status": "error",
+            "error": _redact_api_keys(str(exc))[:500],
             "message": _redact_api_keys(str(exc))[:500],
         }), 500
 
