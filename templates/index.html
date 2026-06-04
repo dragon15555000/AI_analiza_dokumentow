@@ -557,6 +557,7 @@ table { margin: 0; }
         <select id="llmProviderSelect" onchange="onLlmProviderChange()">
             <option value="openrouter">OpenRouter</option>
             <option value="gemini">Gemini</option>
+            <option value="claude">Claude</option>
             <option value="ollama">Lokalny (Ollama)</option>
         </select>
         <span id="llmModelSeparator" style="color:rgba(255,255,255,0.2);">│</span>
@@ -1977,6 +1978,35 @@ table { margin: 0; }
         <input type="text" id="providerCustomKey" class="form-control form-control-sm" style="width:160px;" placeholder="Klucz API (opcja)">
         <button class="btn btn-primary btn-sm" onclick="providerAdd('custom_endpoint')">+ Dodaj</button>
       </div>
+    </div>
+  </div>
+
+  <div class="search-card mt-4" id="claude-test-panel">
+    <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap mb-3">
+      <div>
+        <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;">🤖 Test integracji - Claude Anthropic</h5>
+        <p class="small text-muted mb-0">
+          Wyślij szybkie zapytanie, aby sprawdzić czy nowy moduł <code>llm_client.py</code> odpowiada prawidłowo.
+        </p>
+      </div>
+      <span class="badge text-bg-light border small align-self-center">POST /claude_test</span>
+    </div>
+
+    <textarea
+      id="claudeTestMessage"
+      rows="3"
+      class="form-control mb-2"
+      style="resize:vertical;min-height:88px;"
+      placeholder="Napisz coś do Claude (np. 'Napisz krótką fraszkę o programowaniu w Pythonie')..."></textarea>
+
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+      <button id="btnSendClaude" type="button" class="btn btn-primary btn-sm">Wyślij zapytanie</button>
+      <span class="small text-muted">Klucz Anthropic jest pobierany z aktualnej konfiguracji LLM.</span>
+    </div>
+
+    <div class="mt-3">
+      <strong style="color:var(--c-text);">Odpowiedź modelu:</strong>
+      <pre id="claudeTestResponse" class="mt-2 mb-0 p-3 rounded border" style="background:#fff;white-space:pre-wrap;min-height:72px;font-family:inherit;color:var(--c-text);">Czekam na zapytanie...</pre>
     </div>
   </div>
 </div>
@@ -4797,6 +4827,7 @@ function syncTopbarProviders(pool) {
     const opts = [
         { value: 'openrouter', label: 'OpenRouter' },
         { value: 'gemini', label: 'Gemini' },
+        { value: 'claude', label: 'Claude' },
         { value: 'ollama', label: 'Lokalny (Ollama)' },
     ];
 
@@ -4841,6 +4872,10 @@ function isGeminiProvider(prov) {
     return prov === 'gemini';
 }
 
+function isClaudeProvider(prov) {
+    return prov === 'claude';
+}
+
 function isOpenAiCustomProvider(prov) {
     const meta = _poolCustomProviders[prov];
     return meta && meta.api_type === 'openai';
@@ -4852,6 +4887,7 @@ function syncLlmModelPickerVisibility() {
     const isOpenAiCustom = isOpenAiCustomProvider(prov);
     const isOllamaLike = isOllamaLikeProvider(prov);
     const isGemini = isGeminiProvider(prov);
+    const isClaude = isClaudeProvider(prov);
     const orSel = document.getElementById('openrouterModelSelect');
     const orInp = document.getElementById('openrouterModelInput');
     const topModel = document.getElementById('topbarLlmModel');
@@ -4868,14 +4904,23 @@ function syncLlmModelPickerVisibility() {
         }
     }
     if (topModel) {
-        const showTop = (!isOr && !isOpenAiCustom && (isOllamaLike || isGemini));
+        const showTop = (!isOr && !isOpenAiCustom && (isOllamaLike || isGemini || isClaude));
         topModel.style.display = showTop ? 'inline-block' : 'none';
         if (showTop && isGemini && !topModel.value.trim()) {
             topModel.value = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
         }
+        if (showTop && isClaude && !topModel.value.trim()) {
+            topModel.value = localStorage.getItem('claude_model') || 'claude-3-5-sonnet-20241022';
+        }
         if (showTop && isGemini) {
             topModel.placeholder = 'gemini-2.0-flash';
             topModel.title = 'Model Gemini';
+        } else if (showTop && isClaude) {
+            topModel.placeholder = 'claude-3-5-sonnet-20241022';
+            topModel.title = 'Model Claude (Anthropic)';
+        } else if (showTop && isOllamaLike) {
+            topModel.placeholder = 'model (np. llama3)';
+            topModel.title = 'Nazwa modelu Ollama lub custom endpoint';
         }
     }
     if (oaiSel) oaiSel.style.display = isOpenAiCustom ? '' : 'none';
@@ -4886,7 +4931,7 @@ function syncLlmModelPickerVisibility() {
             oaiInp.style.display = 'inline-block';
         }
     }
-    if (sep) sep.style.display = isOr || isOllamaLike || isOpenAiCustom ? '' : 'none';
+    if (sep) sep.style.display = isOr || isOllamaLike || isOpenAiCustom || isGemini || isClaude ? '' : 'none';
     refreshFavoriteQuickSelect();
 }
 
@@ -4904,6 +4949,11 @@ function getCurrentLlmModel() {
         const top = document.getElementById('topbarLlmModel');
         if (top && top.value.trim()) return top.value.trim();
         return localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
+    }
+    if (isClaudeProvider(prov)) {
+        const top = document.getElementById('topbarLlmModel');
+        if (top && top.value.trim()) return top.value.trim();
+        return localStorage.getItem('claude_model') || 'claude-3-5-sonnet-20241022';
     }
     const top = document.getElementById('topbarLlmModel');
     if (top && top.value.trim()) return top.value.trim();
@@ -4965,6 +5015,9 @@ function onTopbarLlmModelChange() {
     if (isGeminiProvider(prov)) {
         if (v) localStorage.setItem('gemini_model', v);
         else localStorage.removeItem('gemini_model');
+    } else if (isClaudeProvider(prov)) {
+        if (v) localStorage.setItem('claude_model', v);
+        else localStorage.removeItem('claude_model');
     } else if (v) {
         localStorage.setItem('llm_model', v);
     } else {
@@ -5099,8 +5152,10 @@ function restoreLlmProvider() {
     const topModel = document.getElementById('topbarLlmModel');
     if (topModel) {
         const savedGeminiModel = localStorage.getItem('gemini_model');
+        const savedClaudeModel = localStorage.getItem('claude_model');
         const savedLlmModel = localStorage.getItem('llm_model');
         if (sel.value === 'gemini' && savedGeminiModel) topModel.value = savedGeminiModel;
+        else if (sel.value === 'claude' && savedClaudeModel) topModel.value = savedClaudeModel;
         else if (savedLlmModel) topModel.value = savedLlmModel;
     }
 
@@ -5193,6 +5248,7 @@ function formatActiveLlmLabel() {
     const short = formatModelShortName(model);
     if (isOpenRouterProvider(prov)) return `OpenRouter · ${short}`;
     if (isGeminiProvider(prov)) return `Gemini · ${short}`;
+    if (isClaudeProvider(prov)) return `Claude · ${short}`;
     if (isOpenAiCustomProvider(prov)) {
         const name = _poolCustomProviders[prov]?.name || 'Custom API';
         return `${name} · ${short}`;
@@ -5270,6 +5326,7 @@ function refreshFavoriteModelOptions() {
 function formatProviderLabel(prov) {
     if (prov === 'openrouter') return 'OpenRouter';
     if (prov === 'gemini') return 'Gemini';
+    if (prov === 'claude') return 'Claude';
     if (prov === 'ollama') return 'Ollama';
     return _poolCustomProviders[prov]?.name || prov;
 }
@@ -7744,6 +7801,51 @@ function providerTest(id, btn) {
             const statusEl = document.getElementById(`provRowStatus_${id}`);
             if (statusEl) statusEl.textContent = msg;
         }).catch(() => { btn.textContent = orig; btn.disabled = false; });
+}
+
+function initClaudeTestPanel() {
+    const btn = document.getElementById('btnSendClaude');
+    const messageInput = document.getElementById('claudeTestMessage');
+    const responseBox = document.getElementById('claudeTestResponse');
+    if (!btn || !messageInput || !responseBox || btn.dataset.bound === '1') return;
+    btn.dataset.bound = '1';
+
+    const setBusy = (busy) => {
+        btn.disabled = busy;
+        btn.textContent = busy ? '⏳ Wysyłanie...' : 'Wyślij zapytanie';
+        btn.classList.toggle('btn-secondary', busy);
+        btn.classList.toggle('btn-primary', !busy);
+        messageInput.disabled = busy;
+    };
+
+    btn.addEventListener('click', async () => {
+        const messageText = messageInput.value.trim();
+        if (!messageText) {
+            alert('Proszę wpisać wiadomość przed wysłaniem!');
+            return;
+        }
+
+        setBusy(true);
+        responseBox.textContent = 'Claude myśli... Trwa komunikacja z llm_client.py.';
+
+        try {
+            const data = await fetchJson('/claude_test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ message: messageText }),
+            });
+
+            if (data.success) {
+                responseBox.textContent = data.response || 'Brak treści odpowiedzi.';
+            } else {
+                responseBox.textContent = 'Błąd po stronie serwera:\n' + (data.message || 'nieznany');
+            }
+        } catch (error) {
+            responseBox.textContent = 'Błąd połączenia:\n' + (error.message || String(error));
+        } finally {
+            setBusy(false);
+        }
+    });
 }
 
 // ============================================================
