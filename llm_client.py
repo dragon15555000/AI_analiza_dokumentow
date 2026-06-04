@@ -42,6 +42,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 OLLAMA_URL = "http://localhost:11434"
 LLM_MODEL = None
+EMBED_MODEL = "nomic-embed-text"
 
 GROQ_MODEL = None
 
@@ -94,7 +95,7 @@ def _sync_llm_client_config(**kwargs):
     """Synchronizuje zmienne konfiguracyjne LLM (wywoływane przez app.py)."""
     global GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OPENROUTER_MAX_RETRIES
-    global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER
+    global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER, EMBED_MODEL
     global ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     GEMINI_API_KEY = kwargs.get('GEMINI_API_KEY', GEMINI_API_KEY)
@@ -107,6 +108,7 @@ def _sync_llm_client_config(**kwargs):
     LLM_MODEL = kwargs.get('LLM_MODEL', LLM_MODEL)
     GROQ_MODEL = kwargs.get('GROQ_MODEL', GROQ_MODEL)
     DEFAULT_LLM_PROVIDER = kwargs.get('DEFAULT_LLM_PROVIDER', DEFAULT_LLM_PROVIDER)
+    EMBED_MODEL = kwargs.get('EMBED_MODEL', EMBED_MODEL)
     ANTHROPIC_API_KEY = kwargs.get('ANTHROPIC_API_KEY', ANTHROPIC_API_KEY)
     CLAUDE_MODEL = kwargs.get('CLAUDE_MODEL', CLAUDE_MODEL)
 
@@ -511,8 +513,8 @@ def _check_ollama_health() -> dict:
         with urllib.request.urlopen(url, timeout=4) as r:
             data = json.loads(r.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
-            has_llm = any(LLM_MODEL in m for m in models)
-            has_embed = any(EMBED_MODEL in m for m in models)
+            has_llm = any(LLM_MODEL and LLM_MODEL in m for m in models) if LLM_MODEL else None
+            has_embed = any(EMBED_MODEL and EMBED_MODEL in m for m in models) if EMBED_MODEL else None
             return {
                 "ok": True,
                 "url": OLLAMA_URL,
