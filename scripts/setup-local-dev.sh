@@ -94,19 +94,42 @@ python3 -m venv venv
 log "Sprawdzenie składni (py_compile)..."
 ./venv/bin/python -m py_compile app.py wsgi.py
 
-if [[ ! -f .env ]]; then
+# Zapewnienie trwałego SECRET_KEY w .env
+if [[ -f .env ]]; then
+  if ! grep -qE "^(FLASK_SECRET_KEY|SECRET_KEY)=" .env; then
+    log "Generowanie FLASK_SECRET_KEY i dopisywanie do istniejącego .env..."
+    if command -v openssl >/dev/null 2>&1; then
+      NEW_KEY="$(openssl rand -hex 32)"
+    else
+      NEW_KEY="fallback_stable_session_secret_$(head -c 16 /dev/urandom | hexdump -ve '/1 "%02x"' 2>/dev/null || echo "99887766")"
+    fi
+    echo "" >> .env
+    echo "# Automatycznie wygenerowany sekret dla sesji" >> .env
+    echo "FLASK_SECRET_KEY=\"$NEW_KEY\"" >> .env
+    echo "SESSION_COOKIE_SECURE=False" >> .env
+  else
+    log "Plik .env już posiada klucz sesji — pomijam."
+  fi
+else
   log "Tworzenie .env dla stacku lokalnego..."
-  cat > .env <<'ENVEOF'
+  if command -v openssl >/dev/null 2>&1; then
+    NEW_KEY="$(openssl rand -hex 32)"
+  else
+    NEW_KEY="fallback_stable_session_secret_$(head -c 16 /dev/urandom | hexdump -ve '/1 "%02x"' 2>/dev/null || echo "99887766")"
+  fi
+  cat > .env <<ENVEOF
 # Wygenerowane przez scripts/setup-local-dev.sh — dev lokalny
 QDRANT_URL=http://127.0.0.1:6333
 QDRANT_KEY=dev-local-key
 ACTIVE_COLLECTION=dokumenty
 OLLAMA_URL=http://127.0.0.1:11434
 LLM_MODEL=llama3:latest
+
+# Ustawienia sesji UI
+FLASK_SECRET_KEY="$NEW_KEY"
+SESSION_COOKIE_SECURE=False
 ENVEOF
   warn "Utworzono .env (lokalny Qdrant + Ollama). Dla produkcji skopiuj z .env.example i ustaw Qdrant Cloud."
-else
-  log "Plik .env już istnieje — pomijam (nie nadpisuję)."
 fi
 
 if [[ "$SKIP_QDRANT" -eq 0 ]]; then

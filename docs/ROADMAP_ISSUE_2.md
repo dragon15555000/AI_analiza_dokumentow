@@ -69,12 +69,12 @@ Od ostatniej wersji tego issue (czerwiec 2026) wdrożono m.in.:
 
 | # | Funkcja | Priorytet | Status |
 |---|---------|-----------|--------|
-| 10 | Auto-streszczenie przy imporcie | 🔴 | ⬜ |
+| 10 | Auto-streszczenie przy imporcie | 🔴 | ✅ (v2026.15+ streszczenie w payload) |
 | 11 | Oś czasu (Timeline, D3) | 🟡 | ⬜ |
 | 12 | Scoring podejrzaności dokumentów 0–100 | 🟡 | ⬜ |
 | 13 | Chat z pamięcią | 🟡 | ✅ Tryb rozmowy + `chat_context` |
 | 14 | OCR skanów (Tesseract) | 🟡 | 🟡 Fallback przy imporcie; brak wymuszenia OCR w UI |
-| 27 | Adaptive context (`/api/collection/profile`) | 🔴 | 🟡 Profil kolekcji + baner; bez pełnych zestawów promptów per typ |
+| 27 | Adaptive context (`/api/collection/profile`) | 🔴 | ✅ (v2026.15+ prompty per typ) |
 | — | **Detektyw — briefing śledczy** | 🔴 | ✅ v2026.10 (min. 12 chunków, dywersyfikacja plików) |
 | — | Porównanie 2 dokumentów | 🟡 | ✅ zakładka Porównaj |
 | — | Weryfikacja 2× LLM (Krytyk) | 🔴 | ✅ |
@@ -135,15 +135,15 @@ Od ostatniej wersji tego issue (czerwiec 2026) wdrożono m.in.:
 
 ## Kolejność wdrożeń — aktualna (Q3 2026)
 
-| Sprint | Zakres | Cel |
-|--------|--------|-----|
-| **S1** | #10 + #27 (dokończenie) | Szybsza orientacja w kolekcji (streszczenia + prompty adaptacyjne) |
-| **S2** | #6, #7, #8 (MVP ISAP) | Prawdziwa weryfikacja przepisów zamiast samego LLM |
-| **S3** | #2 (cloud embed) + #31 | Mniej zależności od lokalnej Ollamy przy embeddingu |
-| **S4** | #11 + #12 | Timeline + scoring ryzyka dla śledczych |
-| **S5** | #14 (OCR UI) + #32 (podgląd wyników) | Lepsze skany i Excel/PDF w UI |
-| **S6** | #3.2 PNG grafu w DOCX, #23 moduły | Raportowanie + utrzymanie kodu |
-| **S7** | #18, #20, #22 | UX (dark mode, skróty, HTML export) |
+| Sprint | Zakres | Cel | Status |
+|--------|--------|-----|--------|
+| **S1** | #10 + #27 (dokończenie) | Szybsza orientacja w kolekcji (streszczenia + prompty adaptacyjne) | ✅ Zrobione (v2026.15+) |
+| **S2** | #6, #7, #8 (MVP ISAP) | Prawdziwa weryfikacja przepisów zamiast samego LLM | |
+| **S3** | #2 (cloud embed) + #31 | Mniej zależności od lokalnej Ollamy przy embeddingu | |
+| **S4** | #11 + #12 | Timeline + scoring ryzyka dla śledczych | |
+| **S5** | #14 (OCR UI) + #32 (podgląd wyników) | Lepsze skany i Excel/PDF w UI | |
+| **S6** | #3.2 PNG grafu w DOCX, #23 moduły | Raportowanie + utrzymanie kodu | |
+| **S7** | #18, #20, #22 | UX (dark mode, skróty, HTML export) | |
 
 ---
 

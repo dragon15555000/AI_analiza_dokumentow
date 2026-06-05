@@ -47,12 +47,20 @@ Trzy terminale (lub tmux):
 ```bash
 ollama serve
 cd .local && ./qdrant
-set -a && source .env && set +a && ./venv/bin/python app.py
+set -a && source .env && set +a
+export SECRET_KEY="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+)"
+./venv/bin/python app.py
 ```
 
 `curl http://127.0.0.1:5000/health` — powinno zwrócić status wszystkich komponentów.
 
 Jeśli wolisz lokalny Qdrant zamiast Cloud, wystarczy zmienić jedną linię w `.env`.
+
+`SECRET_KEY` nie jest ładowany przez aplikację z `.env`. W produkcji ustaw go jako zmienną środowiskową procesu albo wstrzyknij przez mechanizm secrets, np. systemd `Environment=`, Docker Secrets lub Kubernetes Secret. Wszystkie repliki aplikacji muszą dostać tę samą wartość, inaczej podpisane ciasteczka sesji Flaska nie będą działały między instancjami.
 
 ---
 
