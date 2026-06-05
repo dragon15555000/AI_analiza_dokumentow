@@ -633,9 +633,9 @@ def _validate_sql_table_name(name: str) -> bool:
 
 
 app = Flask(__name__)
-SECRET_KEY = os.environ.get("SECRET_KEY", "").strip()
+SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
-    raise ValueError("Brak wymaganej zmiennej środowiskowej SECRET_KEY")
+    raise ValueError("CRITICAL: Brak zdefiniowanego FLASK_SECRET_KEY lub SECRET_KEY w środowisku/.env!")
 app.secret_key = SECRET_KEY
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
