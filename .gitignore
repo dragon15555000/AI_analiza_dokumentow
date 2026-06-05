@@ -96,3 +96,9 @@ qdrant_data/
 # === Claude Code agent worktrees ===
 .claude/
 .aider*
+
+# Pliki narzędziowe i konfiguracyjne Gemini
+.gemini/
+GEMINI.md
+scripts/gemini-model.sh
+templates/GEMINI.md
