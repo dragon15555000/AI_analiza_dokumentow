@@ -12,10 +12,11 @@ import sqlite3
 import threading
 import subprocess
 import platform
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from collections import defaultdict
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, session
 import io
 import logging
 import requests   # ← dodane dla lepszej obsługi rozłączeń klienta w streamach SSE
@@ -61,7 +62,10 @@ if _env_path.exists():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
+            _key = _k.strip()
+            if _key == "SECRET_KEY":
+                continue
+            os.environ.setdefault(_key, _v.strip())
 
 # Bezpieczne importy opcjonalne
 try: import docx
@@ -629,6 +633,16 @@ def _validate_sql_table_name(name: str) -> bool:
 
 
 app = Flask(__name__)
+SECRET_KEY = os.environ.get("SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    raise ValueError("Brak wymaganej zmiennej środowiskowej SECRET_KEY")
+app.secret_key = SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() in ("1", "true", "yes"),
+    PERMANENT_SESSION_LIFETIME=timedelta(seconds=int(os.environ.get("UI_SESSION_MAX_AGE", "43200"))),
+)
 
 # === Podstawowe logowanie ===
 logging.basicConfig(
@@ -1431,18 +1445,18 @@ def _redact_sql_config(cfg: dict) -> dict:
 
 @app.before_request
 def _require_api_key():
-    # Pełne usunięcie wsparcia dla ?api_key= (zgodnie z zaleceniami audytu bezpieczeństwa).
-    # Klucz API może być przekazywany TYLKO przez nagłówek HTTP "X-API-Key".
-    # Powody: ochrona przed wyciekiem do logów, historii przeglądarki, Referer itd.
-    # Szczególnie ważne dla endpointów SSE (/import/stream, /search/stream, /hybrid/stream).
+    # UI działa w modelu BFF: przeglądarka ma tylko podpisaną sesję Flaska,
+    # a sekrety API pozostają po stronie serwera. X-API-Key zostaje dla klientów API.
     if not APP_API_KEY:
         return None
     if request.endpoint == "index":
         return None
+    if session.get("user_authenticated") is True:
+        return None
     provided = request.headers.get("X-API-Key", "")
     if provided != APP_API_KEY:
         return jsonify(
-            {"success": False, "error": "Brak lub nieprawidłowy klucz API (wymagany nagłówek X-API-Key)"}
+            {"success": False, "error": "Brak autoryzowanej sesji UI lub nieprawidłowy nagłówek X-API-Key"}
         ), 401
     return None
 
@@ -1471,6 +1485,8 @@ def _require_config_access():
     """
     if _is_local_request():
         return None
+    if session.get("user_authenticated") is True:
+        return None
     if not APP_API_KEY:
         # Na produkcji z 0.0.0.0 bez klucza — blokujemy dostęp do konfiguracji
         return jsonify({
@@ -1479,7 +1495,7 @@ def _require_config_access():
         }), 403
     provided = request.headers.get("X-API-Key", "")
     if provided != APP_API_KEY:
-        return jsonify({"success": False, "error": "Brak lub nieprawidłowy klucz API (wymagany nagłówek X-API-Key)"}), 401
+        return jsonify({"success": False, "error": "Brak autoryzowanej sesji UI lub nieprawidłowy nagłówek X-API-Key"}), 401
     return None
 
 
@@ -1504,11 +1520,7 @@ def _save_llm_config(cfg: dict):
 
 
 def _effective_app_api_key(cfg: dict | None = None) -> str:
-    """Klucz ochrony API: UI (.llm_config.json) ma pierwszeństwo, pusty → fallback z .env."""
-    data = cfg if cfg is not None else _load_llm_config()
-    ui_key = (data.get("app_api_key") or "").strip()
-    if ui_key:
-        return ui_key
+    """Klucz ochrony API aplikacji pochodzi wyłącznie ze środowiska/.env."""
     return APP_API_KEY_ENV
 
 
@@ -1586,10 +1598,7 @@ def get_llm_config():
         "openrouter_key_set": bool(cfg.get("openrouter_key")),
         "gemini_key_set": bool(cfg.get("gemini_api_key") or env_gemini_key or GEMINI_API_KEY),
         "app_api_key_set": bool(_effective_app_api_key(cfg)),
-        "app_api_key_source": (
-            "ui" if (cfg.get("app_api_key") or "").strip()
-            else ("env" if APP_API_KEY_ENV else None)
-        ),
+        "app_api_key_source": "env" if APP_API_KEY_ENV else None,
     })
 
 
@@ -1616,13 +1625,7 @@ def save_llm_config():
         current["openrouter_key"] = data["openrouter_key"]
     if data.get("gemini_api_key"):
         current["gemini_api_key"] = data["gemini_api_key"]
-    if "app_api_key" in data:
-        ui_app_key = (data.get("app_api_key") or "").strip()
-        if ui_app_key:
-            current["app_api_key"] = ui_app_key
-        else:
-            # Pusty = usuń override UI → fallback do APP_API_KEY z .env
-            current.pop("app_api_key", None)
+    current.pop("app_api_key", None)
 
     _save_llm_config(current)
     _apply_llm_config(current)
@@ -2242,6 +2245,56 @@ DOCS_CACHE_TTL = 300  # 5 minut
 _suggestions_cache = {"data": None, "ts": 0}
 SUGGESTIONS_TTL = 1800  # 30 minut
 
+_COLLECTION_PROFILE_CACHE = {}
+
+def _get_collection_profile_cached(collection_name: str) -> str:
+    """Zwraca sprofilowany typ kolekcji ('financial', 'legal', 'technical', 'mixed' itp.) z cache."""
+    if collection_name in _COLLECTION_PROFILE_CACHE:
+        return _COLLECTION_PROFILE_CACHE[collection_name]
+
+    try:
+        client = get_qdrant_client()
+        records, _ = client.scroll(
+            collection_name=collection_name,
+            limit=200,
+            with_payload=["file"],
+            with_vectors=False,
+        )
+        if not records:
+            return "empty"
+
+        from collections import Counter
+        ext_counts = Counter()
+        for r in records:
+            fname = r.payload.get("file", "")
+            if fname:
+                ext = Path(fname).suffix.lower().lstrip(".")
+                if ext:
+                    ext_counts[ext] += 1
+
+        total = sum(ext_counts.values()) or 1
+        top_ext, top_count = ext_counts.most_common(1)[0] if ext_counts else ("", 0)
+        top_ratio = top_count / total
+
+        financial_exts = {"xlsx", "xls", "csv", "ods"}
+        legal_exts     = {"pdf", "docx", "doc", "odt"}
+        code_exts      = {"py", "js", "ts", "java", "cs", "cpp", "go", "rb"}
+
+        if ext_counts.keys() & financial_exts and top_ratio > 0.5 and top_ext in financial_exts:
+            profile = "financial"
+        elif ext_counts.keys() & legal_exts and top_ratio > 0.4 and top_ext in legal_exts:
+            profile = "legal"
+        elif ext_counts.keys() & code_exts:
+            profile = "technical"
+        else:
+            profile = "mixed"
+
+        _COLLECTION_PROFILE_CACHE[collection_name] = profile
+        return profile
+    except Exception as e:
+        logger.warning(f"_get_collection_profile_cached error: {e}")
+        return "mixed"
+
 # ---- Multi-agent Swarm ----
 FREE_MODELS_LIST = [
     ("meta-llama/llama-3.3-70b-instruct:free",  "Llama 3.3 70B ★"),
@@ -2522,6 +2575,8 @@ def _retrieve_search_contexts(
             "score": float(point.score),
             "full_path": p.get("full_path", ""),
             "point_id": str(point.id),
+            "summary": p.get("summary", ""),
+            "metadata": p.get("metadata", {}),
         })
 
     if mode == "detective" and len(raw_contexts) > eff_limit:
@@ -2536,6 +2591,8 @@ def _retrieve_search_contexts(
             "snippet": _search_result_snippet(c.get("text", ""), query_text),
             "full_path": c.get("full_path", ""),
             "win_path": wsl_to_win(c.get("full_path", "")),
+            "summary": c.get("summary", ""),
+            "metadata": c.get("metadata", {}),
         }
         for c in raw_contexts
     ]
@@ -2579,7 +2636,32 @@ def _build_search_prompt(
             query=query_text,
             prompt_suffix=cfg['prompt_suffix']
         )
-    return prompt, cfg["system"]
+
+    # Adaptive context: dołącz instrukcje profilowane do promptu systemowego (Nowe: #27)
+    system_prompt = cfg["system"]
+    profile = _get_collection_profile_cached(ACTIVE_COLLECTION)
+    if profile == "financial":
+        system_prompt += (
+            "\n\n[PROFIL KOLEKCJI: FINANSOWO-DANY] "
+            "Kolekcja zawiera głównie dane liczbowe, arkusze kalkulacyjne lub raporty finansowe. "
+            "Skup się na dokładnych kwotach, datach, porównaniach tabelarycznych i obliczeniach. "
+            "Jeśli dane są sprzeczne, wskaż różnice w wartościach liczbowych."
+        )
+    elif profile == "legal":
+        system_prompt += (
+            "\n\n[PROFIL KOLEKCJI: PRAWNO-DOKUMENTACYJNY] "
+            "Kolekcja zawiera dokumenty prawne, umowy, decyzje lub akty prawne. "
+            "Zwróć szczególną uwagę na definicje, warunki umowne, artykuły (§), paragrafy, "
+            "obowiązki stron oraz daty wejścia w życie przepisów."
+        )
+    elif profile == "technical":
+        system_prompt += (
+            "\n\n[PROFIL KOLEKCJI: TECHNICZNY] "
+            "Kolekcja zawiera kod źródłowy lub specyfikacje techniczne. "
+            "Skup się na architekturze, strukturach danych, algorytmach, konfiguracjach oraz zależnościach technologicznych."
+        )
+
+    return prompt, system_prompt
 
 
 def generate_answer(
@@ -3168,7 +3250,9 @@ def extract_text(file_path: Path, force_ocr: bool = False) -> str:
 
 @app.route('/')
 def index():
-    return render_template("index.html", api_key_required=bool(APP_API_KEY))
+    session.permanent = True
+    session["user_authenticated"] = True
+    return render_template("index.html", api_key_required=False)
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
@@ -3264,6 +3348,7 @@ def create_collection():
             _persist_active_collection(name)
             _qdrant_client = None  # Reset połączenia po zmianie kolekcji
             _suggestions_cache["data"] = None; _docs_cache["data"] = None
+            _COLLECTION_PROFILE_CACHE.clear()
 
         return jsonify({"success": True, "name": name, "switched": switch, "active": ACTIVE_COLLECTION})
     except Exception as e:
@@ -3284,6 +3369,7 @@ def switch_collection():
         _persist_active_collection(name)
         _qdrant_client = None  # Reset połączenia po zmianie kolekcji
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
+        _COLLECTION_PROFILE_CACHE.clear()
         return jsonify({"success": True, "active_collection": ACTIVE_COLLECTION})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -3562,6 +3648,33 @@ def task_stream(task_id: str):
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def _generate_file_summary_helper(text: str, file_name: str) -> str:
+    """Generuje krótkie, śledcze streszczenie pliku (maksymalnie 2 zdania/krótki akapit) przy użyciu domyślnego LLM."""
+    if not text or len(text.strip()) < 50:
+        return ""
+
+    # Weź pierwsze 8000 znaków
+    sample = text[:8000].strip()
+
+    prompt = (
+        f"Przeanalizuj poniższy fragment dokumentu '{file_name}' i wygeneruj jego krótkie, maksymalnie dwuzdaniowe streszczenie. "
+        f"Skup się na charakterze dokumentu (co to jest, kogo/czego dotyczy). "
+        f"Odpowiedz wyłącznie po polsku, zwięźle, bez wstępów deklamujących.\n\n"
+        f"TREŚĆ DOKUMENTU:\n{sample}"
+    )
+
+    system = "Jesteś precyzyjnym asystentem śledczym. Generujesz wyłącznie krótkie, fakturowe streszczenia po polsku."
+
+    try:
+        # Wywołaj domyślny model / provider
+        result = call_llm(prompt, system=system, stream=False, max_tokens=150)
+        summary = _llm_response_text(result)
+        return summary.strip()
+    except Exception as e:
+        logger.warning(f"Nie udało się wygenerować streszczenia dla {file_name}: {e}")
+        return ""
+
+
 def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) -> dict:
     """
     Work function dla background import (wywoływana przez task_queue).
@@ -3608,6 +3721,8 @@ def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) 
                 file_new = 0
 
                 file_meta = extract_file_metadata(f_path)
+                file_summary = _generate_file_summary_helper(text, f_path.name)
+                file_meta["summary"] = file_summary
 
                 # Deduplikacja
                 chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
@@ -3644,7 +3759,8 @@ def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) 
                                 "file": f_path.name,
                                 "text": txt,
                                 "full_path": str(f_path),
-                                "metadata": file_meta
+                                "metadata": file_meta,
+                                "summary": file_summary
                             }
                         )
                         for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
@@ -3673,6 +3789,7 @@ def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) 
                 logger.error(f"import file {f_path.name}: {e}")
 
         update_task(task_id, done=len(files), total=len(files), progress_pct=100, current_item=None)
+        _COLLECTION_PROFILE_CACHE.clear()
 
         return {
             "count": imported,
@@ -3806,6 +3923,8 @@ def import_stream():
 
                     # Metadane pobieramy TYLKO RAZ na plik (nie w pętli batchy — ogromna oszczędność IO)
                     file_meta = extract_file_metadata(f_path)
+                    file_summary = _generate_file_summary_helper(text, f_path.name)
+                    file_meta["summary"] = file_summary
 
                     # Deduplikacja — sprawdź które chunki już są w bazie
                     chunk_ids = [hashlib.md5(c.encode('utf-8', errors='replace')).hexdigest() for c in chunks]
@@ -3843,7 +3962,8 @@ def import_stream():
                                     "file": f_path.name,
                                     "text": txt,
                                     "full_path": str(f_path),
-                                    "metadata": file_meta
+                                    "metadata": file_meta,
+                                    "summary": file_summary
                                 }
                             )
                             for cid, vec, txt in zip(batch_ids, vectors, batch_texts)
@@ -3896,6 +4016,7 @@ def import_stream():
                 _finish_heavy_task(task_id, status="error", error=str(e)[:500])
                 task_id = ""
         finally:
+            _COLLECTION_PROFILE_CACHE.clear()
             if task_id:
                 _finish_heavy_task(task_id)
 
@@ -3917,6 +4038,7 @@ def clear_collection():
             vectors_config=VectorParams(size=vsize, distance=Distance.COSINE)
         )
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
+        _COLLECTION_PROFILE_CACHE.clear()
         return jsonify({"success": True, "deleted": count_before})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -5850,6 +5972,7 @@ def delete_documents():
             )
         )
         _suggestions_cache["data"] = None; _docs_cache["data"] = None
+        _COLLECTION_PROFILE_CACHE.clear()
         return jsonify({"success": True, "files_count": len(files_to_delete)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})

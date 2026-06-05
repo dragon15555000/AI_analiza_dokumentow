@@ -1493,15 +1493,10 @@ table { margin: 0; }
               🔐 App API Key <span class="text-danger">(ochrona API)</span>
               <span id="cfgAppKeyStatus" class="text-muted small ms-1"></span>
             </label>
-            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="clearAppApiKey()" style="font-size:0.7rem;">Wyczyść</button>
           </div>
-          <input type="password" id="cfgAppKey" class="form-control form-control-sm font-monospace" placeholder="Zostaw puste — użyje APP_API_KEY z .env">
           <div class="form-text small text-muted mt-1">
-            Puste pole + zapis = klucz z pliku <code>.env</code>. Własna wartość nadpisuje .env.
-          </div>
-          <div class="form-text small text-danger mt-1">
-            <strong>Uwaga:</strong> Po ustawieniu tego klucza wszystkie zapytania do API (w tym import, SQL, health) będą wymagały nagłówka <code>X-API-Key</code>.
-            Używaj tylko jeśli wystawiasz aplikację poza localhost.
+            Klucz jest pobierany wyłącznie przez backend z <code>APP_API_KEY</code> w środowisku/.env.
+            Frontend używa bezpiecznej sesji HttpOnly i nie przechowuje tego sekretu.
           </div>
         </div>
       </div>
@@ -2079,23 +2074,6 @@ function jsAttrEscape(s) {
         .replace(/\n/g, '\\n');
 }
 
-(function installFetchApiKey() {
-    if (!window.API_KEY_REQUIRED) return;
-    const orig = window.fetch.bind(window);
-    window.fetch = function(url, opts) {
-        opts = opts || {};
-        const headers = new Headers(opts.headers || {});
-        const k = sessionStorage.getItem('app_api_key');
-        if (k) headers.set('X-API-Key', k);
-        return orig(url, Object.assign({}, opts, { headers }));
-    };
-})();
-
-if (window.API_KEY_REQUIRED && !sessionStorage.getItem('app_api_key')) {
-    const k = prompt('Podaj klucz API (APP_API_KEY z pliku .env):');
-    if (k) sessionStorage.setItem('app_api_key', k.trim());
-}
-
 let activeFileFilter = null;
 let lastSearchQuery = '';
 let lastSearchResults = [];
@@ -2330,7 +2308,10 @@ function renderDocTable(docs) {
                 <input type="checkbox" class="doc-check" value="${safe}" onchange="onDocCheck()">
             </td>
             <td class="text-muted">${i+1}</td>
-            <td style="max-width:0;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${d.file}">${d.file}</div></td>
+            <td style="max-width:0;">
+                <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;" title="${d.file}">${d.file}</div>
+                ${d.metadata && d.metadata.summary ? `<div class="text-muted" style="font-size:0.72rem;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(d.metadata.summary)}"><strong>O dokumencie:</strong> ${escapeHtml(d.metadata.summary)}</div>` : ''}
+            </td>
             <td>${extBadge(d.file)}</td>
             <td>
                 <div style="font-size:0.78rem;font-weight:700;">${d.chunks}</div>
@@ -2418,6 +2399,13 @@ function showDocMetadata(fileName, index) {
     const meta = doc.metadata || {};
 
     let html = `<h5 style="margin-bottom:12px;">📄 ${doc.file}</h5>`;
+
+    if (meta.summary) {
+        html += `<div style="background:#f8fafc;border-left:4px solid var(--c-accent);padding:10px 14px;border-radius:4px;margin-bottom:16px;">
+            <strong style="font-size:0.82rem;color:var(--c-accent);display:block;margin-bottom:4px;">🔍 Streszczenie dokumentu</strong>
+            <p style="font-size:0.85rem;margin:0;line-height:1.4;color:var(--c-text);">${escapeHtml(meta.summary)}</p>
+        </div>`;
+    }
 
     html += `<h6 style="margin-top:16px;margin-bottom:8px;color:#334155;">Metadane systemowe</h6>`;
     html += `<table style="width:100%;font-size:0.85rem;margin-bottom:12px;">`;
@@ -3177,17 +3165,20 @@ function renderDocResults(results, query, container) {
                     style="margin-left:8px;background:#e8f0fe;border:none;color:#1a73e8;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;">Otwórz</button>
                </div>` : '';
         return `<div class="result-card">
-            <div class="result-header" onclick="toggleResult(${idx})">
-                <span class="result-fname">📄 ${escapeHtml(item.file)}</span>
-                <span class="result-meta">
-                    <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 result-preview-btn"
-                        style="font-size:0.72rem;"
-                        data-point-id="${escapeHtml(item.point_id || '')}"
-                        data-file="${escapeHtml(item.file)}"
-                        onclick="event.stopPropagation(); previewResultBtn(this)">👁 Podgląd</button>
-                    <span class="badge bg-secondary">${(parseFloat(item.score)*100).toFixed(1)}%</span>
-                    <span class="chevron" id="chev${idx}">▼</span>
-                </span>
+            <div class="result-header" onclick="toggleResult(${idx})" style="flex-direction: column; align-items: flex-start;">
+                <div class="d-flex justify-content-between align-items-center w-100">
+                    <span class="result-fname">📄 ${escapeHtml(item.file)}</span>
+                    <span class="result-meta">
+                        <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 result-preview-btn"
+                            style="font-size:0.72rem;"
+                            data-point-id="${escapeHtml(item.point_id || '')}"
+                            data-file="${escapeHtml(item.file)}"
+                            onclick="event.stopPropagation(); previewResultBtn(this)">👁 Podgląd</button>
+                        <span class="badge bg-secondary">${(parseFloat(item.score)*100).toFixed(1)}%</span>
+                        <span class="chevron" id="chev${idx}">▼</span>
+                    </span>
+                </div>
+                ${item.summary ? `<div class="text-muted" style="font-size:0.72rem;margin-top:4px;font-weight:normal;line-height:1.35;text-align:left;" title="${escapeHtml(item.summary)}"><strong>O dokumencie:</strong> ${escapeHtml(item.summary)}</div>` : ''}
             </div>
             <div class="result-preview" id="prev${idx}">${snippet}</div>
             <div class="result-body" id="body${idx}" data-loaded="0"><div class="text-muted small py-2">Kliknij nagłówek lub „Podgląd”, aby załadować pełny fragment…</div></div>
@@ -3719,16 +3710,10 @@ async function fetchJson(url, options = {}) {
 }
 
 function isApiKeyError(msg) {
-    return /klucz API|X-API-Key|\b401\b/i.test(msg || '');
+    return /sesji UI|klucz API|X-API-Key|\b401\b/i.test(msg || '');
 }
 
-function promptAppApiKey() {
-    const k = prompt('Podaj klucz API (APP_API_KEY z pliku .env):');
-    if (k) sessionStorage.setItem('app_api_key', k.trim());
-    return !!k;
-}
-
-/** /health z obsługą 401 (brak X-API-Key w sessionStorage). */
+/** /health z obsługą 401 (brak lub wygasła sesja UI). */
 async function fetchHealth(full = true) {
     const url = full ? '/health' : '/health?light=1';
     try {
@@ -3802,7 +3787,7 @@ async function streamSSEPost(url, body, eventHandlers = {}, signal = null) {
     }
 }
 
-// ---- IMPORT SSE (fetch + ReadableStream - wspiera X-API-Key) ----
+// ---- IMPORT SSE (fetch + ReadableStream - wspiera ciasteczko sesji UI) ----
 function executeImport() {
     const folderPath = document.getElementById('importPathInput').value.trim();
     if (!folderPath) return;
@@ -3836,7 +3821,7 @@ function executeImport() {
 
     let sseController = null;
 
-    // Używamy fetch + ReadableStream zamiast EventSource (lepsze wsparcie dla X-API-Key)
+    // Używamy fetch + ReadableStream zamiast EventSource (lepsza kontrola sesji i przerwania)
     const startStream = async () => {
         sseController = await streamSSE(url, {
             'start': (d) => {
@@ -6678,10 +6663,10 @@ function showStartupChecklist(d) {
             overallEl.style.borderLeft = '4px solid #ef4444';
         }
         const detail = authErr
-            ? `${msg} Wprowadź APP_API_KEY z pliku .env (zapisany w sessionStorage tej karty).`
+            ? `${msg} Odśwież stronę, aby odnowić bezpieczną sesję UI.`
             : msg;
-        connectionsBody.append(buildCheckRow(authErr ? 'Klucz API' : 'Błąd', authErr ? 'no_key' : 'error', detail));
-        if (authErr && window.API_KEY_REQUIRED) {
+        connectionsBody.append(buildCheckRow(authErr ? 'Sesja UI' : 'Błąd', authErr ? 'no_key' : 'error', detail));
+        if (authErr) {
             const tr = document.createElement('tr');
             tr.style.borderBottom = '1px solid #f1f5f9';
             const td = document.createElement('td');
@@ -6690,8 +6675,8 @@ function showStartupChecklist(d) {
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'btn btn-sm btn-warning';
-            btn.textContent = '🔑 Wprowadź klucz API i odśwież';
-            btn.onclick = () => { if (promptAppApiKey()) refreshStartupChecklist(); };
+            btn.textContent = '⟳ Odśwież sesję UI';
+            btn.onclick = () => window.location.reload();
             td.appendChild(btn);
             tr.appendChild(td);
             connectionsBody.appendChild(tr);
@@ -6864,7 +6849,7 @@ function copyDiagnostics() {
             '',
             '=== Błąd ===',
             data.error || 'Nie udało się pobrać /health',
-            data._authError ? '(Brak lub nieprawidłowy klucz API — ustaw APP_API_KEY w sessionStorage)' : '',
+            data._authError ? '(Brak lub wygasła sesja UI — odśwież stronę)' : '',
         ].filter(Boolean).join('\n');
         navigator.clipboard.writeText(text).catch(() => prompt('Skopiuj poniższy tekst:', text));
         return;
@@ -7144,11 +7129,9 @@ function llmConfigLoad() {
             kStatus.style.color = d.openrouter_key_set ? '#166534' : '#991b1b';
 
             // App API Key
-            document.getElementById('cfgAppKey').value = '';
             const appKeyStatus = document.getElementById('cfgAppKeyStatus');
             if (d.app_api_key_set) {
-                const src = d.app_api_key_source === 'ui' ? 'ustawiony w UI' : 'z .env';
-                appKeyStatus.textContent = `(${src})`;
+                appKeyStatus.textContent = '(z .env)';
                 appKeyStatus.style.color = '#166534';
             } else {
                 appKeyStatus.textContent = '(nie ustawiony)';
@@ -7191,25 +7174,9 @@ function cfgOrModelSyncInput() {
     }
 }
 
-function clearAppApiKey() {
-    if (!confirm('Wyczyścić App API Key z UI? Po zapisie wróci fallback do APP_API_KEY z pliku .env (jeśli jest).')) return;
-    document.getElementById('cfgAppKey').value = '';
-    window._clearAppApiKeyPending = true;
-    llmConfigSave();
-}
-
 function llmConfigSave() {
     const provider = document.getElementById('cfgProvider').value;
     const payload  = { provider };
-
-    // App API Key (zawsze próbujemy zapisać, nawet jeśli puste)
-    const appKey = document.getElementById('cfgAppKey').value.trim();
-    if (appKey) {
-        payload.app_api_key = appKey;
-    } else if (window._clearAppApiKeyPending) {
-        payload.app_api_key = '';
-        window._clearAppApiKeyPending = false;
-    }
 
     const geminiKey = document.getElementById('cfgGeminiKey').value.trim();
     if (geminiKey) payload.gemini_api_key = geminiKey;
@@ -7857,10 +7824,7 @@ function fleetPingAll() {
     document.getElementById('fleetPingBar').style.width = '0%';
     document.getElementById('fleetPingBtn').disabled = true;
 
-    const headers = {'Content-Type': 'application/json'};
-    if (window.API_KEY && window.API_KEY_REQUIRED) headers['X-API-Key'] = window.API_KEY;
-
-    fetch('/api/models/ping/all', {method:'POST', headers, body:'{}'})
+    fetch('/api/models/ping/all', {method:'POST', headers: {'Content-Type': 'application/json'}, body:'{}'})
     .then(resp => {
         const reader = resp.body.getReader();
         const dec = new TextDecoder();
@@ -8220,7 +8184,7 @@ function auditTabInit() {
             if (!health || health.success === false) {
                 banner.classList.remove('d-none');
                 banner.textContent = health && health._authError
-                    ? '⚠️ Brak klucza API aplikacji — wprowadź APP_API_KEY (przycisk ⚙️ → Wprowadź klucz API).'
+                    ? '⚠️ Brak lub wygasła sesja UI — odśwież stronę.'
                     : '⚠️ Nie udało się pobrać statusu Gemini z /health.';
                 if (runBtn) runBtn.disabled = true;
                 return;
