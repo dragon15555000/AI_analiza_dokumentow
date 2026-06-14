@@ -1,0 +1,34 @@
+{
+  "eaa92d85": {
+    "ping_ok": true,
+    "ping_ms": 223,
+    "ping_ts": 1780555262.8393464,
+    "err_count": 0,
+    "ok_count": 1,
+    "avg_ms": 223
+  },
+  "dcb61752": {
+    "ping_ok": false,
+    "ping_ms": 193,
+    "ping_ts": 1781327743.4177454,
+    "err_count": 5,
+    "ok_count": 4,
+    "avg_ms": 240
+  },
+  "38a5c710": {
+    "ping_ok": true,
+    "ping_ms": 201,
+    "ping_ts": 1781327743.4258113,
+    "err_count": 0,
+    "ok_count": 8,
+    "avg_ms": 198
+  },
+  "03cc5a77": {
+    "ping_ok": true,
+    "ping_ms": 1357,
+    "ping_ts": 1781327744.5844698,
+    "err_count": 4,
+    "ok_count": 4,
+    "avg_ms": 3211
+  }
+}

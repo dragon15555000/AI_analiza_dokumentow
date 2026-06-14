@@ -1,0 +1,41 @@
+{
+  "groq": {
+    "calls_total": 59,
+    "calls_ok": 46,
+    "calls_fail": 13,
+    "latency_ema_ms": 4357.481474009373,
+    "last_ok_at": 1780464999,
+    "last_error": "Request Entity Too Large",
+    "last_error_kind": null,
+    "last_probe_at": 1780464656,
+    "last_probe_ms": 229.6,
+    "last_probe_ok": true,
+    "score": 82.1
+  },
+  "ollama": {
+    "calls_total": 80,
+    "calls_ok": 72,
+    "calls_fail": 8,
+    "latency_ema_ms": 14299.662048039834,
+    "last_ok_at": 1780464744,
+    "last_error": "404 Client Error: Not Found for url: http://127.0.0.1:11434/api/generate",
+    "last_error_kind": null,
+    "last_probe_at": 1780464656,
+    "last_probe_ms": 25.5,
+    "last_probe_ok": true,
+    "score": 88.1
+  },
+  "openrouter": {
+    "calls_total": 34,
+    "calls_ok": 15,
+    "calls_fail": 19,
+    "latency_ema_ms": 38807.68578243154,
+    "last_ok_at": 1780464656,
+    "last_error": "User not found.",
+    "last_error_kind": null,
+    "last_probe_at": 1780464656,
+    "last_probe_ms": 161.3,
+    "last_probe_ok": true,
+    "score": 74.4
+  }
+}
