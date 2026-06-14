@@ -5,13 +5,16 @@ z limitem N równoczesnych tasków.
 """
 
 import hashlib
+import json
 import logging
+import sqlite3
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from enum import Enum
 
 logger = logging.getLogger("ai_analiza")
@@ -75,30 +78,157 @@ class TaskQueueConfig:
 
 
 # ============================================================
-# TASK QUEUE — główna klasa
+# STATUS MAPPINGS FOR SQLITE
 # ============================================================
+
+_STATUS_TO_DB = {
+    TaskStatus.QUEUED: "PENDING",
+    TaskStatus.RUNNING: "PROCESSING",
+    TaskStatus.COMPLETED: "COMPLETED",
+    TaskStatus.FAILED: "FAILED",
+    TaskStatus.CANCELLED: "CANCELLED"
+}
+
+_STATUS_FROM_DB = {
+    "PENDING": TaskStatus.QUEUED,
+    "PROCESSING": TaskStatus.RUNNING,
+    "COMPLETED": TaskStatus.COMPLETED,
+    "FAILED": TaskStatus.FAILED,
+    "CANCELLED": TaskStatus.CANCELLED
+}
 
 
 class TaskQueue:
     """
-    Kolejka zadań z ThreadPoolExecutor.
-    - Queued: czekające na wykonanie
-    - Running: aktualnie się wykonujące (max N)
-    - Finished: skończone/błąd/anulowane
+    Kolejka zadań z ThreadPoolExecutor i SQLite.
     """
 
-    def __init__(self, config: TaskQueueConfig | None = None):
+    def __init__(self, config: TaskQueueConfig | None = None, db_path: str = "tasks.db"):
         self.config = config or TaskQueueConfig()
+        self.db_path = db_path
         self._executor = ThreadPoolExecutor(max_workers=self.config.max_concurrent)
 
-        # Státus tasków
-        self._queued_tasks: deque[Task] = deque()  # FIFO
-        self._running_tasks: dict[str, Task] = {}  # task_id -> Task
-        self._finished_tasks: deque[Task] = deque(maxlen=self.config.history_limit)
-
-        # Thread safety
+        self._init_db()
         self._lock = threading.Lock()
         self._semaphore = threading.Semaphore(self.config.max_concurrent)
+
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT,
+                    status TEXT,
+                    result TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_connection(self):
+        return sqlite3.connect(self.db_path)
+
+    def _task_from_row(self, row) -> Task:
+        task_id, filename, status_str, result_json, created_at, updated_at = row
+        data = json.loads(result_json)
+        status = _STATUS_FROM_DB.get(status_str, TaskStatus.QUEUED)
+        return Task(
+            id=task_id,
+            kind=data.get("kind", ""),
+            label=data.get("label", ""),
+            status=status,
+            started_at=data.get("started_at"),
+            finished_at=data.get("finished_at"),
+            updated_at=data.get("updated_at", time.time()),
+            progress_pct=data.get("progress_pct", 0),
+            done=data.get("done", 0),
+            total=data.get("total"),
+            current_item=data.get("current_item"),
+            error=data.get("error"),
+            meta=data.get("meta", {})
+        )
+
+    def _task_to_row(self, task: Task) -> tuple:
+        task_dict = {
+            "kind": task.kind,
+            "label": task.label,
+            "started_at": task.started_at,
+            "finished_at": task.finished_at,
+            "updated_at": task.updated_at,
+            "progress_pct": task.progress_pct,
+            "done": task.done,
+            "total": task.total,
+            "current_item": task.current_item,
+            "error": task.error,
+            "meta": task.meta
+        }
+        result_json = json.dumps(task_dict, ensure_ascii=False)
+        filename = task.meta.get("folder", "") if task.meta else ""
+        status_str = _STATUS_TO_DB.get(task.status, "PENDING")
+        created_at_str = datetime.fromtimestamp(task.started_at or time.time()).isoformat()
+        updated_at_str = datetime.fromtimestamp(task.updated_at).isoformat()
+        return (task.id, filename, status_str, result_json, created_at_str, updated_at_str)
+
+    def _save_task_to_db(self, task: Task):
+        row = self._task_to_row(task)
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO tasks (id, filename, status, result, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                row
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _update_task_in_db(self, task: Task):
+        task_dict = {
+            "kind": task.kind,
+            "label": task.label,
+            "started_at": task.started_at,
+            "finished_at": task.finished_at,
+            "updated_at": task.updated_at,
+            "progress_pct": task.progress_pct,
+            "done": task.done,
+            "total": task.total,
+            "current_item": task.current_item,
+            "error": task.error,
+            "meta": task.meta
+        }
+        result_json = json.dumps(task_dict, ensure_ascii=False)
+        status_str = _STATUS_TO_DB.get(task.status, "PENDING")
+        updated_at_str = datetime.fromtimestamp(task.updated_at).isoformat()
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE tasks SET status = ?, result = ?, updated_at = ? WHERE id = ?",
+                (status_str, result_json, updated_at_str, task.id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_task_from_db(self, task_id: str) -> Task | None:
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, filename, status, result, created_at, updated_at FROM tasks WHERE id = ?",
+                (task_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return self._task_from_row(row)
+        finally:
+            conn.close()
+        return None
 
     def submit(
         self,
@@ -107,18 +237,6 @@ class TaskQueue:
         work_fn: Callable,
         meta: dict | None = None,
     ) -> tuple[bool, Task]:
-        """
-        Dodaj zadanie do kolejki.
-
-        Args:
-            kind: Typ zadania (e.g., 'document_import', 'hybrid_search')
-            label: Opis dla UI
-            work_fn: Funkcja do wykonania (będzie wywoływana z task_id)
-            meta: Metadane (folder, query, itp.)
-
-        Returns:
-            (queued, task) - queued: czy czeka, task: Task object
-        """
         task_id = _new_task_id(kind)
         now = time.time()
         task = Task(
@@ -133,86 +251,67 @@ class TaskQueue:
         )
 
         with self._lock:
-            self._queued_tasks.append(task)
-            queued = len(self._running_tasks) >= self.config.max_concurrent
+            self._save_task_to_db(task)
+            running_tasks = self.get_running()
+            queued = len(running_tasks) >= self.config.max_concurrent
             logger.info(
                 f"Task submitted: {task_id} ({kind}) — {'queued' if queued else 'will run soon'}"
             )
 
-        # Uruchom w tle (worker wczyta z queued_tasks gdy będzie miejsce)
         self._executor.submit(self._worker_wrapper, task_id, work_fn)
-
         return queued, self._task_snapshot(task)
 
     def _worker_wrapper(self, task_id: str, work_fn: Callable) -> None:
-        """
-        Worker thread — wczeka na miejsce, przeniesie task z queued → running,
-        wykonaj pracę, przenieś do finished.
-        """
         try:
-            # Czekaj aż będzie miejsce (semaphore)
             self._semaphore.acquire()
             task = None
 
             try:
-                # Przeniesz z queued → running
                 with self._lock:
-                    # Znajdź task w queued
-                    task = None
-                    for t in list(self._queued_tasks):
-                        if t.id == task_id:
-                            task = t
-                            break
-
+                    task = self._get_task_from_db(task_id)
                     if not task:
-                        logger.warning(f"Task {task_id} nie znaleziony w queue")
+                        logger.warning(f"Task {task_id} nie znaleziony w bazie")
                         return
 
-                    self._queued_tasks.remove(task)
+                    if task.status == TaskStatus.CANCELLED:
+                        logger.info(f"Task {task_id} anulowany przed uruchomieniem")
+                        return
+
                     task.status = TaskStatus.RUNNING
                     task.started_at = time.time()
                     task.updated_at = time.time()
-                    self._running_tasks[task_id] = task
+                    self._update_task_in_db(task)
                     logger.info(f"Task started: {task_id}")
 
-                # Wykonaj pracę
                 work_fn(task_id)
 
-                # Oznacz jako COMPLETED
                 with self._lock:
-                    if task_id in self._running_tasks:
-                        task = self._running_tasks.pop(task_id)
-                        task.status = TaskStatus.COMPLETED
+                    task = self._get_task_from_db(task_id)
+                    if task:
+                        if task.status != TaskStatus.CANCELLED:
+                            task.status = TaskStatus.COMPLETED
                         task.finished_at = time.time()
                         task.updated_at = time.time()
-                        self._finished_tasks.append(task)
+                        self._update_task_in_db(task)
                         logger.info(f"Task completed: {task_id}")
 
             except Exception as e:
-                # Błąd podczas wykonania
                 error_msg = str(e)[:200]
                 logger.error(f"Task {task_id} failed: {error_msg}")
                 with self._lock:
-                    if task_id in self._running_tasks:
-                        task = self._running_tasks.pop(task_id)
-                        task.status = TaskStatus.FAILED
+                    task = self._get_task_from_db(task_id)
+                    if task:
+                        if task.status != TaskStatus.CANCELLED:
+                            task.status = TaskStatus.FAILED
                         task.error = error_msg
                         task.finished_at = time.time()
                         task.updated_at = time.time()
-                        self._finished_tasks.append(task)
+                        self._update_task_in_db(task)
 
         finally:
             self._semaphore.release()
 
     def update_task(self, task_id: str, **updates) -> None:
-        """
-        Aktualizuj progress/status zadania (wywoływane z work_fn).
-
-        Args:
-            task_id: ID zadania
-            **updates: {progress_pct, done, total, current_item, ...}
-        """
-        # Filtruj niebezpieczne pola
         safe_updates = {
             k: v
             for k, v in updates.items()
@@ -220,99 +319,77 @@ class TaskQueue:
         }
 
         with self._lock:
-            # Szukaj w running_tasks (najbardziej prawdopodobne)
-            task = self._running_tasks.get(task_id)
-
-            # Jeśli nie znaleziono w running, szukaj w queued (rzadko)
-            if not task:
-                for t in self._queued_tasks:
-                    if t.id == task_id:
-                        task = t
-                        break
-
-            # Ostatnia szansa: szukaj w finished (edge case: update zaraz po finish)
-            if not task:
-                for t in self._finished_tasks:
-                    if t.id == task_id:
-                        task = t
-                        break
-
-            # Aktualizuj jeśli znaleziono
+            task = self._get_task_from_db(task_id)
             if task:
                 task.updated_at = time.time()
                 for k, v in safe_updates.items():
                     setattr(task, k, v)
+                self._update_task_in_db(task)
 
     def get_task(self, task_id: str) -> Task | None:
-        """Pobierz task po ID (snapshot)."""
-        with self._lock:
-            if task_id in self._running_tasks:
-                return self._task_snapshot(self._running_tasks[task_id])
-            for task in self._queued_tasks:
-                if task.id == task_id:
-                    return self._task_snapshot(task)
-            for task in self._finished_tasks:
-                if task.id == task_id:
-                    return self._task_snapshot(task)
-        return None
+        return self._get_task_from_db(task_id)
 
     def get_status(self) -> dict:
-        """Pobierz status wszystkich tasków."""
-        with self._lock:
-            return {
-                "queued": [self._task_snapshot(t) for t in self._queued_tasks],
-                "running": [self._task_snapshot(t) for t in self._running_tasks.values()],
-                "finished": [self._task_snapshot(t) for t in reversed(self._finished_tasks)],
-            }
+        return {
+            "queued": self.get_queued(),
+            "running": self.get_running(),
+            "finished": self.get_finished(),
+        }
 
     def get_queued(self) -> list[Task]:
-        """Lista czekających tasków."""
-        with self._lock:
-            return [self._task_snapshot(t) for t in self._queued_tasks]
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, filename, status, result, created_at, updated_at FROM tasks WHERE status = 'PENDING' ORDER BY updated_at ASC"
+            )
+            rows = cursor.fetchall()
+            return [self._task_from_row(r) for r in rows]
+        finally:
+            conn.close()
 
     def get_running(self) -> list[Task]:
-        """Lista uruchomionych tasków."""
-        with self._lock:
-            return [self._task_snapshot(t) for t in self._running_tasks.values()]
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, filename, status, result, created_at, updated_at FROM tasks WHERE status = 'PROCESSING' ORDER BY updated_at ASC"
+            )
+            rows = cursor.fetchall()
+            return [self._task_from_row(r) for r in rows]
+        finally:
+            conn.close()
 
     def get_finished(self) -> list[Task]:
-        """Lista skończonych tasków (COMPLETED, FAILED, CANCELLED)."""
-        with self._lock:
-            return [self._task_snapshot(t) for t in reversed(self._finished_tasks)]
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, filename, status, result, created_at, updated_at FROM tasks WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED') ORDER BY updated_at DESC LIMIT ?",
+                (self.config.history_limit,)
+            )
+            rows = cursor.fetchall()
+            return [self._task_from_row(r) for r in rows]
+        finally:
+            conn.close()
 
     def cancel_task(self, task_id: str) -> bool:
-        """
-        Anuluj task (jeśli queued) lub oznacz jako cancelled (jeśli running).
-        Już executing thread nie zostanie zatrzymany.
-
-        Returns:
-            True jeśli uda się anulować, False jeśli task nie znaleziony
-        """
         with self._lock:
-            # Szukaj w queued
-            for i, task in enumerate(self._queued_tasks):
-                if task.id == task_id:
-                    self._queued_tasks.remove(task)
-                    task.status = TaskStatus.CANCELLED
-                    task.finished_at = time.time()
-                    task.updated_at = time.time()
-                    self._finished_tasks.append(task)
-                    logger.info(f"Task cancelled (was queued): {task_id}")
-                    return True
+            task = self._get_task_from_db(task_id)
+            if not task:
+                return False
 
-            # Szukaj w running
-            if task_id in self._running_tasks:
-                task = self._running_tasks[task_id]
-                # Zaznaacz ale nie zatrzymuj (thread będzie dalej running)
+            if task.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
                 task.status = TaskStatus.CANCELLED
+                task.finished_at = time.time()
                 task.updated_at = time.time()
-                logger.info(f"Task marked as cancelled (still executing): {task_id}")
+                self._update_task_in_db(task)
+                logger.info(f"Task cancelled: {task_id}")
                 return True
 
         return False
 
     def _task_snapshot(self, task: Task | None) -> Task | None:
-        """Utwórz snapshot taska dla thread safety."""
         if not task:
             return None
         snapshot = Task(
@@ -333,8 +410,7 @@ class TaskQueue:
         return snapshot
 
     def shutdown(self, wait: bool = True) -> None:
-        """Zamknij executor (dla testów/shutdown aplikacji)."""
-        self._executor.shutdown(wait=wait, timeout=self.config.executor_timeout)
+        self._executor.shutdown(wait=wait)
 
 
 # ============================================================

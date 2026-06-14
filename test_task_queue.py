@@ -22,7 +22,19 @@ class TestTaskQueue(unittest.TestCase):
 
     def setUp(self):
         """Utwórz fresh queue na każdy test."""
-        self.queue = TaskQueue(TaskQueueConfig(max_concurrent=2, history_limit=10))
+        import tempfile
+        import os
+        self.db_fd, self.db_path = tempfile.mkstemp()
+        self.queue = TaskQueue(TaskQueueConfig(max_concurrent=2, history_limit=10), db_path=self.db_path)
+
+    def tearDown(self):
+        import os
+        self.queue.shutdown(wait=True)
+        try:
+            os.close(self.db_fd)
+            os.unlink(self.db_path)
+        except Exception:
+            pass
 
     def test_submit_task_immediate_execution(self):
         """Test: Dodaj task, on się od razu wykonuje."""
@@ -246,9 +258,65 @@ class TestTaskQueue(unittest.TestCase):
         self.assertEqual(len(status["running"]), 0)
         self.assertEqual(len(status["finished"]), 3)
 
+    def test_persistence(self):
+        """Test trwałości: nowa instancja kolejki widzi zadanie zapisane przez poprzednią."""
+        import tempfile
+        import os
+
+        fd, db_path = tempfile.mkstemp()
+        try:
+            # Pierwsza instancja
+            queue1 = TaskQueue(db_path=db_path)
+
+            # Dodaj zadanie
+            def dummy_work(task_id):
+                pass
+            queued, task1 = queue1.submit("test_persist", "Persist Task", dummy_work)
+            task_id = task1.id
+
+            # Poczekaj chwilę, upewnij się, że jest w bazie
+            time.sleep(0.1)
+
+            # Druga instancja na tej samej bazie
+            queue2 = TaskQueue(db_path=db_path)
+            task2 = queue2.get_task(task_id)
+
+            self.assertIsNotNone(task2)
+            self.assertEqual(task2.id, task_id)
+            self.assertEqual(task2.label, "Persist Task")
+
+            # Zamknij executory
+            queue1.shutdown(wait=True)
+            queue2.shutdown(wait=True)
+        finally:
+            os.close(fd)
+            try:
+                os.unlink(db_path)
+            except Exception:
+                pass
+
 
 class TestGlobalHelpers(unittest.TestCase):
     """Testy globalnych helper functions"""
+
+    def setUp(self):
+        import tempfile
+        import os
+        import task_queue
+        self.db_fd, self.db_path = tempfile.mkstemp()
+        self.original_queue = task_queue._global_task_queue
+        task_queue._global_task_queue = TaskQueue(db_path=self.db_path)
+
+    def tearDown(self):
+        import os
+        import task_queue
+        task_queue._global_task_queue.shutdown(wait=True)
+        task_queue._global_task_queue = self.original_queue
+        try:
+            os.close(self.db_fd)
+            os.unlink(self.db_path)
+        except Exception:
+            pass
 
     def test_global_submit_task(self):
         """Test: Globalna funkcja submit_task."""
