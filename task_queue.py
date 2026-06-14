@@ -1,19 +1,18 @@
-# -*- coding: utf-8 -*-
 """
 Task Queue System — zarządzanie kolejką zadań w tle.
 Pozwala na nieblokujące wykonywanie ciężkich operacji (import PDF, wektoryzacja, analiza)
 z limitem N równoczesnych tasków.
 """
 
-import time
+import hashlib
 import logging
 import threading
-import hashlib
-from enum import Enum
+import time
 from collections import deque
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Optional
+from dataclasses import asdict, dataclass, field
+from enum import Enum
 
 logger = logging.getLogger("ai_analiza")
 
@@ -22,8 +21,10 @@ logger = logging.getLogger("ai_analiza")
 # ENUMS & DATACLASSES
 # ============================================================
 
+
 class TaskStatus(Enum):
     """Status zadania w kolejce."""
+
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -34,18 +35,19 @@ class TaskStatus(Enum):
 @dataclass
 class Task:
     """Reprezentacja zadania w kolejce."""
+
     id: str
     kind: str
     label: str
     status: TaskStatus
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
+    started_at: float | None = None
+    finished_at: float | None = None
     updated_at: float = field(default_factory=time.time)
     progress_pct: int = 0
     done: int = 0
-    total: Optional[int] = None
-    current_item: Optional[str] = None
-    error: Optional[str] = None
+    total: int | None = None
+    current_item: str | None = None
+    error: str | None = None
     meta: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -66,6 +68,7 @@ class Task:
 @dataclass
 class TaskQueueConfig:
     """Konfiguracja kolejki zadań."""
+
     max_concurrent: int = 2
     history_limit: int = 50
     executor_timeout: int = 3600
@@ -75,6 +78,7 @@ class TaskQueueConfig:
 # TASK QUEUE — główna klasa
 # ============================================================
 
+
 class TaskQueue:
     """
     Kolejka zadań z ThreadPoolExecutor.
@@ -83,7 +87,7 @@ class TaskQueue:
     - Finished: skończone/błąd/anulowane
     """
 
-    def __init__(self, config: Optional[TaskQueueConfig] = None):
+    def __init__(self, config: TaskQueueConfig | None = None):
         self.config = config or TaskQueueConfig()
         self._executor = ThreadPoolExecutor(max_workers=self.config.max_concurrent)
 
@@ -101,7 +105,7 @@ class TaskQueue:
         kind: str,
         label: str,
         work_fn: Callable,
-        meta: Optional[dict] = None,
+        meta: dict | None = None,
     ) -> tuple[bool, Task]:
         """
         Dodaj zadanie do kolejki.
@@ -210,7 +214,8 @@ class TaskQueue:
         """
         # Filtruj niebezpieczne pola
         safe_updates = {
-            k: v for k, v in updates.items()
+            k: v
+            for k, v in updates.items()
             if k not in {"id", "status", "kind", "label", "started_at", "finished_at"}
         }
 
@@ -238,7 +243,7 @@ class TaskQueue:
                 for k, v in safe_updates.items():
                     setattr(task, k, v)
 
-    def get_task(self, task_id: str) -> Optional[Task]:
+    def get_task(self, task_id: str) -> Task | None:
         """Pobierz task po ID (snapshot)."""
         with self._lock:
             if task_id in self._running_tasks:
@@ -306,7 +311,7 @@ class TaskQueue:
 
         return False
 
-    def _task_snapshot(self, task: Optional[Task]) -> Optional[Task]:
+    def _task_snapshot(self, task: Task | None) -> Task | None:
         """Utwórz snapshot taska dla thread safety."""
         if not task:
             return None
@@ -336,7 +341,7 @@ class TaskQueue:
 # GLOBAL INSTANCE & HELPERS
 # ============================================================
 
-_global_task_queue: Optional[TaskQueue] = None
+_global_task_queue: TaskQueue | None = None
 _global_queue_lock = threading.Lock()
 
 
@@ -360,13 +365,13 @@ def submit_task(
     kind: str,
     label: str,
     work_fn: Callable,
-    meta: Optional[dict] = None,
+    meta: dict | None = None,
 ) -> tuple[bool, Task]:
     """Submit zadanie do kolejki."""
     return get_task_queue().submit(kind, label, work_fn, meta)
 
 
-def get_task(task_id: str) -> Optional[Task]:
+def get_task(task_id: str) -> Task | None:
     """Pobierz status taska."""
     return get_task_queue().get_task(task_id)
 

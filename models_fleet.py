@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 Models Fleet Management — zarządzanie flotą modeli AI.
 Ranking modeli, statystyki dostępności, wybór najlepszych endpointów.
 """
 
 import json
-import threading
 import logging
+import threading
 from pathlib import Path
 
 logger = logging.getLogger("ai_analiza")
@@ -25,6 +24,7 @@ _model_live_lock = threading.Lock()
 # LOAD / SAVE — statystyki custom endpointów i modeli
 # ============================================================
 
+
 def _load_custom_endpoint_stats() -> dict:
     """Wczytuje statystyki custom endpointów z pliku JSON."""
     try:
@@ -38,7 +38,9 @@ def _load_custom_endpoint_stats() -> dict:
 def _save_custom_endpoint_stats(stats: dict) -> None:
     """Zapisuje statystyki custom endpointów do pliku JSON."""
     with _custom_stats_lock:
-        _CUSTOM_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+        _CUSTOM_STATS_FILE.write_text(
+            json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
 
 def _get_or_init_endpoint_stats(endpoint_id: str) -> dict:
@@ -46,8 +48,12 @@ def _get_or_init_endpoint_stats(endpoint_id: str) -> dict:
     stats = _load_custom_endpoint_stats()
     if endpoint_id not in stats:
         stats[endpoint_id] = {
-            "ping_ok": None, "ping_ms": None, "ping_ts": None,
-            "err_count": 0, "ok_count": 0, "avg_ms": None
+            "ping_ok": None,
+            "ping_ms": None,
+            "ping_ts": None,
+            "err_count": 0,
+            "ok_count": 0,
+            "avg_ms": None,
         }
         _save_custom_endpoint_stats(stats)
     return stats[endpoint_id]
@@ -68,7 +74,9 @@ def _save_model_live_stats(stats: dict) -> None:
     """Zapisuje pingi wbudowanych modeli floty."""
     try:
         with _model_live_lock:
-            _MODEL_LIVE_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+            _MODEL_LIVE_FILE.write_text(
+                json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
     except OSError as exc:
         logger.warning("Nie zapisano statystyk modeli: %s", exc)
 
@@ -97,6 +105,7 @@ def _set_MODEL_REGISTRY(registry: dict) -> None:
 # SCORING — ranking modeli i custom endpointów
 # ============================================================
 
+
 def _model_score(model_id: str) -> float:
     """Ranking 0–100. Jakość 40% + szybkość 30% + dostępność 30%."""
     reg = _MODEL_REGISTRY.get(model_id, {})
@@ -104,7 +113,7 @@ def _model_score(model_id: str) -> float:
     if live.get("ping_ok") is False:
         return 0.0
     quality = (reg.get("quality_tier", 1) - 1) / 2 * 40
-    speed   = (4 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej
+    speed = (4 - reg.get("speed_tier", 2)) / 2 * 30  # szybszy → wyżej
     if live.get("ping_ok") is True:
         ms = live.get("avg_ms") or live.get("ping_ms") or 15000
         avail = max(0.0, 30.0 - ms / 500.0)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Prompty dla modeli AI — system prompts, prefixes i formaty odpowiedzi.
 """
@@ -15,7 +14,7 @@ SEARCH_MODES = {
             "krótko, konkretnie i wyłącznie na podstawie dostarczonych dokumentów. "
             "Jeśli w dokumentach znajdują się liczby, kwoty, nazwy firm, nazwiska lub paragrafy, podaj je w pierwszej kolejności."
         ),
-        "prompt_suffix": "Podaj zwięzłą syntezę dowodów:"
+        "prompt_suffix": "Podaj zwięzłą syntezę dowodów:",
     },
     "detective": {
         "label": "Detektyw — briefing śledczy",
@@ -57,7 +56,7 @@ SEARCH_MODES = {
             "Flaguj błędy: [PRZEPIS NIEAKTUALNY], [PRZEPIS NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE], [PRZEPIS NIEZGODNY]. "
             "Odpowiadaj wyłącznie po polsku."
         ),
-        "prompt_suffix": "Oceń prawidłowość powołanych przepisów prawnych:"
+        "prompt_suffix": "Oceń prawidłowość powołanych przepisów prawnych:",
     },
     "inconsistency": {
         "label": "Niespójności",
@@ -68,7 +67,7 @@ SEARCH_MODES = {
             "Wskazuj też wewnętrzne niespójności w jednym dokumencie. "
             "Odpowiadaj wyłącznie po polsku."
         ),
-        "prompt_suffix": "Znajdź sprzeczności i niespójności między dokumentami:"
+        "prompt_suffix": "Znajdź sprzeczności i niespójności między dokumentami:",
     },
     "extract": {
         "label": "Ekstrakcja danych",
@@ -79,8 +78,8 @@ SEARCH_MODES = {
             "Każdy znaleziony fakt to osobny wiersz. Minimum 5 wierszy jeśli dane pozwalają. "
             "Odpowiadaj wyłącznie po polsku. Nie pisz nic poza tabelą."
         ),
-        "prompt_suffix": "Wyciągnij ustrukturyzowane dane z dokumentów jako tabela Markdown:"
-    }
+        "prompt_suffix": "Wyciągnij ustrukturyzowane dane z dokumentów jako tabela Markdown:",
+    },
 }
 
 
@@ -125,10 +124,7 @@ DETECTIVE_PROMPT_TEMPLATE = (
 )
 
 DEFAULT_PROMPT_TEMPLATE = (
-    "KONTEKST Z DOKUMENTÓW:\n{contexts}\n"
-    "{chat_block}\n"
-    "ZAPYTANIE: {query}\n\n"
-    "{prompt_suffix}"
+    "KONTEKST Z DOKUMENTÓW:\n{contexts}\n{chat_block}\nZAPYTANIE: {query}\n\n{prompt_suffix}"
 )
 
 CHAT_CONTEXT_BLOCK_TEMPLATE = (
@@ -143,45 +139,96 @@ CHAT_CONTEXT_BLOCK_TEMPLATE = (
 
 MODEL_REGISTRY: dict = {
     "meta-llama/llama-3.3-70b-instruct:free": {
-        "name": "Llama 3.3 70B", "short": "Llama 70B", "provider": "Meta",
-        "icon": "🌟", "context_k": 128, "speed_tier": 2, "quality_tier": 3,
-        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "name": "Llama 3.3 70B",
+        "short": "Llama 70B",
+        "provider": "Meta",
+        "icon": "🌟",
+        "context_k": 128,
+        "speed_tier": 2,
+        "quality_tier": 3,
+        "free": True,
+        "rate_rpm": 20,
+        "rate_day": 200,
         "tags": ["analiza", "prawo", "długi_kontekst", "raporty", "rozumowanie"],
     },
     "meta-llama/llama-3.2-3b-instruct:free": {
-        "name": "Llama 3.2 3B", "short": "Llama 3.2 3B", "provider": "Meta",
-        "icon": "⚡", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
-        "free": True, "rate_rpm": 30, "rate_day": 500,
+        "name": "Llama 3.2 3B",
+        "short": "Llama 3.2 3B",
+        "provider": "Meta",
+        "icon": "⚡",
+        "context_k": 128,
+        "speed_tier": 1,
+        "quality_tier": 1,
+        "free": True,
+        "rate_rpm": 30,
+        "rate_day": 500,
         "tags": ["szybkość", "krótkie_pytania", "klasyfikacja", "swarm"],
     },
     "openai/gpt-oss-20b:free": {
-        "name": "GPT-OSS 20B", "short": "GPT-OSS 20B", "provider": "OpenAI",
-        "icon": "🏃", "context_k": 128, "speed_tier": 2, "quality_tier": 2,
-        "free": True, "rate_rpm": 20, "rate_day": 300,
+        "name": "GPT-OSS 20B",
+        "short": "GPT-OSS 20B",
+        "provider": "OpenAI",
+        "icon": "🏃",
+        "context_k": 128,
+        "speed_tier": 2,
+        "quality_tier": 2,
+        "free": True,
+        "rate_rpm": 20,
+        "rate_day": 300,
         "tags": ["analiza", "ekstrakcja", "swarm"],
     },
     "mistralai/mistral-7b-instruct:free": {
-        "name": "Mistral 7B", "short": "Mistral 7B", "provider": "Mistral AI",
-        "icon": "🎯", "context_k": 32, "speed_tier": 1, "quality_tier": 1,
-        "free": True, "rate_rpm": 30, "rate_day": 500,
+        "name": "Mistral 7B",
+        "short": "Mistral 7B",
+        "provider": "Mistral AI",
+        "icon": "🎯",
+        "context_k": 32,
+        "speed_tier": 1,
+        "quality_tier": 1,
+        "free": True,
+        "rate_rpm": 30,
+        "rate_day": 500,
         "tags": ["szybkość", "krótkie_pytania", "klasyfikacja"],
     },
     "qwen/qwen3-coder:free": {
-        "name": "Qwen3 Coder", "short": "Qwen3 Coder", "provider": "Alibaba",
-        "icon": "🔷", "context_k": 128, "speed_tier": 1, "quality_tier": 2,
-        "free": True, "rate_rpm": 20, "rate_day": 300,
+        "name": "Qwen3 Coder",
+        "short": "Qwen3 Coder",
+        "provider": "Alibaba",
+        "icon": "🔷",
+        "context_k": 128,
+        "speed_tier": 1,
+        "quality_tier": 2,
+        "free": True,
+        "rate_rpm": 20,
+        "rate_day": 300,
         "tags": ["dane_strukturalne", "tabele", "kod", "ekstrakcja"],
     },
     "meta-llama/llama-3.1-8b-instruct:free": {
-        "name": "Llama 3.1 8B", "short": "Llama 8B", "provider": "Meta",
-        "icon": "🏃", "context_k": 128, "speed_tier": 1, "quality_tier": 1,
-        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "name": "Llama 3.1 8B",
+        "short": "Llama 8B",
+        "provider": "Meta",
+        "icon": "🏃",
+        "context_k": 128,
+        "speed_tier": 1,
+        "quality_tier": 1,
+        "free": True,
+        "rate_rpm": 20,
+        "rate_day": 200,
         "tags": ["szybkość", "klasyfikacja", "ekstrakcja", "fragmenty"],
     },
     "z-ai/glm-4.5-air:free": {
-        "name": "GLM 4.5 Air", "short": "GLM 4.5", "provider": "Z.AI",
-        "icon": "🔬", "context_k": 128, "speed_tier": 2, "quality_tier": 2,
-        "free": True, "rate_rpm": 20, "rate_day": 200,
+        "name": "GLM 4.5 Air",
+        "short": "GLM 4.5",
+        "provider": "Z.AI",
+        "icon": "🔬",
+        "context_k": 128,
+        "speed_tier": 2,
+        "quality_tier": 2,
+        "free": True,
+        "rate_rpm": 20,
+        "rate_day": 200,
         "tags": ["szybkość", "długi_kontekst", "fragmenty"],
     },
 }
+
+HEALTH_CHECK_PROMPT = "Czy system działa poprawnie?"

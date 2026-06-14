@@ -6,7 +6,7 @@ Używany przez: python wsgi.py  oraz  python -m waitress ... wsgi:app
 
 import os
 
-from app import app, APP_HOST
+from app import APP_HOST, app
 
 if __name__ == "__main__":
     from waitress import serve

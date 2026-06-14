@@ -12,6 +12,9 @@ pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0   # do bezpośredniego odczytu obrazów w OCR
 
+# Retry z Exponential Backoff dla błędów HTTP 429/50x
+tenacity>=8.2.0
+
 # Produkcyjny serwer WSGI (zastępuje Flask dev server)
 waitress>=3.0.0
 

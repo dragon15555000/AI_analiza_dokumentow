@@ -563,7 +563,7 @@ table { margin: 0; }
         <select id="openrouterModelSelect" onchange="onOpenRouterModelSelectChange()" style="max-width:220px;">
             <option value="">-- wybierz model --</option>
             <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★ najlepszy</option>
-            <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free) - szybki</option>
+            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash - szybki</option>
             <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (free)</option>
             <option value="qwen/qwen-2.5-7b-instruct:free">Qwen 2.5 7B (free) - niezawodny</option>
             <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (free) - bardzo szybki</option>
@@ -1443,7 +1443,7 @@ table { margin: 0; }
         </div>
         <div class="col-md-4" id="cfgGeminiModelWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">Model Gemini</label>
-          <input type="text" id="cfgGeminiModel" class="form-control form-control-sm font-monospace" placeholder="gemini-2.0-flash">
+          <input type="text" id="cfgGeminiModel" class="form-control form-control-sm font-monospace" placeholder="gemini-2.5-flash">
         </div>
         <div class="col-md-6" id="cfgGeminiKeyWrap">
           <label class="form-label small fw-bold mb-1">
@@ -1466,7 +1466,7 @@ table { margin: 0; }
           <label class="form-label small fw-bold mb-1">Model główny</label>
           <select id="cfgOrModelSelect" class="form-select form-select-sm" onchange="cfgOrModelSyncInput()">
             <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free) ★</option>
-            <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free)</option>
+            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
             <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (free)</option>
             <option value="qwen/qwen-2.5-7b-instruct:free">Qwen 2.5 7B (free)</option>
             <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (free)</option>
@@ -1476,7 +1476,7 @@ table { margin: 0; }
         </div>
         <div class="col-md-6" id="cfgOrModelVerifyWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">Model Krytyk (weryfikacja)</label>
-          <input type="text" id="cfgOrModelVerify" class="form-control form-control-sm font-monospace" placeholder="google/gemini-2.0-flash-exp:free" style="font-size:0.75rem;">
+          <input type="text" id="cfgOrModelVerify" class="form-control form-control-sm font-monospace" placeholder="google/gemini-2.5-flash" style="font-size:0.75rem;">
         </div>
         <div class="col-md-3" id="cfgOrFallbackWrap" style="display:none;">
           <label class="form-label small fw-bold mb-1">Fallback na Ollama przy 429</label>
@@ -1697,9 +1697,7 @@ table { margin: 0; }
         <div class="mb-3">
           <label class="form-label small fw-bold">Model Gemini:</label>
           <select id="auditModelSelect" class="form-select form-select-sm">
-            <option value="gemini-2.0-flash">gemini-2.0-flash (zalecany — tańszy, ~1M ctx)</option>
-            <option value="gemini-flash-latest">gemini-flash-latest (alias)</option>
-            <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+            <option value="gemini-2.5-flash">gemini-2.5-flash (zalecany, ~1M ctx)</option>
             <option value="gemini-2.5-pro">gemini-2.5-pro (dokładniejszy)</option>
           </select>
         </div>
@@ -5060,10 +5058,10 @@ function syncLlmModelPickerVisibility() {
         const showTop = (!isOr && !isOpenAiCustom && !isClaude && (isOllamaLike || isGemini));
         topModel.style.display = showTop ? 'inline-block' : 'none';
         if (showTop && isGemini && !topModel.value.trim()) {
-            topModel.value = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
+            topModel.value = localStorage.getItem('gemini_model') || 'gemini-2.5-flash';
         }
         if (showTop && isGemini) {
-            topModel.placeholder = 'gemini-2.0-flash';
+            topModel.placeholder = 'gemini-2.5-flash';
             topModel.title = 'Model Gemini';
         } else if (showTop && isOllamaLike) {
             topModel.placeholder = 'model (np. llama3)';
@@ -5105,7 +5103,7 @@ function getCurrentLlmModel() {
     if (isGeminiProvider(prov)) {
         const top = document.getElementById('topbarLlmModel');
         if (top && top.value.trim()) return top.value.trim();
-        return localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
+        return localStorage.getItem('gemini_model') || 'gemini-2.5-flash';
     }
     if (isClaudeProvider(prov)) return getCurrentClaudeModel();
     if (isOllamaLikeProvider(prov)) {
@@ -7997,7 +7995,7 @@ function _providerDefaultRow(type, def) {
     if (type === 'gemini') {
         return `<tr class="table-light">
             <td class="small"><em>.env (domyślny)</em></td>
-            <td class="small text-muted">GEMINI_API_KEY · ${escapeHtml(def.gemini_model || 'gemini-2.0-flash')}</td>
+            <td class="small text-muted">GEMINI_API_KEY · ${escapeHtml(def.gemini_model || 'gemini-2.5-flash')}</td>
             <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;"></span>
                 <span id="provRowStatus_default_gemini" class="small ms-1">aktywny (audyt logów)</span></td>
             <td class="text-end">
@@ -8397,7 +8395,7 @@ function runAuditFile() {
             const msg = d.error || d.msg || 'Błąd audytu';
             if (/429|RATE_LIMIT|Limit zapytań Gemini/i.test(msg)) {
                 finish(
-                    msg + '\n\n💡 Wskazówka: odczekaj 30–60 s, wybierz gemini-2.0-flash (nie Pro), '
+                    msg + '\n\n💡 Wskazówka: odczekaj 30–60 s, wybierz gemini-2.5-flash (nie Pro), '
                     + 'włącz fallback OpenRouter poniżej lub uruchom audyt ponownie.'
                 );
             } else {

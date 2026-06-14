@@ -1,20 +1,18 @@
-# -*- coding: utf-8 -*-
 """
 LLM Client — komunikacja z modelami sztucznej inteligencji.
 Obsługuje: Gemini, OpenRouter, Ollama, custom endpoints.
 """
 
-import time
-import logging
-import urllib.error
-import urllib.request
 import json
-import requests
+import logging
 import re
 import threading
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
+import time
+import urllib.error
+import urllib.request
+
+import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger("ai_analiza")
 
@@ -27,8 +25,19 @@ logger = logging.getLogger("ai_analiza")
 GEMINI_API_KEY = None
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_MODEL = None
-GEMINI_MODEL_DEFAULT = "gemini-2.0-flash"
-GEMINI_DEPRECATED_MODELS = {"gemini-1.5-pro", "gemini-1.5-flash"}
+GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+GEMINI_DEPRECATED_MODELS = {
+    "gemini-1.5-pro",
+    "gemini-1.5-pro-latest",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-flash-latest",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash-latest",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-001",
+}
 GEMINI_MAX_RETRIES = 5
 GEMINI_RETRY_INITIAL_DELAY = 2.5
 GEMINI_RETRY_MAX_WAIT_SEC = 60.0
@@ -67,7 +76,9 @@ def _set_load_provider_pool(func):
 def _load_provider_pool():
     """Wrapper dla _load_provider_pool z app.py."""
     if _load_provider_pool_func is None:
-        raise RuntimeError("_load_provider_pool nie został ustawiony. Upewnij się że app.py go inicjalizuje.")
+        raise RuntimeError(
+            "_load_provider_pool nie został ustawiony. Upewnij się że app.py go inicjalizuje."
+        )
     return _load_provider_pool_func()
 
 
@@ -109,20 +120,21 @@ def _sync_llm_client_config(**kwargs):
     global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER, EMBED_MODEL
     global ANTHROPIC_API_KEY, CLAUDE_MODEL
 
-    GEMINI_API_KEY = kwargs.get('GEMINI_API_KEY', GEMINI_API_KEY)
-    GEMINI_MODEL = kwargs.get('GEMINI_MODEL', GEMINI_MODEL)
-    OPENROUTER_API_KEY = kwargs.get('OPENROUTER_API_KEY', OPENROUTER_API_KEY)
-    OPENROUTER_MODEL = kwargs.get('OPENROUTER_MODEL', OPENROUTER_MODEL)
-    OPENROUTER_MODEL_VERIFY = kwargs.get('OPENROUTER_MODEL_VERIFY', OPENROUTER_MODEL_VERIFY)
-    OPENROUTER_FALLBACK_TO_OLLAMA = kwargs.get('OPENROUTER_FALLBACK_TO_OLLAMA', OPENROUTER_FALLBACK_TO_OLLAMA)
-    OPENROUTER_MAX_RETRIES = kwargs.get('OPENROUTER_MAX_RETRIES', OPENROUTER_MAX_RETRIES)
-    LLM_MODEL = kwargs.get('LLM_MODEL', LLM_MODEL)
-    GROQ_MODEL = kwargs.get('GROQ_MODEL', GROQ_MODEL)
-    DEFAULT_LLM_PROVIDER = kwargs.get('DEFAULT_LLM_PROVIDER', DEFAULT_LLM_PROVIDER)
-    EMBED_MODEL = kwargs.get('EMBED_MODEL', EMBED_MODEL)
-    ANTHROPIC_API_KEY = kwargs.get('ANTHROPIC_API_KEY', ANTHROPIC_API_KEY)
-    CLAUDE_MODEL = kwargs.get('CLAUDE_MODEL', CLAUDE_MODEL)
-
+    GEMINI_API_KEY = kwargs.get("GEMINI_API_KEY", GEMINI_API_KEY)
+    GEMINI_MODEL = _normalize_gemini_model(kwargs.get("GEMINI_MODEL", GEMINI_MODEL))
+    OPENROUTER_API_KEY = kwargs.get("OPENROUTER_API_KEY", OPENROUTER_API_KEY)
+    OPENROUTER_MODEL = kwargs.get("OPENROUTER_MODEL", OPENROUTER_MODEL)
+    OPENROUTER_MODEL_VERIFY = kwargs.get("OPENROUTER_MODEL_VERIFY", OPENROUTER_MODEL_VERIFY)
+    OPENROUTER_FALLBACK_TO_OLLAMA = kwargs.get(
+        "OPENROUTER_FALLBACK_TO_OLLAMA", OPENROUTER_FALLBACK_TO_OLLAMA
+    )
+    OPENROUTER_MAX_RETRIES = kwargs.get("OPENROUTER_MAX_RETRIES", OPENROUTER_MAX_RETRIES)
+    LLM_MODEL = kwargs.get("LLM_MODEL", LLM_MODEL)
+    GROQ_MODEL = kwargs.get("GROQ_MODEL", GROQ_MODEL)
+    DEFAULT_LLM_PROVIDER = kwargs.get("DEFAULT_LLM_PROVIDER", DEFAULT_LLM_PROVIDER)
+    EMBED_MODEL = kwargs.get("EMBED_MODEL", EMBED_MODEL)
+    ANTHROPIC_API_KEY = kwargs.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
+    CLAUDE_MODEL = kwargs.get("CLAUDE_MODEL", CLAUDE_MODEL)
 
 
 def get_llm_provider(request_provider: str | None = None) -> str:
@@ -145,7 +157,6 @@ def get_llm_provider(request_provider: str | None = None) -> str:
     return DEFAULT_LLM_PROVIDER
 
 
-
 def _effective_llm_model(provider: str | None = None) -> str:
     """Model pokazywany w diagnostyce dla aktywnego providera."""
     prov = (provider or DEFAULT_LLM_PROVIDER or "").strip().lower()
@@ -160,9 +171,8 @@ def _effective_llm_model(provider: str | None = None) -> str:
     return LLM_MODEL
 
 
-
 def _normalize_gemini_model(model: str | None) -> str:
-    """Usuwa prefix models/; wycofane gemini-1.5-* mapuje na GEMINI_MODEL_DEFAULT."""
+    """Usuwa prefix models/ i mapuje wyłączone modele Gemini na GEMINI_MODEL_DEFAULT."""
     raw = (model or GEMINI_MODEL or GEMINI_MODEL_DEFAULT).strip()
     if raw.startswith("models/"):
         raw = raw[7:].strip()
@@ -170,8 +180,9 @@ def _normalize_gemini_model(model: str | None) -> str:
         return GEMINI_MODEL_DEFAULT
     if raw in GEMINI_DEPRECATED_MODELS:
         return GEMINI_MODEL_DEFAULT
+    if raw.startswith("gemini-1.5-") or raw.startswith("gemini-2.0-"):
+        return GEMINI_MODEL_DEFAULT
     return raw
-
 
 
 def _list_gemini_generate_models(api_key: str) -> tuple[bool, list[str], str | None]:
@@ -181,7 +192,11 @@ def _list_gemini_generate_models(api_key: str) -> tuple[bool, list[str], str | N
     try:
         url = f"{GEMINI_API_BASE}/models"
         response = _gemini_request_with_retry(
-            "GET", url, api_key=api_key, timeout=8, max_retries=2,
+            "GET",
+            url,
+            api_key=api_key,
+            timeout=8,
+            max_retries=2,
         )
         data = response.json()
         names: list[str] = []
@@ -199,13 +214,17 @@ def _list_gemini_generate_models(api_key: str) -> tuple[bool, list[str], str | N
         return False, [], str(exc)[:200]
 
 
-
 def _gemini_model_hint(api_key: str, model: str) -> str:
-    """Sugestia modelu po 404 — gemini-1.5-* jest wycofany od 2025."""
+    """Sugestia modelu po 404."""
+    raw = (model or "").replace("models/", "").strip()
     normalized = _normalize_gemini_model(model)
-    if normalized in GEMINI_DEPRECATED_MODELS:
+    if (
+        raw in GEMINI_DEPRECATED_MODELS
+        or raw.startswith("gemini-1.5-")
+        or raw.startswith("gemini-2.0-")
+    ):
         base = (
-            f"Model {normalized} jest wycofany w Gemini API "
+            f"Model {raw or normalized} jest wyłączony w Gemini API "
             f"(używany automatycznie: {GEMINI_MODEL_DEFAULT})."
         )
     else:
@@ -220,14 +239,12 @@ def _gemini_model_hint(api_key: str, model: str) -> str:
     return base
 
 
-
 def _gemini_auth_headers(api_key: str | None = None) -> dict[str, str]:
     """Nagłówek x-goog-api-key — zalecany przez Google zamiast ?key= w URL."""
     key = (api_key or GEMINI_API_KEY or "").strip()
     if not key:
         raise ValueError("Brak klucza Gemini API")
     return {"x-goog-api-key": key}
-
 
 
 def _gemini_retry_wait_seconds(delay: float, retry_after: str | None) -> float:
@@ -237,7 +254,6 @@ def _gemini_retry_wait_seconds(delay: float, retry_after: str | None) -> float:
         except Exception:
             pass
     return min(delay, GEMINI_RETRY_MAX_WAIT_SEC)
-
 
 
 def _gemini_error_message(status: int | None, detail: str = "") -> str:
@@ -255,7 +271,6 @@ def _gemini_error_message(status: int | None, detail: str = "") -> str:
     return f"Błąd Gemini (HTTP {status})"
 
 
-
 def _gemini_generate_url(model: str, stream: bool = False) -> str:
     action = "streamGenerateContent" if stream else "generateContent"
     suffix = "?alt=sse" if stream else ""
@@ -263,18 +278,21 @@ def _gemini_generate_url(model: str, stream: bool = False) -> str:
     return f"{GEMINI_API_BASE}/models/{effective_model}:{action}{suffix}"
 
 
-
 def _is_gemini_base_url(url: str, provider_name: str = "") -> bool:
     """Sprawdza czy URL/provider wskazuje na natywne API Gemini."""
     return _custom_endpoint_is_gemini(url, provider_name)
 
 
-
-def _gemini_request_with_retry(method: str, url: str, *, api_key: str | None = None,
-                               timeout: int = 60,
-                               max_retries: int | None = None,
-                               initial_delay: float | None = None,
-                               **kwargs):
+def _gemini_request_with_retry(
+    method: str,
+    url: str,
+    *,
+    api_key: str | None = None,
+    timeout: int = 60,
+    max_retries: int | None = None,
+    initial_delay: float | None = None,
+    **kwargs,
+):
     """Wysyła request do Gemini z nagłówkiem x-goog-api-key i backoff przy 429."""
     retries = GEMINI_MAX_RETRIES if max_retries is None else max_retries
     delay = GEMINI_RETRY_INITIAL_DELAY if initial_delay is None else initial_delay
@@ -293,11 +311,14 @@ def _gemini_request_with_retry(method: str, url: str, *, api_key: str | None = N
             last_body = (response.text or "")[:400]
             if response.status_code == 429 and attempt < retries - 1:
                 wait = _gemini_retry_wait_seconds(
-                    delay, response.headers.get("Retry-After"),
+                    delay,
+                    response.headers.get("Retry-After"),
                 )
                 logger.warning(
                     "Gemini 429 (próba %s/%s) — czekam %.1fs",
-                    attempt + 1, retries, wait,
+                    attempt + 1,
+                    retries,
+                    wait,
                 )
                 time.sleep(wait)
                 delay = min(delay * 2, GEMINI_RETRY_MAX_WAIT_SEC)
@@ -315,11 +336,17 @@ def _gemini_request_with_retry(method: str, url: str, *, api_key: str | None = N
             if getattr(exc, "response", None) is not None:
                 last_body = (exc.response.text or "")[:400]
             if status == 429 and attempt < retries - 1:
-                retry_after = getattr(exc.response, "headers", {}).get("Retry-After") if getattr(exc, "response", None) is not None else None
+                retry_after = (
+                    getattr(exc.response, "headers", {}).get("Retry-After")
+                    if getattr(exc, "response", None) is not None
+                    else None
+                )
                 wait = _gemini_retry_wait_seconds(delay, retry_after)
                 logger.warning(
                     "Gemini 429 HTTPError (próba %s/%s) — czekam %.1fs",
-                    attempt + 1, retries, wait,
+                    attempt + 1,
+                    retries,
+                    wait,
                 )
                 time.sleep(wait)
                 delay = min(delay * 2, GEMINI_RETRY_MAX_WAIT_SEC)
@@ -342,7 +369,6 @@ def _gemini_request_with_retry(method: str, url: str, *, api_key: str | None = N
     )
 
 
-
 def _check_gemini_health() -> dict:
     """Sprawdza klucz Gemini i dostępność skonfigurowanego modelu."""
     if not GEMINI_API_KEY:
@@ -351,7 +377,11 @@ def _check_gemini_health() -> dict:
     try:
         ok, models, list_err = _list_gemini_generate_models(GEMINI_API_KEY)
         if not ok:
-            return {"ok": False, "model": configured, "error": list_err or "Nie udało się pobrać listy modeli"}
+            return {
+                "ok": False,
+                "model": configured,
+                "error": list_err or "Nie udało się pobrać listy modeli",
+            }
         has_model = configured in models
         result = {
             "ok": has_model,
@@ -374,9 +404,13 @@ def _check_gemini_health() -> dict:
         return {"ok": False, "model": configured, "error": str(e)[:120]}
 
 
-
-def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = None,
-                          max_tokens: int = 8192, temperature: float = 0.2):
+def _stream_gemini_tokens(
+    prompt: str,
+    system: str = "",
+    model: str | None = None,
+    max_tokens: int = 8192,
+    temperature: float = 0.2,
+):
     """Generator tokenów z Google Gemini API (streamGenerateContent)."""
     if not GEMINI_API_KEY:
         yield "Błąd: Brak GEMINI_API_KEY w .env"
@@ -426,9 +460,14 @@ def _stream_gemini_tokens(prompt: str, system: str = "", model: str | None = Non
         yield f"[Błąd Gemini streaming: {str(e)}]"
 
 
-
-def _call_gemini(prompt: str, system: str, stream: bool, model: str,
-                 max_tokens: int = 8192, temperature: float = 0.2):
+def _call_gemini(
+    prompt: str,
+    system: str,
+    stream: bool,
+    model: str,
+    max_tokens: int = 8192,
+    temperature: float = 0.2,
+):
     if not GEMINI_API_KEY:
         raise RuntimeError("Brak GEMINI_API_KEY w .env")
     effective_model = _normalize_gemini_model(model)
@@ -462,13 +501,39 @@ def _call_gemini(prompt: str, system: str, stream: bool, model: str,
     return {"response": "".join(text_parts), "raw": data}
 
 
-def _call_claude(prompt: str, system: str, stream: bool, model: str,
-                 max_tokens: int = 4096, temperature: float = 0.2,
-                 api_key: str | None = None, base_url: str | None = None):
+def _is_retryable_http_error(exc: BaseException) -> bool:
+    """Zwraca True dla błędów HTTP 429 i 5xx kwalifikujących się do retry."""
+    if isinstance(exc, requests.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status == 429 or (status is not None and status >= 500)
+    if isinstance(exc, RuntimeError):
+        msg = str(exc)
+        return "429" in msg or "500" in msg or "502" in msg or "503" in msg or "504" in msg
+    return False
+
+
+@retry(
+    retry=retry_if_exception(_is_retryable_http_error),
+    wait=wait_exponential(multiplier=1, min=1, max=60),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
+def _call_claude(
+    prompt: str,
+    system: str,
+    stream: bool,
+    model: str,
+    max_tokens: int = 4096,
+    temperature: float = 0.2,
+    api_key: str | None = None,
+    base_url: str | None = None,
+):
     """Wywołanie API Anthropic (Claude) — system prompt jako osobne pole."""
     effective_key = (api_key or ANTHROPIC_API_KEY or "").strip()
     if not effective_key:
-        raise RuntimeError("Brak ANTHROPIC_API_KEY — ustaw w .env lub przekaż przez _sync_llm_client_config")
+        raise RuntimeError(
+            "Brak ANTHROPIC_API_KEY — ustaw w .env lub przekaż przez _sync_llm_client_config"
+        )
     if stream:
         raise RuntimeError("Claude streaming nie jest jeszcze obsługiwane")
 
@@ -490,6 +555,8 @@ def _call_claude(prompt: str, system: str, stream: bool, model: str,
     messages_url = _anthropic_messages_url(base_url or CLAUDE_API_BASE)
     logger.info("Wysyłam zapytanie do Claude (model: %s)", effective_model)
     r = requests.post(messages_url, headers=headers, json=payload, timeout=300)
+    if r.status_code == 429 or r.status_code >= 500:
+        r.raise_for_status()
     if r.status_code != 200:
         detail = _redact_api_keys(r.text or "")[:500]
         logger.error("Błąd Claude API (%s): %s", r.status_code, detail)
@@ -528,29 +595,31 @@ def _check_ollama_health() -> dict:
             data = json.loads(r.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
             has_llm = any(LLM_MODEL and LLM_MODEL in m for m in models) if LLM_MODEL else None
-            has_embed = any(EMBED_MODEL and EMBED_MODEL in m for m in models) if EMBED_MODEL else None
+            has_embed = (
+                any(EMBED_MODEL and EMBED_MODEL in m for m in models) if EMBED_MODEL else None
+            )
             return {
                 "ok": True,
                 "url": OLLAMA_URL,
                 "models_available": len(models),
                 "has_llm": has_llm,
                 "has_embedding": has_embed,
-                "error": None
+                "error": None,
             }
     except Exception as e:
         return {"ok": False, "url": OLLAMA_URL, "error": str(e)[:120]}
 
 
-
-def _call_ollama(prompt: str, system: str, stream: bool, model: str,
-                 provider: str | None = None) -> dict | requests.Response:
+def _call_ollama(
+    prompt: str, system: str, stream: bool, model: str, provider: str | None = None
+) -> dict | requests.Response:
     url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
         "system": system,
         "stream": stream,
-        "options": {"temperature": 0.2}
+        "options": {"temperature": 0.2},
     }
     if stream:
         return requests.post(url, json=payload, stream=True, timeout=300)
@@ -558,7 +627,6 @@ def _call_ollama(prompt: str, system: str, stream: bool, model: str,
         r = requests.post(url, json=payload, timeout=180)
         r.raise_for_status()
         return r.json()
-
 
 
 def _check_openrouter_health() -> dict:
@@ -573,14 +641,9 @@ def _check_openrouter_health() -> dict:
         req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode("utf-8"))
-            return {
-                "ok": True,
-                "models_available": len(data.get("data", [])),
-                "error": None
-            }
+            return {"ok": True, "models_available": len(data.get("data", [])), "error": None}
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
-
 
 
 def _is_openrouter_no_endpoints_error(exc: Exception) -> bool:
@@ -613,7 +676,6 @@ def _is_openrouter_no_endpoints_error(exc: Exception) -> bool:
     return "no endpoints found" in str(exc).lower()
 
 
-
 def _openrouter_model_candidates(primary_model: str | None) -> list[str]:
     """Zwraca listę modeli OpenRouter do wypróbowania w kolejności preferencji."""
     primary = (primary_model or OPENROUTER_MODEL or "").strip()
@@ -629,7 +691,6 @@ def _openrouter_model_candidates(primary_model: str | None) -> list[str]:
         if candidate and candidate not in candidates:
             candidates.append(candidate)
     return candidates
-
 
 
 def _openrouter_live_free_models(limit: int = 12) -> list[str]:
@@ -656,15 +717,16 @@ def _openrouter_live_free_models(limit: int = 12) -> list[str]:
         return []
 
 
-
 def _openrouter_test_model_candidates() -> list[str]:
     """Modele do testu providera: konfiguracja, aktualne :free, potem stabilne fallbacki."""
     candidates: list[str] = []
-    for candidate in [*_openrouter_model_candidates(OPENROUTER_MODEL), *_openrouter_live_free_models()]:
+    for candidate in [
+        *_openrouter_model_candidates(OPENROUTER_MODEL),
+        *_openrouter_live_free_models(),
+    ]:
         if candidate and candidate not in candidates:
             candidates.append(candidate)
     return candidates
-
 
 
 def _test_openrouter_api_key(key: str) -> dict:
@@ -697,12 +759,15 @@ def _test_openrouter_api_key(key: str) -> dict:
             if r.status_code == 200:
                 return {"success": True, "ms": ms, "status": 200, "model": model, "error": None}
             last_error = (r.text or f"HTTP {r.status_code}")[:300]
-            if (
-                r.status_code == 404
-                or r.status_code in {429, 502, 503, 504}
-            ):
+            if r.status_code == 404 or r.status_code in {429, 502, 503, 504}:
                 continue
-            return {"success": False, "ms": ms, "status": r.status_code, "model": model, "error": last_error}
+            return {
+                "success": False,
+                "ms": ms,
+                "status": r.status_code,
+                "model": model,
+                "error": last_error,
+            }
         except requests.RequestException as exc:
             last_error = str(exc)[:300]
 
@@ -716,15 +781,15 @@ def _test_openrouter_api_key(key: str) -> dict:
     }
 
 
-
-def _call_openrouter_once(prompt: str, system: str, model: str,
-                          max_tokens: int, temperature: float) -> dict:
+def _call_openrouter_once(
+    prompt: str, system: str, model: str, max_tokens: int, temperature: float
+) -> dict:
     """Jedna próba non-stream dla OpenRouter bez fallbacków modelu."""
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {_pick_openrouter_key()}",
         "HTTP-Referer": "http://localhost",
-        "X-Title": "AI Analiza Dokumentów"
+        "X-Title": "AI Analiza Dokumentów",
     }
 
     messages = []
@@ -737,7 +802,7 @@ def _call_openrouter_once(prompt: str, system: str, model: str,
         "messages": messages,
         "stream": False,
         "max_tokens": max_tokens,
-        "temperature": temperature
+        "temperature": temperature,
     }
 
     last_error = None
@@ -754,14 +819,18 @@ def _call_openrouter_once(prompt: str, system: str, model: str,
                 raise
             if _is_rate_limit_error(e):
                 if attempt < OPENROUTER_MAX_RETRIES - 1:
-                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = _get_retry_after(e) or (1.5**attempt)
                     wait = min(wait, 12.0)
-                    logger.warning(f"OpenRouter 429 (non-stream, próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    logger.warning(
+                        f"OpenRouter 429 (non-stream, próba {attempt + 1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s"
+                    )
                     time.sleep(wait)
                 continue
             if _is_openrouter_quota_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA:
                 logger.warning("OpenRouter 402/quota (non-stream) → fallback do Ollama")
-                return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="402/quota")
+                return _fallback_openrouter_to_ollama(
+                    prompt, system, stream=False, reason="402/quota"
+                )
             if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
                 try:
                     status = e.response.status_code
@@ -769,22 +838,30 @@ def _call_openrouter_once(prompt: str, system: str, model: str,
                     status = None
                 if status == 400:
                     logger.warning("OpenRouter 400 → fallback do Ollama")
-                    return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="400")
+                    return _fallback_openrouter_to_ollama(
+                        prompt, system, stream=False, reason="400"
+                    )
             break
 
     if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
         return _fallback_openrouter_to_ollama(
-            prompt, system, stream=False,
+            prompt,
+            system,
+            stream=False,
             reason="OpenRouter rate limit/quota (non-stream)",
         )
 
     raise last_error if last_error else RuntimeError("OpenRouter call failed")
 
 
-
-def _stream_openrouter_once(prompt: str, system: str, model: str,
-                            max_tokens: int, temperature: float,
-                            meta: dict | None = None):
+def _stream_openrouter_once(
+    prompt: str,
+    system: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    meta: dict | None = None,
+):
     """Jedna próba stream dla OpenRouter bez fallbacków modelu."""
     if isinstance(meta, dict):
         meta.setdefault("requested_provider", "openrouter")
@@ -797,7 +874,7 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {_pick_openrouter_key()}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     messages = []
     if system:
@@ -809,7 +886,7 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
         "messages": messages,
         "stream": True,
         "max_tokens": max_tokens,
-        "temperature": temperature
+        "temperature": temperature,
     }
 
     last_error = None
@@ -843,9 +920,11 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
                 raise
             if _is_rate_limit_error(e):
                 if attempt < OPENROUTER_MAX_RETRIES - 1:
-                    wait = _get_retry_after(e) or (1.5 ** attempt)
+                    wait = _get_retry_after(e) or (1.5**attempt)
                     wait = min(wait, 12.0)
-                    logger.warning(f"OpenRouter 429 (próba {attempt+1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s")
+                    logger.warning(
+                        f"OpenRouter 429 (próba {attempt + 1}/{OPENROUTER_MAX_RETRIES}) — czekam {wait:.1f}s"
+                    )
                     time.sleep(wait)
                 continue
             if _is_openrouter_quota_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA:
@@ -857,7 +936,9 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
     err_msg = str(last_error) if last_error else "nieznany błąd"
 
     if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-        logger.info("OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+        logger.info(
+            "OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)"
+        )
         if isinstance(meta, dict):
             meta["provider_used"] = "ollama"
             meta["model_used"] = LLM_MODEL
@@ -869,7 +950,7 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
             "prompt": prompt,
             "system": system,
             "stream": True,
-            "options": {"temperature": temperature if temperature is not None else 0.2}
+            "options": {"temperature": temperature if temperature is not None else 0.2},
         }
         try:
             with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
@@ -900,9 +981,9 @@ def _stream_openrouter_once(prompt: str, system: str, model: str,
         yield f"[Błąd OpenRouter streaming: {err_msg}]"
 
 
-
-def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
-                     max_tokens: int, temperature: float) -> dict | requests.Response:
+def _call_openrouter(
+    prompt: str, system: str, stream: bool, model: str, max_tokens: int, temperature: float
+) -> dict | requests.Response:
     candidates = _openrouter_model_candidates(model)
 
     if stream:
@@ -913,7 +994,7 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
             headers = {
                 "Authorization": f"Bearer {_pick_openrouter_key()}",
                 "HTTP-Referer": "http://localhost",
-                "X-Title": "AI Analiza Dokumentów"
+                "X-Title": "AI Analiza Dokumentów",
             }
             messages = []
             if system:
@@ -924,19 +1005,23 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                 "messages": messages,
                 "stream": True,
                 "max_tokens": max_tokens,
-                "temperature": temperature
+                "temperature": temperature,
             }
             try:
                 r = requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
                 if r.status_code == 404 and "no endpoints found" in (r.text or "").lower():
-                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                    logger.warning(
+                        f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy"
+                    )
                     continue
                 r.raise_for_status()
                 return r
             except Exception as e:
                 last_error = e
                 if _is_openrouter_no_endpoints_error(e):
-                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                    logger.warning(
+                        f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy"
+                    )
                     continue
                 raise
 
@@ -953,12 +1038,16 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
         except Exception as e:
             last_error = e
             if _is_openrouter_no_endpoints_error(e):
-                logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                logger.warning(
+                    f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy"
+                )
                 continue
 
             if _is_openrouter_quota_error(e) and OPENROUTER_FALLBACK_TO_OLLAMA:
                 logger.warning("OpenRouter 402/quota → fallback do Ollama")
-                return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="402/quota")
+                return _fallback_openrouter_to_ollama(
+                    prompt, system, stream=False, reason="402/quota"
+                )
 
             if OPENROUTER_FALLBACK_TO_OLLAMA and getattr(e, "response", None) is not None:
                 try:
@@ -967,14 +1056,18 @@ def _call_openrouter(prompt: str, system: str, stream: bool, model: str,
                     status = None
                 if status == 400:
                     logger.warning("OpenRouter 400 → fallback do Ollama")
-                    return _fallback_openrouter_to_ollama(prompt, system, stream=False, reason="400")
+                    return _fallback_openrouter_to_ollama(
+                        prompt, system, stream=False, reason="400"
+                    )
             if _is_rate_limit_error(e) or _is_openrouter_quota_error(e):
                 break
             raise
 
     if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
         return _fallback_openrouter_to_ollama(
-            prompt, system, stream=False,
+            prompt,
+            system,
+            stream=False,
             reason="OpenRouter limit/quota (non-stream)",
         )
 
@@ -1046,23 +1139,13 @@ def _check_custom_endpoint_health(url: str, key: str = "", name: str = "") -> di
         if key:
             headers["Authorization"] = f"Bearer {key}"
         url_clean = url.rstrip("/")
-        req = urllib.request.Request(
-            f"{url_clean}/api/tags",
-            headers=headers,
-            method="GET"
-        )
+        req = urllib.request.Request(f"{url_clean}/api/tags", headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
-            return {
-                "ok": True,
-                "url": url,
-                "models_available": len(models),
-                "error": None
-            }
+            return {"ok": True, "url": url, "models_available": len(models), "error": None}
     except Exception as e:
         return {"ok": False, "url": url, "error": str(e)[:120]}
-
 
 
 def _custom_endpoint_is_gemini(url: str, name: str = "") -> bool:
@@ -1141,7 +1224,6 @@ def _test_claude_api(api_key: str, model: str | None = None) -> tuple[bool, str,
         return False, str(exc)[:200], ms
 
 
-
 def _gemini_key_from_url_or_value(url: str, key: str = "") -> str:
     """Zwraca klucz Gemini z pola key albo z query stringu endpointu."""
     if key:
@@ -1154,9 +1236,9 @@ def _gemini_key_from_url_or_value(url: str, key: str = "") -> str:
         return ""
 
 
-
-def _gemini_custom_generate_url(endpoint_url: str, key: str, model: str | None = None,
-                                stream: bool = False) -> str:
+def _gemini_custom_generate_url(
+    endpoint_url: str, key: str, model: str | None = None, stream: bool = False
+) -> str:
     """Buduje kanoniczny URL Gemini — ignoruje wycofany model wpisany w custom endpoint URL."""
     method = "streamGenerateContent" if stream else "generateContent"
     effective_model = _normalize_gemini_model(model or GEMINI_MODEL)
@@ -1175,9 +1257,9 @@ def _gemini_custom_generate_url(endpoint_url: str, key: str, model: str | None =
     return base + (f"?{query}" if query else "")
 
 
-
-def _gemini_generate_payload(prompt: str, system: str = "",
-                             max_tokens: int = 2000, temperature: float = 0.2) -> dict:
+def _gemini_generate_payload(
+    prompt: str, system: str = "", max_tokens: int = 2000, temperature: float = 0.2
+) -> dict:
     """Payload JSON dla Gemini generateContent."""
     text = f"{system.strip()}\n\n{prompt}" if system else prompt
     return {
@@ -1189,20 +1271,22 @@ def _gemini_generate_payload(prompt: str, system: str = "",
     }
 
 
-
 def _gemini_response_text(data: dict) -> str:
     """Ekstrahuje tekst z odpowiedzi Gemini generateContent."""
-    parts = (
-        (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts"))
-        or []
-    )
+    parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
     return "".join(str(part.get("text") or "") for part in parts).strip()
 
 
-
-def _call_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
-                                 stream: bool, model: str = "",
-                                 max_tokens: int = 2000, temperature: float = 0.2):
+def _call_gemini_custom_endpoint(
+    url: str,
+    key: str,
+    prompt: str,
+    system: str,
+    stream: bool,
+    model: str = "",
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+):
     """Natywny Gemini custom endpoint przez POST generateContent."""
     api_key = _gemini_key_from_url_or_value(url, key)
     if not api_key:
@@ -1223,10 +1307,15 @@ def _call_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
     return {"response": _gemini_response_text(data), "raw": data}
 
 
-
-def _stream_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
-                                   model: str = "", max_tokens: int = 2000,
-                                   temperature: float = 0.2):
+def _stream_gemini_custom_endpoint(
+    url: str,
+    key: str,
+    prompt: str,
+    system: str,
+    model: str = "",
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+):
     """Generator tokenów z natywnego Gemini streamGenerateContent."""
     try:
         with _call_gemini_custom_endpoint(
@@ -1260,7 +1349,6 @@ def _stream_gemini_custom_endpoint(url: str, key: str, prompt: str, system: str,
             yield f"[Błąd Gemini custom streaming: {_redact_api_keys(msg)}]"
 
 
-
 def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str, int]:
     """Test Gemini API — weryfikuje model z listy generateContent."""
     if not api_key:
@@ -1283,7 +1371,6 @@ def _test_gemini_api(api_key: str, model: str | None = None) -> tuple[bool, str,
         return False, err[:200], ms
 
 
-
 def _custom_endpoint_is_groq(url: str, name: str = "") -> bool:
     """Czy URL/nazwa wskazuje na API Groq (OpenAI-compatible)."""
     u = (url or "").lower()
@@ -1299,7 +1386,6 @@ def _custom_endpoint_is_openai(url: str) -> bool:
     return "openai/v1" in u or u.endswith("/v1")
 
 
-
 def _openai_chat_completions_url(base_url: str) -> str:
     base = (base_url or "").rstrip("/")
     if base.endswith("/chat/completions"):
@@ -1309,9 +1395,15 @@ def _openai_chat_completions_url(base_url: str) -> str:
     return base + "/chat/completions"
 
 
-
-def _stream_openai_compatible(url: str, key: str, prompt: str, system: str,
-                              model: str, max_tokens: int = 2000, temperature: float = 0.2):
+def _stream_openai_compatible(
+    url: str,
+    key: str,
+    prompt: str,
+    system: str,
+    model: str,
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+):
     """Generator tokenów z OpenAI-compatible chat/completions (SSE)."""
     chat_url = _openai_chat_completions_url(url)
     headers = {"Content-Type": "application/json"}
@@ -1355,9 +1447,16 @@ def _stream_openai_compatible(url: str, key: str, prompt: str, system: str,
         yield f"[Błąd OpenAI-compatible streaming: {str(e)}]"
 
 
-
-def _call_openai_compatible(url: str, key: str, prompt: str, system: str, stream: bool,
-                            model: str, max_tokens: int = 2000, temperature: float = 0.2):
+def _call_openai_compatible(
+    url: str,
+    key: str,
+    prompt: str,
+    system: str,
+    stream: bool,
+    model: str,
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+):
     chat_url = _openai_chat_completions_url(url)
     headers = {"Content-Type": "application/json"}
     if key:
@@ -1382,10 +1481,17 @@ def _call_openai_compatible(url: str, key: str, prompt: str, system: str, stream
     return {"response": content, "raw": data}
 
 
-
-def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: bool,
-                          model: str = "", max_tokens: int = 2000, temperature: float = 0.2,
-                          name: str = ""):
+def _call_custom_endpoint(
+    url: str,
+    key: str,
+    prompt: str,
+    system: str,
+    stream: bool,
+    model: str = "",
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+    name: str = "",
+):
     """Custom endpoint: Gemini, Anthropic Claude, OpenAI-compatible albo Ollama."""
     if _custom_endpoint_is_gemini(url, name):
         return _call_gemini_custom_endpoint(
@@ -1393,8 +1499,14 @@ def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: 
         )
     if _custom_endpoint_is_anthropic(url, name):
         return _call_claude(
-            prompt, system, stream, model or CLAUDE_MODEL, max_tokens, temperature,
-            api_key=key, base_url=url,
+            prompt,
+            system,
+            stream,
+            model or CLAUDE_MODEL,
+            max_tokens,
+            temperature,
+            api_key=key,
+            base_url=url,
         )
     if _custom_endpoint_is_openai(url):
         return _call_openai_compatible(
@@ -1409,7 +1521,7 @@ def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: 
         "prompt": prompt,
         "system": system,
         "stream": stream,
-        "options": {"temperature": 0.2}
+        "options": {"temperature": 0.2},
     }
     if stream:
         return requests.post(url_clean, json=payload, headers=headers, stream=True, timeout=300)
@@ -1417,7 +1529,6 @@ def _call_custom_endpoint(url: str, key: str, prompt: str, system: str, stream: 
         r = requests.post(url_clean, json=payload, headers=headers, timeout=180)
         r.raise_for_status()
         return r.json()
-
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -1441,7 +1552,10 @@ def _is_openrouter_quota_error(exc: Exception) -> bool:
     if exc is None:
         return False
     msg = str(exc).lower()
-    if any(x in msg for x in ("402", "403", "payment required", "insufficient credit", "insufficient balance")):
+    if any(
+        x in msg
+        for x in ("402", "403", "payment required", "insufficient credit", "insufficient balance")
+    ):
         return True
     if hasattr(exc, "response") and getattr(exc, "response", None) is not None:
         try:
@@ -1460,14 +1574,15 @@ def _openrouter_should_fallback_to_ollama(exc: Exception) -> bool:
     )
 
 
-def _fallback_openrouter_to_ollama(prompt: str, system: str, *, stream: bool, reason: str) -> dict | requests.Response:
+def _fallback_openrouter_to_ollama(
+    prompt: str, system: str, *, stream: bool, reason: str
+) -> dict | requests.Response:
     """Wspólny fallback OpenRouter → lokalna Ollama."""
     logger.info("%s → fallback do Ollama (%s)", reason, LLM_MODEL)
     result = _call_ollama(prompt, system, stream=stream, model=LLM_MODEL)
     if isinstance(result, dict):
         return result
     return {"response": str(result)}
-
 
 
 def _get_retry_after(exc: Exception) -> float | None:
@@ -1482,13 +1597,15 @@ def _get_retry_after(exc: Exception) -> float | None:
     return None
 
 
-
 def _redact_sensitive_log_text(text: str) -> str:
     """Redaguje oczywiste sekrety przed wysłaniem logów do chmury."""
     if not text:
         return ""
     patterns = [
-        (r"(?i)(password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*\S+", r"\1=***REDACTED***"),
+        (
+            r"(?i)(password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*\S+",
+            r"\1=***REDACTED***",
+        ),
         (r"(?i)Bearer\s+\S+", "Bearer ***REDACTED***"),
     ]
     for pattern, repl in patterns:
@@ -1496,14 +1613,17 @@ def _redact_sensitive_log_text(text: str) -> str:
     return text
 
 
-
 def _redact_api_keys(text: str) -> str:
     """Usuwa klucze API z komunikatów błędów przed zwrotem do UI/logiki API."""
     redacted = str(text or "")
     redacted = re.sub(r"([?&]key=)[^&\s\"']+", r"\1[REDACTED]", redacted)
-    redacted = re.sub(r"(x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+", r"\1[REDACTED]", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(
+        r"(x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+",
+        r"\1[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
     return redacted
-
 
 
 def _llm_response_text(result) -> str:
@@ -1512,15 +1632,11 @@ def _llm_response_text(result) -> str:
             return (result.get("response") or "").strip()
         try:
             return (
-                result.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                or ""
+                result.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
             ).strip()
         except Exception:
             return ""
     return str(result).strip()
-
 
 
 def _effective_custom_endpoint_model(ep_url: str, ep_name: str, model: str | None) -> str:
@@ -1539,9 +1655,15 @@ def _effective_custom_endpoint_model(ep_url: str, ep_name: str, model: str | Non
     return raw or LLM_MODEL or ""
 
 
-def call_llm(prompt: str, system: str = "", stream: bool = False,
-             provider: str | None = None, model: str | None = None,
-             max_tokens: int = 2000, temperature: float = 0.2) -> dict | requests.Response:
+def call_llm(
+    prompt: str,
+    system: str = "",
+    stream: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+) -> dict | requests.Response:
     """
     Uniwersalna funkcja do wywoływania LLM.
     Zwraca dict dla non-stream lub Response dla stream.
@@ -1562,30 +1684,31 @@ def call_llm(prompt: str, system: str = "", stream: bool = False,
         return _call_custom_endpoint(
             ep_url,
             custom_endpoint.get("key", ""),
-            prompt, system, stream, eff_model,
-            max_tokens, temperature,
+            prompt,
+            system,
+            stream,
+            eff_model,
+            max_tokens,
+            temperature,
             name=ep_name,
         )
 
     prov = get_llm_provider(provider)
 
     if prov == "gemini":
-        return _call_gemini(
-            prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature
-        )
+        return _call_gemini(prompt, system, stream, model or GEMINI_MODEL, max_tokens, temperature)
 
     if prov == "claude":
-        return _call_claude(
-            prompt, system, stream, model or CLAUDE_MODEL, max_tokens, temperature
-        )
+        return _call_claude(prompt, system, stream, model or CLAUDE_MODEL, max_tokens, temperature)
 
     if prov == "openrouter":
         if not OPENROUTER_API_KEY:
             raise RuntimeError("Brak OPENROUTER_API_KEY w .env")
-        return _call_openrouter(prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature)
+        return _call_openrouter(
+            prompt, system, stream, model or OPENROUTER_MODEL, max_tokens, temperature
+        )
     else:
         return _call_ollama(prompt, system, stream, model or LLM_MODEL, provider=provider)
-
 
 
 def _llm_usage_from_result(result) -> dict:
@@ -1642,11 +1765,15 @@ def _llm_usage_from_result(result) -> dict:
     return usage
 
 
-
-def stream_llm_tokens(prompt: str, system: str = "",
-                      provider: str | None = None, model: str | None = None,
-                      max_tokens: int = 2000, temperature: float = 0.2,
-                      meta: dict | None = None):
+def stream_llm_tokens(
+    prompt: str,
+    system: str = "",
+    provider: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 2000,
+    temperature: float = 0.2,
+    meta: dict | None = None,
+):
     """
     Generator zwracający kolejne tokeny tekstu z LLM (Ollama, OpenRouter, custom endpoint).
     Używany w streamingowych endpointach.
@@ -1668,17 +1795,24 @@ def stream_llm_tokens(prompt: str, system: str = "",
             yield from _stream_gemini_custom_endpoint(
                 url_base,
                 custom_endpoint.get("key", ""),
-                prompt, system,
+                prompt,
+                system,
                 eff_model,
-                max_tokens, temperature,
+                max_tokens,
+                temperature,
             )
             return
         if _custom_endpoint_is_anthropic(url_base, ep_name):
             try:
                 result = _call_claude(
-                    prompt, system, False, eff_model,
-                    max_tokens, temperature,
-                    api_key=custom_endpoint.get("key", ""), base_url=url_base,
+                    prompt,
+                    system,
+                    False,
+                    eff_model,
+                    max_tokens,
+                    temperature,
+                    api_key=custom_endpoint.get("key", ""),
+                    base_url=url_base,
                 )
                 text = _llm_response_text(result)
                 if text:
@@ -1690,9 +1824,11 @@ def stream_llm_tokens(prompt: str, system: str = "",
             yield from _stream_openai_compatible(
                 url_base,
                 custom_endpoint.get("key", ""),
-                prompt, system,
+                prompt,
+                system,
                 eff_model,
-                max_tokens, temperature,
+                max_tokens,
+                temperature,
             )
             return
         url = url_base.rstrip("/") + "/api/generate"
@@ -1705,7 +1841,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
             "prompt": prompt,
             "system": system,
             "stream": True,
-            "options": {"temperature": temperature}
+            "options": {"temperature": temperature},
         }
         try:
             with requests.post(url, json=payload, headers=headers, stream=True, timeout=300) as r:
@@ -1754,7 +1890,9 @@ def stream_llm_tokens(prompt: str, system: str = "",
             except Exception as e:
                 last_error = e
                 if _is_openrouter_no_endpoints_error(e):
-                    logger.warning(f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy")
+                    logger.warning(
+                        f"OpenRouter model {candidate} nie ma endpointów — próbuję model zapasowy"
+                    )
                     continue
                 raise
 
@@ -1771,7 +1909,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
                 "prompt": prompt,
                 "system": system,
                 "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2}
+                "options": {"temperature": temperature if temperature is not None else 0.2},
             }
             try:
                 with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
@@ -1794,14 +1932,16 @@ def stream_llm_tokens(prompt: str, system: str = "",
                 return
 
         if _openrouter_should_fallback_to_ollama(last_error) and OPENROUTER_FALLBACK_TO_OLLAMA:
-            logger.info("OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)")
+            logger.info(
+                "OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)"
+            )
             ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
             ollama_payload = {
                 "model": LLM_MODEL,
                 "prompt": prompt,
                 "system": system,
                 "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2}
+                "options": {"temperature": temperature if temperature is not None else 0.2},
             }
             try:
                 with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
@@ -1839,7 +1979,7 @@ def stream_llm_tokens(prompt: str, system: str = "",
             "prompt": prompt,
             "system": system,
             "stream": True,
-            "options": {"temperature": temperature}
+            "options": {"temperature": temperature},
         }
         try:
             with requests.post(url, json=payload, stream=True, timeout=300) as r:
@@ -1858,7 +1998,6 @@ def stream_llm_tokens(prompt: str, system: str = "",
                         continue
         except Exception as e:
             yield f"[Błąd Ollama streaming: {str(e)}]"
-
 
 
 # ============================================================

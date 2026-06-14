@@ -1,14 +1,19 @@
-# -*- coding: utf-8 -*-
 """
 Unit testy dla task_queue.py
 """
 
+import threading
 import time
 import unittest
-import threading
+
 from task_queue import (
-    TaskQueue, TaskStatus, Task, TaskQueueConfig, submit_task,
-    get_task_queue, get_task_status, get_task, cancel_task, update_task
+    TaskQueue,
+    TaskQueueConfig,
+    TaskStatus,
+    get_task,
+    get_task_status,
+    submit_task,
+    update_task,
 )
 
 
@@ -44,6 +49,7 @@ class TestTaskQueue(unittest.TestCase):
         started = []
         barrier = [0]  # Mutex-like counter
         import threading
+
         barrier_lock = threading.Lock()
 
         def slow_work(task_id):

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 SQL Security validation — bezpieczeństwo zapytań SQL generowanych przez LLM.
 Przywrócone funkcje bezpieczeństwa SQL (po regresie w 3837d5a/ea77923).
@@ -9,9 +8,19 @@ Bez nich LLM-generated SQL w hybrydzie jest niebezpieczne.
 import re
 
 DANGEROUS_SQL_KEYWORDS = {
-    "EXEC", "EXECUTE", "XP_", "SP_", "OPENROWSET", "OPENQUERY",
-    "INTO OUTFILE", "INTO DUMPFILE", "LOAD_FILE", "BENCHMARK",
-    "SLEEP(", "WAITFOR", "SHUTDOWN"
+    "EXEC",
+    "EXECUTE",
+    "XP_",
+    "SP_",
+    "OPENROWSET",
+    "OPENQUERY",
+    "INTO OUTFILE",
+    "INTO DUMPFILE",
+    "LOAD_FILE",
+    "BENCHMARK",
+    "SLEEP(",
+    "WAITFOR",
+    "SHUTDOWN",
 }
 
 
@@ -43,10 +52,10 @@ def _extract_sql_table_refs(sql_query: str) -> set[str]:
     """Wyciąga nazwy tabel z FROM / JOIN (bez aliasów)."""
     refs: set[str] = set()
     pattern = re.compile(
-        r'(?:FROM|JOIN)\s+'
-        r'(?:\[?([\w]+)\]?\.)?'
-        r'\[?([\w]+)\]?',
-        re.IGNORECASE
+        r"(?:FROM|JOIN)\s+"
+        r"(?:\[?([\w]+)\]?\.)?"
+        r"\[?([\w]+)\]?",
+        re.IGNORECASE,
     )
     for schema_part, table_part in pattern.findall(sql_query):
         if table_part:
@@ -54,6 +63,18 @@ def _extract_sql_table_refs(sql_query: str) -> set[str]:
         if schema_part and table_part:
             refs.add(f"{schema_part}.{table_part}".lower())
     return refs
+
+
+def sanitize_sql_params(params: dict) -> dict:
+    """Usuwa niebezpieczne znaki SQL z wartości słownika parametrów."""
+    result = {}
+    for key, value in params.items():
+        if isinstance(value, str):
+            value = value.replace(";", "")
+            value = value.replace("--", "")
+            value = re.sub(r"/\*.*?\*/", "", value, flags=re.DOTALL)
+        result[key] = value
+    return result
 
 
 def _validate_sql_table_refs(sql_query: str, known_tables: set[str]) -> tuple[bool, str | None]:
