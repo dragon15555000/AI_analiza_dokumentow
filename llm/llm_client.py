@@ -1,15 +1,10 @@
 import os
+import sys
 
 import requests
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-
-def _is_retryable_http_error(exc: BaseException) -> bool:
-    """Zwraca True dla błędów HTTP 429 i 5xx."""
-    if isinstance(exc, requests.HTTPError):
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        return status == 429 or (status is not None and status >= 500)
-    return False
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from retry_utils import retry_api_call
 
 
 class LLMClient:
@@ -17,11 +12,10 @@ class LLMClient:
         self.base_url = os.environ["NEW_API_BASE_URL"]
         self.api_key = os.environ["NEW_API_KEY"]
 
-    @retry(
-        retry=retry_if_exception(_is_retryable_http_error),
-        wait=wait_exponential(multiplier=1, min=1, max=60),
-        stop=stop_after_attempt(5),
-        reraise=True,
+    @retry_api_call(
+        attempts=5,
+        max_delay=10.0,
+        retry_statuses={429, 500, 502, 503, 504},
     )
     def complete(self, prompt):
         headers = {"Authorization": f"Bearer {self.api_key}"}
