@@ -81,6 +81,7 @@ docker-compose.override.yml
 # === Local dev binaries (Qdrant standalone, etc.) ===
 .local/
 qdrant_data/
+storage/
 
 # === Misc ===
 .sql_config.json
@@ -102,3 +103,4 @@ qdrant_data/
 GEMINI.md
 scripts/gemini-model.sh
 templates/GEMINI.md
+.qdrant-initialized
