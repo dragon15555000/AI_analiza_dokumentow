@@ -65,3 +65,30 @@ Jeśli wolisz lokalny Qdrant zamiast Cloud, wystarczy zmienić jedną linię w `
 ---
 
 *Licencja proprietary. Kod nie jest open-source.*
+
+
+---
+
+## Testowanie i walidacja (Suite testowy)
+
+Projekt posiada kompletny zestaw testów jednostkowych i integracyjnych, weryfikujący poprawność działania kluczowych elementów architektury. Suite testowy **nie wymaga** aktywnych kluczy API, baz danych ani zewnętrznych zależności (np. binarnego Tesseracta) do uruchomienia podstawowych testów.
+
+### Zakres pokrycia testami (26 testów):
+1. **Import Smoke Tests (`test_import_smoke.py`)**: Gwarantuje, że wszystkie kluczowe moduły projektu ładują się bez błędów i bez natychmiastowego odpytywania chmury czy odczytu sekretów.
+2. **Mockowana konfiguracja (`test_config.py`)**: Sprawdza, czy klient LLM startuje poprawnie z mockowanymi kluczami bez rzucania błędów inicjalizacji.
+3. **Obsługa brakujących plików (`test_missing_file.py`)**: Weryfikuje, czy próba odczytu nieistniejącego pliku przez parser jest logowana i zwraca bezpieczny pusty ciąg zamiast wywołania unhandled crash.
+4. **Ekstrakcja tekstu (`test_extraction.py`)**: Sprawdza poprawność parsowania plików tekstowych na bezpiecznym sztucznym dokumencie (`tests/fixtures/simple_document.txt`).
+5. **OCR Fallback (`test_ocr_fallback.py`)**: Testuje automatyczną obsługę sytuacji, gdy silnik OCR Tesseract nie jest zainstalowany w systemie operacyjnym (symulowane za pomocą mocków). Silnik łapie wyjątek, loguje ostrzeżenie i zwraca pusty tekst bez wywoływania crashu.
+6. **Struktura wyników analizy (`test_analysis_result_shape.py`)**: Testuje endpoint `/analyze` przy użyciu Flask Test Clienta. Gwarantuje, że przy pustym zapytaniu zwracane jest przejrzyste `success: False` wraz z opisem błędu, a przy poprawnym zapytaniu zwracana jest kompletna i stabilna struktura kluczy JSON.
+7. **Bezpieczeństwo SQL (`test_sql_safety.py`)**: Testuje mechanizmy zabezpieczeń przed SQL Injection (usuwanie średników, komentarzy blokowych, niebezpiecznych słów kluczowych).
+8. **Odporność klienta LLM (`test_llm_client.py` i `test_llm_retry.py`)**: Weryfikuje zachowanie klienta przy kodach 429 (Rate Limit) i 500 (Internal Server Error) z użyciem strategii ponowień (backoff/retry).
+
+### Uruchomienie testów:
+Upewnij się, że masz aktywne środowisko wirtualne:
+```bash
+source venv/bin/activate
+pytest -v
+```
+
+### Ograniczenia:
+- Testy rzeczywistego OCR i wyszukiwania wektorowego w Qdrant wymagają działających instancji lokalnych lub poprawnie ustawionych zmiennych środowiskowych w `.env` i są wyłączone z unit testów.
