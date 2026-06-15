@@ -9,26 +9,34 @@
   },
   "dcb61752": {
     "ping_ok": false,
-    "ping_ms": 193,
-    "ping_ts": 1781327743.4177454,
-    "err_count": 5,
+    "ping_ms": 319,
+    "ping_ts": 1781521023.6338701,
+    "err_count": 6,
     "ok_count": 4,
     "avg_ms": 240
   },
   "38a5c710": {
-    "ping_ok": true,
-    "ping_ms": 201,
-    "ping_ts": 1781327743.4258113,
-    "err_count": 0,
+    "ping_ok": false,
+    "ping_ms": 235,
+    "ping_ts": 1781521023.7387888,
+    "err_count": 1,
     "ok_count": 8,
     "avg_ms": 198
   },
   "03cc5a77": {
-    "ping_ok": true,
-    "ping_ms": 1357,
-    "ping_ts": 1781327744.5844698,
-    "err_count": 4,
+    "ping_ok": false,
+    "ping_ms": 458,
+    "ping_ts": 1781521023.772898,
+    "err_count": 5,
     "ok_count": 4,
     "avg_ms": 3211
+  },
+  "newapi_gate": {
+    "ping_ok": true,
+    "ping_ms": 365,
+    "ping_ts": 1781521023.6800525,
+    "err_count": 0,
+    "ok_count": 1,
+    "avg_ms": 365
   }
 }
