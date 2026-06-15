@@ -58,11 +58,11 @@ fi
 if [[ ! -f "venv/bin/python" ]]; then
     print_info "Tworzę środowisko wirtualne venv/..."
     python3 -m venv venv
-    print_info "Instaluję zależności (może chwilę potrwać)..."
-    venv/bin/pip install -q -r requirements.txt
-    print_success "Środowisko wirtualne gotowe"
-    echo ""
 fi
+print_info "Synchronizuję zależności pip..."
+venv/bin/pip install -q -r requirements.txt
+print_success "Środowisko wirtualne gotowe"
+echo ""
 
 # ── 3. Qdrant ───────────────────────────────────────────────────────────────
 echo -e "${CYAN}=== Sprawdzam zależności ===${NC}"
