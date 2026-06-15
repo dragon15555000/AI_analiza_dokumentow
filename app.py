@@ -2637,7 +2637,8 @@ def _ensure_collection_exists():
         logger.warning(f"Nie udało się sprawdzić/utworzyć kolekcji '{ACTIVE_COLLECTION}': {e}")
 
 
-_ensure_collection_exists()
+if not os.environ.get("SKIP_QDRANT_INIT"):
+    _ensure_collection_exists()
 
 
 def get_embedding(text: str) -> list:
