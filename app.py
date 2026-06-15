@@ -3501,6 +3501,8 @@ def _ocr_image_file(file_path: Path) -> str:
         return text
     except ImportError:
         pass
+    except Exception as e:
+        logger.warning(f"Błąd bezpośredniego OCR dla {file_path.name}: {e}")
     if convert_from_path:
         try:
             pages = convert_from_path(file_path, dpi=200)
