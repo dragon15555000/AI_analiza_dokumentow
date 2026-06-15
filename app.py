@@ -862,12 +862,25 @@ _provider_pool_lock = threading.Lock()
 
 def _load_provider_pool() -> dict:
     """Wczytuje pulę dostawców z pliku JSON."""
+    pool = {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
     try:
         if _PROVIDERS_FILE.exists():
-            return json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
+            pool = json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
-    return {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
+    
+    # Dodaj na sztywno wpis dla new-api Gateway jako domyślny/sztywny wybór deweloperski
+    customs = pool.setdefault("custom_endpoints", [])
+    has_newapi = any(e.get("id") == "newapi_gate" or "3000" in e.get("url", "") for e in customs)
+    if not has_newapi:
+        customs.append({
+            "id": "newapi_gate",
+            "name": "new-api Gateway (:3000)",
+            "url": "http://127.0.0.1:3000/v1",
+            "key": "sk-4b5F8vV4Ivurv4KlpkG75BZ5kaZnncKOuLhGHZMIdhkmAneV",
+            "active": True
+        })
+    return pool
 
 
 def _save_provider_pool(pool: dict) -> None:
