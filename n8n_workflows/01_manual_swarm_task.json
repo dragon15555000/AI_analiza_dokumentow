@@ -1,0 +1,106 @@
+{
+  "name": "01 Manual Swarm Task",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "query",
+              "value": "Przeanalizuj dokumenty i przygotuj raport"
+            },
+            {
+              "name": "mode",
+              "value": "balanced"
+            },
+            {
+              "name": "collection",
+              "value": "dokumenty"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "name": "Set Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/agents/swarm/stream",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "PLACEHOLDER_APP_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"query\": \"{{$node['Set Parameters'].json.query}}\", \"mode\": \"{{$node['Set Parameters'].json.mode}}\", \"collection\": \"{{$node['Set Parameters'].json.collection}}\"}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000003",
+      "name": "Call Swarm Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Endpoint /agents/swarm/stream zwraca SSE (text/event-stream).\n// n8n odbiera surowy tekst — parsujemy linie zaczynające się od 'data:'.\nconst raw = $input.first().json.data || $input.first().json.body || '';\nconst lines = String(raw).split('\\n');\nconst events = [];\nfor (const line of lines) {\n  if (line.startsWith('data:')) {\n    const payload = line.slice(5).trim();\n    if (payload === '[DONE]') continue;\n    try {\n      events.push(JSON.parse(payload));\n    } catch (_) {\n      events.push({ raw: payload });\n    }\n  }\n}\nreturn [{ json: { events, count: events.length } }];"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000004",
+      "name": "Parse SSE Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [{ "node": "Set Parameters", "type": "main", "index": 0 }]
+      ]
+    },
+    "Set Parameters": {
+      "main": [
+        [{ "node": "Call Swarm Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Swarm Agent": {
+      "main": [
+        [{ "node": "Parse SSE Response", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "versionId": "01000000-0000-0000-0000-000000000001"
+}
