@@ -1639,7 +1639,7 @@ def _require_api_key():
     # a sekrety API pozostają po stronie serwera. X-API-Key zostaje dla klientów API.
     if not APP_API_KEY:
         return None
-    if request.endpoint == "index":
+    if request.endpoint in ("index", "index_v2"):
         return None
     if session.get("user_authenticated") is True:
         return None
@@ -3586,6 +3586,11 @@ def index():
     session.permanent = True
     session["user_authenticated"] = True
     return render_template("index.html", api_key_required=False)
+
+
+@app.route("/v2")
+def index_v2():
+    return render_template("v2/index.html")
 
 
 @app.route("/stats", methods=["GET"])
