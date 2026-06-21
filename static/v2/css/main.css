@@ -39,3 +39,14 @@ body {
 main {
     margin-top: 56px; /* offset for topbar */
 }
+
+/* UI V2 Drag & Drop */
+.drag-drop-box {
+    border: 2px dashed #dee2e6;
+    background-color: #f8f9fa;
+    transition: all 0.2s;
+}
+.drag-drop-box:hover, .drag-drop-box.border-primary {
+    border-color: #0d6efd;
+    background-color: #eef2ff !important;
+}
