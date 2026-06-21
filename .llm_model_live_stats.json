@@ -1,0 +1,65 @@
+{
+  "meta-llama/llama-3.3-70b-instruct:free": {
+    "ping_ok": false,
+    "ping_ms": 506,
+    "ping_ts": 1781521023.7785897,
+    "ping_err": "OpenRouter 404: model niedostępny (No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy)",
+    "err_count": 10,
+    "ok_count": 0,
+    "avg_ms": null
+  },
+  "meta-llama/llama-3.2-3b-instruct:free": {
+    "ping_ok": false,
+    "ping_ms": 463,
+    "ping_ts": 1781521023.750088,
+    "ping_err": "OpenRouter 404: model niedostępny (No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy)",
+    "err_count": 8,
+    "ok_count": 0,
+    "avg_ms": null
+  },
+  "openai/gpt-oss-20b:free": {
+    "ping_ok": false,
+    "ping_ms": 463,
+    "ping_ts": 1781521023.7609046,
+    "ping_err": "OpenRouter 404: model niedostępny (No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy)",
+    "err_count": 8,
+    "ok_count": 0,
+    "avg_ms": null
+  },
+  "mistralai/mistral-7b-instruct:free": {
+    "ping_ok": false,
+    "ping_ms": 589,
+    "ping_ts": 1781521023.8896132,
+    "ping_err": "OpenRouter 404: model niedostępny (No endpoints found for mistralai/mistral-7b-instruct:free.)",
+    "err_count": 10,
+    "ok_count": 0,
+    "avg_ms": null
+  },
+  "qwen/qwen3-coder:free": {
+    "ping_ok": false,
+    "ping_ms": 602,
+    "ping_ts": 1781521023.905519,
+    "ping_err": "OpenRouter 404: model niedostępny (No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy)",
+    "err_count": 8,
+    "ok_count": 0,
+    "avg_ms": null
+  },
+  "meta-llama/llama-3.1-8b-instruct:free": {
+    "ping_ok": false,
+    "ping_ms": 621,
+    "ping_ts": 1781521023.9254754,
+    "ping_err": "OpenRouter HTTP 404: This model is unavailable for free. The paid version is available now - use this slug instead: meta-llama/llama-3.1-8b-i",
+    "err_count": 10,
+    "ok_count": 0,
+    "avg_ms": null
+  },
+  "z-ai/glm-4.5-air:free": {
+    "ping_ok": false,
+    "ping_ms": 730,
+    "ping_ts": 1781521024.03342,
+    "ping_err": "OpenRouter HTTP 404: This model is unavailable for free. The paid version is available now - use this slug instead: z-ai/glm-4.5-air",
+    "err_count": 8,
+    "ok_count": 0,
+    "avg_ms": null
+  }
+}

@@ -1,12 +1,15 @@
 #!/bin/bash
+# Uruchamianie AI Analiza Dokumentów — jedna komenda, zero kombinowania.
+# Automatycznie sprawdza i uruchamia: venv, Qdrant, Ollama, aplikację.
+# Użycie: ./start          (pyta o git pull)
+#         ./start --no-pull (pomija pytanie o git pull)
 
-# Kolorowe komunikaty
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
@@ -14,84 +17,174 @@ print_warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error()   { echo -e "${RED}[✗]${NC} $1"; }
 
 cd "$(dirname "$0")" || exit 1
+ROOT="$(pwd)"
 
 SERVICE_NAME="ai_analiza"
+QDRANT_PID_FILE="$ROOT/.qdrant.pid"
+QDRANT_LOG="$ROOT/qdrant.log"
+QDRANT_DATA="$ROOT/qdrant_data"
+
+# Preferuj .local/qdrant (1.13.x) — kompatybilna z danymi w qdrant_data/
+# Nowa binarnia ./qdrant (1.18+) crashuje na starym formacie danych
+QDRANT_BIN=""
+for candidate in "$ROOT/.local/qdrant" "$ROOT/qdrant"; do
+    if [[ -x "$candidate" ]]; then
+        QDRANT_BIN="$candidate"
+        break
+    fi
+done
 
 echo -e "${CYAN}========================================"
 echo -e "   Uruchamianie AI Analiza Dokumentów"
 echo -e "========================================${NC}"
 echo ""
 
-# === Git Pull ===
-read -p "Czy pobrać najnowszy kod z GitHub przed startem? (Y/n): " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    print_info "Pobieram najnowsze zmiany..."
-    if git pull origin master; then
-        print_success "Kod zaktualizowany"
-    else
-        print_warn "Nie udało się pobrać zmian (kontynuuję mimo to)"
-    fi
-    echo ""
-fi
-
-# === Sprawdzenie środowiska ===
-if [ ! -f "venv/bin/python" ]; then
-    print_error "Nie znaleziono środowiska wirtualnego (venv/bin/python)"
-    echo "Uruchom najpierw:"
-    echo "  python3 -m venv venv && ./venv/bin/pip install -r requirements.txt"
-    exit 1
-fi
-
-# === User Service (najlepsza opcja) ===
-if systemctl --user is-enabled "$SERVICE_NAME" &>/dev/null 2>&1; then
-    print_info "Wykryto usługę użytkownika systemd"
-    print_info "Uruchamiam przez systemctl --user (Waitress)..."
-    
-    systemctl --user start "$SERVICE_NAME"
-    
-    sleep 2
-    
-    if systemctl --user is-active "$SERVICE_NAME" &>/dev/null; then
-        print_success "Aplikacja uruchomiona jako usługa użytkownika"
+# ── 1. Git pull ─────────────────────────────────────────────────────────────
+if [[ "${1:-}" != "--no-pull" ]]; then
+    read -r -p "Pobrać najnowszy kod z GitHub? (Y/n): " -n 1 REPLY
+    echo
+    if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
+        print_info "Pobieram zmiany..."
+        if git pull origin master; then
+            print_success "Kod zaktualizowany"
+        else
+            print_warn "git pull nie powiódł się — kontynuuję z lokalnym kodem"
+        fi
         echo ""
-        echo "   Adres:   http://127.0.0.1:5000"
-        echo "   Logi:    journalctl --user -u $SERVICE_NAME -f"
-        echo "   Status:  systemctl --user status $SERVICE_NAME"
+    fi
+fi
+
+# ── 2. Środowisko wirtualne ─────────────────────────────────────────────────
+if [[ ! -f "venv/bin/python" ]]; then
+    print_info "Tworzę środowisko wirtualne venv/..."
+    python3 -m venv venv
+fi
+print_info "Synchronizuję zależności pip..."
+venv/bin/pip install -q -r requirements.txt
+print_success "Środowisko wirtualne gotowe"
+echo ""
+
+# ── 3. Qdrant ───────────────────────────────────────────────────────────────
+echo -e "${CYAN}=== Sprawdzam zależności ===${NC}"
+
+qdrant_running() {
+    curl -sf http://127.0.0.1:6333/healthz > /dev/null 2>&1
+}
+
+start_qdrant() {
+    if [[ -z "$QDRANT_BIN" ]]; then
+        print_error "Nie znaleziono binarki Qdrant w .local/qdrant ani ./qdrant"
+        print_warn "Pobierz Qdrant 1.13.x: https://github.com/qdrant/qdrant/releases/tag/v1.13.6"
+        print_warn "i umieść jako .local/qdrant (chmod +x)"
+        return 1
+    fi
+
+    # Zabij poprzednią instancję tego samego procesu jeśli pidfile istnieje
+    if [[ -f "$QDRANT_PID_FILE" ]]; then
+        OLD_PID=$(cat "$QDRANT_PID_FILE" 2>/dev/null)
+        if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+            kill "$OLD_PID" 2>/dev/null
+            sleep 1
+        fi
+    fi
+
+    print_info "Uruchamiam Qdrant ($QDRANT_BIN)..."
+    mkdir -p "$QDRANT_DATA"
+    QDRANT__STORAGE__STORAGE_PATH="$QDRANT_DATA" \
+        nohup "$QDRANT_BIN" >> "$QDRANT_LOG" 2>&1 &
+    echo $! > "$QDRANT_PID_FILE"
+
+    # Czekaj max 20s aż Qdrant wstanie
+    local i=0
+    while (( i < 20 )); do
+        if qdrant_running; then
+            print_success "Qdrant uruchomiony (PID: $(cat "$QDRANT_PID_FILE"), dane: qdrant_data/)"
+            return 0
+        fi
+        sleep 1
+        (( i++ ))
+    done
+    print_error "Qdrant nie odpowiedział w 20s — sprawdź logi: $QDRANT_LOG"
+    return 1
+}
+
+if qdrant_running; then
+    QDRANT_VER=$(curl -s http://127.0.0.1:6333/ 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','?'))" 2>/dev/null || echo "?")
+    print_success "Qdrant już działa (wersja: $QDRANT_VER)"
+else
+    start_qdrant || print_warn "Qdrant niedostępny — wyszukiwanie wektorowe nie będzie działać"
+fi
+
+# ── 4. Ollama (opcjonalnie, nie blokuje startu) ─────────────────────────────
+if ! curl -sf http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+    if command -v ollama &>/dev/null; then
+        print_info "Uruchamiam Ollama w tle..."
+        nohup ollama serve >> "$ROOT/ollama.log" 2>&1 &
+        sleep 3
+        if curl -sf http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+            print_success "Ollama uruchomiona (logi: ollama.log)"
+        else
+            print_warn "Ollama nie odpowiada — LLM przełączy się na OpenRouter"
+        fi
+    else
+        print_warn "Ollama nie zainstalowana — LLM używa OpenRouter"
+    fi
+else
+    print_success "Ollama już działa"
+fi
+
+echo ""
+
+# ── 5. Aplikacja Flask ──────────────────────────────────────────────────────
+echo -e "${CYAN}=== Uruchamiam aplikację ===${NC}"
+
+# Przez systemd user service (preferowane — działa po restarcie systemu)
+if systemctl --user is-enabled "$SERVICE_NAME" &>/dev/null 2>&1; then
+    print_info "Uruchamiam przez systemctl --user..."
+    systemctl --user restart "$SERVICE_NAME"
+    sleep 3
+    if systemctl --user is-active "$SERVICE_NAME" &>/dev/null; then
+        print_success "Aplikacja uruchomiona jako usługa systemd"
+        echo ""
+        echo -e "   ${GREEN}➜  http://127.0.0.1:5000${NC}"
+        echo ""
+        echo "   Logi:      journalctl --user -u $SERVICE_NAME -f"
+        echo "   Status:    systemctl --user status $SERVICE_NAME"
         echo "   Zatrzymaj: ./stop"
         echo ""
         exit 0
     else
-        print_error "Nie udało się uruchomić usługi użytkownika"
+        print_error "Usługa systemd nie wystartowała"
+        echo "Sprawdź: journalctl --user -u $SERVICE_NAME -n 50"
         exit 1
     fi
 fi
 
-# === Fallback: nohup ===
-print_warn "Usługa użytkownika nie jest zainstalowana – używam trybu nohup"
+# Fallback: nohup
+print_warn "Usługa systemd niezainstalowana — uruchamiam przez nohup"
 
 # Zatrzymaj starą instancję
-ps aux | awk '/python.*app.py/ && !/awk/ {print $2}' | while read -r pid; do
-    if [ -n "$pid" ]; then
-        kill -9 "$pid" 2>/dev/null || true
-    fi
+ps aux | awk '/python.*app\.py/ && !/awk/ {print $2}' | while read -r pid; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
 done
 sleep 1
 
-nohup ./venv/bin/python app.py > app.log 2>&1 &
-PID=$!
+nohup venv/bin/python app.py > app.log 2>&1 &
+APP_PID=$!
 
 sleep 3
 
-if ps -p $PID > /dev/null 2>&1; then
-    print_success "Aplikacja uruchomiona w tle (PID: $PID)"
+if ps -p "$APP_PID" > /dev/null 2>&1; then
+    print_success "Aplikacja uruchomiona (PID: $APP_PID)"
     echo ""
-    echo "   Adres:   http://127.0.0.1:5000"
-    echo "   Logi:    tail -f app.log"
+    echo -e "   ${GREEN}➜  http://127.0.0.1:5000${NC}"
+    echo ""
+    echo "   Logi:      tail -f app.log"
     echo "   Zatrzymaj: ./stop"
     echo ""
 else
-    print_error "Nie udało się uruchomić aplikacji"
-    echo "Sprawdź logi: tail -n 50 app.log"
+    print_error "Aplikacja nie wystartowała — sprawdź logi:"
+    tail -n 20 app.log
     exit 1
 fi

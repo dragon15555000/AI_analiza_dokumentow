@@ -1,0 +1,92 @@
+{
+  "name": "02 Webhook Analyze Task",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-analiza-task",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "ai-analiza-task"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Walidacja payloadu przychodzącego przez webhook.\n// Oczekiwany JSON: { \"query\": \"...\", \"collection\": \"...\", \"provider\": \"...\" }\nconst body = $input.first().json.body || $input.first().json;\nif (!body.query || typeof body.query !== 'string') {\n  throw new Error('Brak wymaganego pola: query (string)');\n}\nreturn [{\n  json: {\n    query: body.query,\n    collection: body.collection || 'dokumenty',\n    provider: body.provider || 'openrouter',\n    top_k: body.top_k || 5\n  }\n}];"
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000002",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/analyze",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "PLACEHOLDER_APP_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"query\": \"{{$node['Validate Input'].json.query}}\", \"collection\": \"{{$node['Validate Input'].json.collection}}\", \"provider\": \"{{$node['Validate Input'].json.provider}}\", \"top_k\": {{$node['Validate Input'].json.top_k}}}",
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000003",
+      "name": "Call Analyze",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Zwróć ustrukturyzowaną odpowiedź do wywołującego webhooka.\nconst result = $input.first().json;\nreturn [{\n  json: {\n    success: true,\n    answer: result.answer || result.result || null,\n    sources: result.sources || [],\n    provider_used: result.provider || null,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000004",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [{ "node": "Validate Input", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [{ "node": "Call Analyze", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Analyze": {
+      "main": [
+        [{ "node": "Format Response", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "versionId": "02000000-0000-0000-0000-000000000002"
+}

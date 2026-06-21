@@ -1,0 +1,4 @@
+Faktura testowa
+Numer: FV/1/2026
+Kwota: 123,45 PLN
+Kontrahent: ACME Test

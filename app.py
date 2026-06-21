@@ -862,12 +862,25 @@ _provider_pool_lock = threading.Lock()
 
 def _load_provider_pool() -> dict:
     """Wczytuje pulę dostawców z pliku JSON."""
+    pool = {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
     try:
         if _PROVIDERS_FILE.exists():
-            return json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
+            pool = json.loads(_PROVIDERS_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
-    return {"openrouter_keys": [], "ollama_urls": [], "custom_endpoints": []}
+    
+    # Dodaj na sztywno wpis dla new-api Gateway jako domyślny/sztywny wybór deweloperski
+    customs = pool.setdefault("custom_endpoints", [])
+    has_newapi = any(e.get("id") == "newapi_gate" or "3000" in e.get("url", "") for e in customs)
+    if not has_newapi:
+        customs.append({
+            "id": "newapi_gate",
+            "name": "new-api Gateway (:3000)",
+            "url": "http://127.0.0.1:3000/v1",
+            "key": "sk-4b5F8vV4Ivurv4KlpkG75BZ5kaZnncKOuLhGHZMIdhkmAneV",
+            "active": True
+        })
+    return pool
 
 
 def _save_provider_pool(pool: dict) -> None:
@@ -1626,7 +1639,7 @@ def _require_api_key():
     # a sekrety API pozostają po stronie serwera. X-API-Key zostaje dla klientów API.
     if not APP_API_KEY:
         return None
-    if request.endpoint == "index":
+    if request.endpoint in ("index", "index_v2"):
         return None
     if session.get("user_authenticated") is True:
         return None
@@ -2637,7 +2650,8 @@ def _ensure_collection_exists():
         logger.warning(f"Nie udało się sprawdzić/utworzyć kolekcji '{ACTIVE_COLLECTION}': {e}")
 
 
-_ensure_collection_exists()
+if not os.environ.get("SKIP_QDRANT_INIT"):
+    _ensure_collection_exists()
 
 
 def get_embedding(text: str) -> list:
@@ -3501,6 +3515,8 @@ def _ocr_image_file(file_path: Path) -> str:
         return text
     except ImportError:
         pass
+    except Exception as e:
+        logger.warning(f"Błąd bezpośredniego OCR dla {file_path.name}: {e}")
     if convert_from_path:
         try:
             pages = convert_from_path(file_path, dpi=200)
@@ -3570,6 +3586,11 @@ def index():
     session.permanent = True
     session["user_authenticated"] = True
     return render_template("index.html", api_key_required=False)
+
+
+@app.route("/v2")
+def index_v2():
+    return render_template("v2/index.html")
 
 
 @app.route("/stats", methods=["GET"])
