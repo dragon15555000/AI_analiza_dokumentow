@@ -841,6 +841,18 @@ except ValueError:
     GEMINI_RETRY_INITIAL_DELAY = 2.5
 GEMINI_RETRY_MAX_WAIT_SEC = 60.0
 
+# === Zabezpieczenia Zasobów (Limity Importu/Analizy) ===
+IMPORT_MAX_SINGLE_FILE_MB = int(os.environ.get("IMPORT_MAX_SINGLE_FILE_MB", "50"))
+IMPORT_MAX_TOTAL_MB = int(os.environ.get("IMPORT_MAX_TOTAL_MB", "1024"))
+IMPORT_MAX_FILES = int(os.environ.get("IMPORT_MAX_FILES", "1000"))
+IMPORT_MIN_DISK_FREE_MB = int(os.environ.get("IMPORT_MIN_DISK_FREE_MB", "1024"))
+IMPORT_JOB_TIMEOUT_SEC = int(os.environ.get("IMPORT_JOB_TIMEOUT_SEC", "3600"))
+IMPORT_MAX_CONCURRENT_OCR = int(os.environ.get("IMPORT_MAX_CONCURRENT_OCR", "2"))
+IMPORT_CLEANUP_TTL_DAYS = int(os.environ.get("IMPORT_CLEANUP_TTL_DAYS", "7"))
+
+import threading
+_ocr_semaphore = threading.Semaphore(IMPORT_MAX_CONCURRENT_OCR)
+
 # Anthropic Claude (bezpośrednie API)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022").strip()
@@ -3489,47 +3501,49 @@ def extract_file_metadata(f_path: Path) -> dict:
 
 def _ocr_pdf_pages(file_path: Path) -> str:
     """OCR wszystkich stron PDF przez Tesseract."""
-    if not (pytesseract and convert_from_path):
-        return ""
-    logger.info("[OCR] Analiza wizualna pliku: %s...", file_path.name)
-    pages = convert_from_path(file_path, dpi=200)
-    ocr_text = []
-    for page_img in pages:
-        page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
-        ocr_text.append(page_text)
-    text = "\n\n".join(ocr_text)
-    logger.info("[OCR] Zakończono dla: %s (Pobrano znaków: %d)", file_path.name, len(text))
-    return text
+    with _ocr_semaphore:
+        if not (pytesseract and convert_from_path):
+            return ""
+        logger.info("[OCR] Analiza wizualna pliku: %s...", file_path.name)
+        pages = convert_from_path(file_path, dpi=200)
+        ocr_text = []
+        for page_img in pages:
+            page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
+            ocr_text.append(page_text)
+        text = "\n\n".join(ocr_text)
+        logger.info("[OCR] Zakończono dla: %s (Pobrano znaków: %d)", file_path.name, len(text))
+        return text
 
 
 def _ocr_image_file(file_path: Path) -> str:
     """OCR pojedynczego pliku graficznego."""
-    if not pytesseract:
-        return ""
-    try:
-        from PIL import Image
-
-        img = Image.open(file_path)
-        text = pytesseract.image_to_string(img, lang=OCR_LANG)
-        logger.info("[OCR] Przetworzono obraz: %s", file_path.name)
-        return text
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.warning(f"Błąd bezpośredniego OCR dla {file_path.name}: {e}")
-    if convert_from_path:
+    with _ocr_semaphore:
+        if not pytesseract:
+            return ""
         try:
-            pages = convert_from_path(file_path, dpi=200)
-            ocr_text = []
-            for page_img in pages:
-                page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
-                ocr_text.append(page_text)
-            text = "\n\n".join(ocr_text)
-            logger.info("[OCR] Przetworzono obraz przez pdf2image: %s", file_path.name)
+            from PIL import Image
+
+            img = Image.open(file_path)
+            text = pytesseract.image_to_string(img, lang=OCR_LANG)
+            logger.info("[OCR] Przetworzono obraz: %s", file_path.name)
             return text
-        except Exception as ocr_err:
-            logger.warning("Błąd OCR obrazu %s: %s", file_path.name, ocr_err)
-    return ""
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Błąd bezpośredniego OCR dla {file_path.name}: {e}")
+        if convert_from_path:
+            try:
+                pages = convert_from_path(file_path, dpi=200)
+                ocr_text = []
+                for page_img in pages:
+                    page_text = pytesseract.image_to_string(page_img, lang=OCR_LANG)
+                    ocr_text.append(page_text)
+                text = "\n\n".join(ocr_text)
+                logger.info("[OCR] Przetworzono obraz przez pdf2image: %s", file_path.name)
+                return text
+            except Exception as ocr_err:
+                logger.warning("Błąd OCR obrazu %s: %s", file_path.name, ocr_err)
+        return ""
 
 
 def extract_text(file_path: Path, force_ocr: bool = False) -> str:
@@ -4063,6 +4077,27 @@ def _generate_file_summary_helper(text: str, file_name: str) -> str:
         return ""
 
 
+def _cleanup_old_temp_files():
+    try:
+        import shutil
+        now = time.time()
+        ttl_sec = IMPORT_CLEANUP_TTL_DAYS * 24 * 3600
+        tmp_dir = Path("/tmp")
+        if tmp_dir.exists():
+            for p in tmp_dir.iterdir():
+                if p.is_file() and p.name.startswith(("pdf2image_", "tess_", "magick_")):
+                    if now - p.stat().st_mtime > ttl_sec:
+                        try: p.unlink()
+                        except: pass
+        if _SWARM_REPORTS_DIR.exists():
+            for p in _SWARM_REPORTS_DIR.iterdir():
+                if p.is_file() and p.name.endswith(".md"):
+                    if now - p.stat().st_mtime > ttl_sec:
+                        try: p.unlink()
+                        except: pass
+    except Exception as e:
+        logger.warning(f"Błąd czyszczenia temp: {e}")
+
 def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) -> dict:
     """
     Work function dla background import (wywoływana przez task_queue).
@@ -4077,14 +4112,35 @@ def _import_work_fn(task_id: str, folder_str: str, exts: list, force_ocr: bool) 
     ocr_count = 0
 
     try:
+        import shutil
+        _cleanup_old_temp_files()
+        free_bytes = shutil.disk_usage("/").free
+        if free_bytes < IMPORT_MIN_DISK_FREE_MB * 1024 * 1024:
+            raise RuntimeError(f"Brak miejsca na dysku (wolne: {free_bytes//1048576} MB, wymagane: {IMPORT_MIN_DISK_FREE_MB} MB)")
+
         files = _find_files_safe(folder_path.resolve(), exts)
         if not files:
             update_task(task_id, done=0, total=0, progress_pct=100)
             return {"count": 0, "chunks": 0, "skipped": 0}
 
+        if len(files) > IMPORT_MAX_FILES:
+            raise RuntimeError(f"Przekroczono limit plików na zadanie ({len(files)} > {IMPORT_MAX_FILES})")
+
+        total_size = sum(f.stat().st_size for f in files if f.exists() and f.is_file())
+        if total_size > IMPORT_MAX_TOTAL_MB * 1024 * 1024:
+            raise RuntimeError(f"Łączny rozmiar plików ({total_size//1048576} MB) przekracza limit {IMPORT_MAX_TOTAL_MB} MB")
+            
+        for f in files:
+            if f.exists() and f.is_file() and f.stat().st_size > IMPORT_MAX_SINGLE_FILE_MB * 1024 * 1024:
+                raise RuntimeError(f"Plik {f.name} ({f.stat().st_size//1048576} MB) przekracza limit pojedynczego pliku {IMPORT_MAX_SINGLE_FILE_MB} MB")
+
         update_task(task_id, total=len(files))
+        start_time = time.time()
 
         for i, f_path in enumerate(files):
+            if time.time() - start_time > IMPORT_JOB_TIMEOUT_SEC:
+                raise RuntimeError(f"Przekroczono czas zadania ({IMPORT_JOB_TIMEOUT_SEC} s)")
+
             update_task(
                 task_id,
                 done=i,
@@ -4815,6 +4871,8 @@ def search_stream():
                 yield sse("error", {"error": "Błąd streamingu modelu językowego."})
 
             done_payload = {"ai_answer": full_answer}
+            approx_tokens = max(1, int(len(full_answer) / 3.5))
+            done_payload["usage"] = {"completion_tokens": approx_tokens, "total_tokens": approx_tokens}
             if llm_meta:
                 done_payload["llm_provider_used"] = llm_meta.get("provider_used")
                 done_payload["llm_model_used"] = llm_meta.get("model_used")
@@ -5790,7 +5848,7 @@ def agents_swarm_stream():
                 prompt=synthesis_prompt,
                 system="Jesteś ekspertem od syntezy informacji z dokumentów. Odpowiadaj po polsku.",
                 stream=False,
-                provider="openrouter",
+                provider=data.get("llm_provider"),
                 model=synth_model,
             )
             final_text = _llm_response_text(final)
@@ -6649,7 +6707,7 @@ def get_suggestions():
             f"DOKUMENTY:\n{context}"
         )
         system_msg = "Jesteś analitykiem śledczym. Odpowiadasz wyłącznie po polsku. Zwracasz tylko listę pytań."
-        result = call_llm(prompt, system_msg, stream=False, provider="ollama", model=LLM_MODEL)
+        result = call_llm(prompt, system_msg, stream=False)
         raw = _llm_response_text(result)
 
         lines = [l.strip().lstrip("-•·1234567890.). ") for l in raw.strip().splitlines()]

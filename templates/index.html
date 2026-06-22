@@ -658,6 +658,9 @@ table { margin: 0; }
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('fleet'); return false;">⚡ Flota LLM</a>
     </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('tasks'); return false;">⚙️ Zadania w tle</a>
+    </li>
 </ul></div>
 
 <!-- Baner adaptacyjnej sugestii trybu analizy -->
@@ -2047,6 +2050,53 @@ table { margin: 0; }
       <strong style="color:var(--c-text);">Odpowiedź modelu:</strong>
       <pre id="claudeTestResponse" class="mt-2 mb-0 p-3 rounded border" style="background:#fff;white-space:pre-wrap;min-height:72px;font-family:inherit;color:var(--c-text);">Czekam na zapytanie...</pre>
     </div>
+</div>
+
+<div id="tabTasks" class="main-wrap" style="display:none;">
+  <div class="search-card mb-4">
+    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+      <div>
+        <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;">⚙️ Aktywne Zadania w Tle</h5>
+        <p class="small text-muted mb-0">Zadania aktualnie przetwarzane lub oczekujące w kolejce (np. OCR, wektoryzacja).</p>
+      </div>
+      <button class="btn btn-outline-secondary btn-sm" onclick="loadTasksList()">↺ Odśwież</button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-dark table-hover table-sm mb-0" id="activeTasksTable">
+        <thead>
+          <tr>
+            <th>Nazwa / Rola</th>
+            <th>Typ</th>
+            <th>Uruchomiono</th>
+            <th>Postęp</th>
+            <th style="width:100px;"></th>
+          </tr>
+        </thead>
+        <tbody id="activeTasksBody">
+          <tr><td colspan="5" class="text-muted small text-center py-3">Brak aktywnych zadań</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="search-card">
+    <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;" class="mb-3">📋 Historia Zadań</h5>
+    <div class="table-responsive">
+      <table class="table table-dark table-hover table-sm mb-0" id="finishedTasksTable">
+        <thead>
+          <tr>
+            <th>Nazwa / Rola</th>
+            <th>Typ</th>
+            <th>Zakończono</th>
+            <th>Status</th>
+            <th>Błąd / Szczegóły</th>
+          </tr>
+        </thead>
+        <tbody id="finishedTasksBody">
+          <tr><td colspan="5" class="text-muted small text-center py-3">Brak historii zadań</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -2145,8 +2195,8 @@ function _suggestModelForTab(name) {
 }
 
 function showTab(name) {
-    // Ukrywamy WSZYSTKIE zakładki (w tym raporty) — wcześniej brakowało tabReports
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabAudit','tabSwarm','tabFleet'].forEach(id => {
+    // Ukrywamy WSZYSTKIE zakładki (w tym raporty)
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabAudit','tabSwarm','tabFleet','tabTasks'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
@@ -2154,12 +2204,19 @@ function showTab(name) {
     if (el) el.style.display = '';
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
 
-    // Poprawiona mapa indeksów zakładek (raporty są na pozycji 5)
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, timeline:5, reports:6, sql:7, collections:8, import:9, audit:10, swarm:11, fleet:12};
+    // Poprawiona mapa indeksów zakładek
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, timeline:5, reports:6, sql:7, collections:8, import:9, audit:10, swarm:11, fleet:12, tasks:13};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
 
     _suggestModelForTab(name);
+    
+    // Obsługa interwału dla zadań
+    if (window._tasksRefreshInterval) {
+        clearInterval(window._tasksRefreshInterval);
+        window._tasksRefreshInterval = null;
+    }
+
     if (name === 'docs' && allDocs.length === 0) loadDocs();
     if (name === 'ai' && !aiTabLoaded) { aiTabLoaded = true; loadSuggestions(false); }
     if (name === 'collections' && !colTabLoaded) { colTabLoaded = true; loadStorageStats(); llmConfigLoad(); }
@@ -2168,6 +2225,10 @@ function showTab(name) {
     if (name === 'audit') auditTabInit();
     if (name === 'swarm') swarmInitChunkControls();
     if (name === 'fleet') { fleetLoad(); providersLoad(); }
+    if (name === 'tasks') {
+        loadTasksList();
+        window._tasksRefreshInterval = setInterval(loadTasksList, 5000);
+    }
     if (name === 'reports') {
         setTimeout(() => {
             try { loadReports(); } catch(e) { console.warn('Reports tab error:', e); }
@@ -8426,6 +8487,97 @@ function auditSaveReport() {
     a.download = name;
     a.click();
     URL.revokeObjectURL(a.href);
+}
+
+async function loadTasksList() {
+    const activeBody = document.getElementById('activeTasksBody');
+    const finishedBody = document.getElementById('finishedTasksBody');
+    if (!activeBody || !finishedBody) return;
+
+    try {
+        const data = await fetchJson('/tasks');
+        if (!data.success) {
+            console.error("Błąd pobierania zadań:", data.error);
+            return;
+        }
+
+        // Render active tasks
+        if (data.queued.length === 0 && data.running.length === 0) {
+            activeBody.innerHTML = '<tr><td colspan="5" class="text-muted small text-center py-3">Brak aktywnych zadań</td></tr>';
+        } else {
+            activeBody.innerHTML = '';
+            const allActive = [...data.queued, ...data.running];
+            allActive.forEach(t => {
+                const tr = document.createElement('tr');
+                const startStr = t.started_at ? new Date(t.started_at * 1000).toLocaleTimeString() : 'Oczekuje';
+                const progress = t.progress_pct != null ? t.progress_pct : 0;
+                const doneTotal = t.total ? ` (${t.done}/${t.total})` : '';
+                const currentItem = t.current_item ? `<br><small class="text-muted" style="font-size:0.75rem;">Obecny: ${escapeHtml(t.current_item.split('/').pop())}</small>` : '';
+
+                tr.innerHTML = `
+                    <td>
+                        <strong style="color:var(--c-text);">${escapeHtml(t.label || t.kind)}</strong>
+                        ${currentItem}
+                    </td>
+                    <td><span class="badge text-bg-secondary">${escapeHtml(t.kind)}</span></td>
+                    <td>${startStr}</td>
+                    <td>
+                        <div class="progress" style="height: 16px; background: var(--c-bg); border: 1px solid var(--c-border);">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: ${progress}%; font-size:0.75rem;" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100">${progress}%${doneTotal}</div>
+                        </div>
+                    </td>
+                    <td>
+                        <button class="btn btn-danger btn-sm py-0 px-2" style="font-size:0.75rem;" onclick="cancelTaskUi('${t.id}')">Anuluj</button>
+                    </td>
+                `;
+                activeBody.appendChild(tr);
+            });
+        }
+
+        // Render finished tasks
+        if (data.finished.length === 0) {
+            finishedBody.innerHTML = '<tr><td colspan="5" class="text-muted small text-center py-3">Brak historii zadań</td></tr>';
+        } else {
+            finishedBody.innerHTML = '';
+            data.finished.forEach(t => {
+                const tr = document.createElement('tr');
+                const finishedStr = t.finished_at ? new Date(t.finished_at * 1000).toLocaleString() : '-';
+
+                let statusBadge = '';
+                if (t.status === 'completed') statusBadge = '<span class="badge text-bg-success">Zakończono</span>';
+                else if (t.status === 'failed') statusBadge = '<span class="badge text-bg-danger">Błąd</span>';
+                else if (t.status === 'cancelled') statusBadge = '<span class="badge text-bg-warning">Anulowano</span>';
+                else statusBadge = `<span class="badge text-bg-secondary">${escapeHtml(t.status)}</span>`;
+
+                const errorStr = t.error ? `<span class="text-danger small" style="word-break:break-all;">${escapeHtml(t.error)}</span>` : '<span class="text-muted small">Brak błędów</span>';
+
+                tr.innerHTML = `
+                    <td><strong style="color:var(--c-text);">${escapeHtml(t.label || t.kind)}</strong></td>
+                    <td><span class="badge text-bg-secondary">${escapeHtml(t.kind)}</span></td>
+                    <td>${finishedStr}</td>
+                    <td>${statusBadge}</td>
+                    <td>${errorStr}</td>
+                `;
+                finishedBody.appendChild(tr);
+            });
+        }
+    } catch (err) {
+        console.error("Network error fetching tasks:", err);
+    }
+}
+
+async function cancelTaskUi(taskId) {
+    if (!confirm("Czy na pewno chcesz anulować to zadanie?")) return;
+    try {
+        const data = await fetchJson(`/tasks/${taskId}`, { method: 'DELETE' });
+        if (data.success) {
+            loadTasksList();
+        } else {
+            alert("Nie udało się anulować zadania: " + (data.message || 'Nieznany błąd'));
+        }
+    } catch (err) {
+        alert("Błąd sieci: " + err);
+    }
 }
 </script>
 
