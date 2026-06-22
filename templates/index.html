@@ -5510,9 +5510,7 @@ function injectFavoriteOptions(selectEl, provider) {
         opt.textContent = f.label || formatModelShortName(f.model);
         grp.appendChild(opt);
     });
-    const customOpt = selectEl.querySelector('option[value="custom"]');
-    if (customOpt) selectEl.insertBefore(grp, customOpt);
-    else selectEl.insertBefore(grp, selectEl.options[1] || null);
+    selectEl.insertBefore(grp, selectEl.options[1] || null);
 }
 
 function refreshFavoriteQuickSelect() {
