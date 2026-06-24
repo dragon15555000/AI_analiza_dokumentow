@@ -60,6 +60,7 @@ from task_queue import cancel_task, get_task, get_task_status, submit_task, upda
 from werkzeug.utils import secure_filename
 
 import llm_client
+from settings import load_env_file, load_runtime_settings, validate_runtime_settings
 from llm_client import (
     _check_gemini_health,
     _check_ollama_health,
@@ -87,17 +88,7 @@ from llm_client import (
     stream_llm_tokens,
 )
 
-# Wczytaj .env jeśli istnieje
-_env_path = Path(__file__).parent / ".env"
-if _env_path.exists():
-    for _line in _env_path.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            _key = _k.strip()
-            if _key == "SECRET_KEY":
-                continue
-            os.environ.setdefault(_key, _v.strip())
+load_env_file()
 
 # Bezpieczne importy opcjonalne
 try:
@@ -710,11 +701,8 @@ def _validate_sql_table_name(name: str) -> bool:
 
 
 app = Flask(__name__)
-SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError(
-        "CRITICAL: Brak zdefiniowanego FLASK_SECRET_KEY lub SECRET_KEY w środowisku/.env!"
-    )
+_runtime_settings = load_runtime_settings()
+SECRET_KEY = _runtime_settings.flask_secret_key
 app.secret_key = SECRET_KEY
 _MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
 app.config.update(
@@ -750,16 +738,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ai_analiza")
 
-# === Walidacja wymaganych zmiennych środowiskowych ===
-required_env = ["QDRANT_URL", "QDRANT_KEY"]
-missing = [key for key in required_env if not os.environ.get(key)]
-if missing:
-    logger.critical(f"Brak wymaganych zmiennych środowiskowych: {missing}")
-    logger.critical("Upewnij się, że plik .env istnieje i zawiera poprawne wartości.")
-    raise RuntimeError(f"Brakujące zmienne środowiskowe: {missing}")
-
-QDRANT_URL = os.environ["QDRANT_URL"]
-QDRANT_KEY = os.environ["QDRANT_KEY"]
+QDRANT_URL = _runtime_settings.qdrant_url
+QDRANT_KEY = _runtime_settings.qdrant_key
 QDRANT_LOCAL_URL = os.environ.get("QDRANT_LOCAL_URL", "http://127.0.0.1:6333")
 QDRANT_LOCAL_KEY = os.environ.get("QDRANT_LOCAL_KEY", "dev-local-key")
 QDRANT_CLOUD_URL = os.environ.get("QDRANT_CLOUD_URL", "")
@@ -2662,8 +2642,15 @@ def _ensure_collection_exists():
         logger.warning(f"Nie udało się sprawdzić/utworzyć kolekcji '{ACTIVE_COLLECTION}': {e}")
 
 
-if not os.environ.get("SKIP_QDRANT_INIT"):
-    _ensure_collection_exists()
+def bootstrap_runtime() -> None:
+    """Waliduje wymagany runtime i inicjalizuje komponenty zależne od usług zewnętrznych."""
+    missing = validate_runtime_settings(_runtime_settings)
+    if missing:
+        logger.critical(f"Brak wymaganych zmiennych środowiskowych: {missing}")
+        logger.critical("Upewnij się, że plik .env istnieje i zawiera poprawne wartości.")
+        raise RuntimeError(f"Brakujące zmienne środowiskowe: {missing}")
+    if not os.environ.get("SKIP_QDRANT_INIT"):
+        _ensure_collection_exists()
 
 
 def get_embedding(text: str) -> list:
@@ -9382,3 +9369,10 @@ def service_restart():
 
     threading.Thread(target=_do_restart, daemon=True).start()
     return jsonify({"success": True, "msg": "Restart zlecony"})
+
+
+if __name__ == "__main__":
+    bootstrap_runtime()
+    host = os.environ.get("APP_HOST", APP_HOST)
+    port = int(os.environ.get("APP_PORT", "5000"))
+    app.run(host=host, port=port, debug=os.environ.get("APP_DEBUG", "false").lower() in ("1", "true", "yes"))

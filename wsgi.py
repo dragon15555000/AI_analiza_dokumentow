@@ -6,9 +6,10 @@ Używany przez: python wsgi.py  oraz  python -m waitress ... wsgi:app
 
 import os
 
-from app import APP_HOST, app
+from app import APP_HOST, app, bootstrap_runtime
 
 if __name__ == "__main__":
+    bootstrap_runtime()
     from waitress import serve
 
     host = os.environ.get("APP_HOST", APP_HOST)
