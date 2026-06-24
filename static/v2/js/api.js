@@ -110,6 +110,11 @@ document.addEventListener("DOMContentLoaded", function() {
 
         source.addEventListener('done', (e) => {
             const d = JSON.parse(e.data);
+            if (d.status === 'failed' || d.error) {
+                source.close();
+                showError(d.error || 'Zadanie przerwane (błąd limitów lub serwera).');
+                return;
+            }
             source.close();
             progressBar.style.width = '100%';
             progressBar.innerText = '100%';
