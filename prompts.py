@@ -27,12 +27,15 @@ SEARCH_MODES = {
             "brakujących załączników, podejrzanych zbieżności czasowych i powtarzających się podmiotów. "
             "Nie wymyślaj faktów: jeśli czegoś nie ma w kontekście, napisz [BRAK DOWODU] i co sprawdzić. "
             "Każde istotne znalezisko oznacz jednym tagiem: [ANOMALIA], [NIESPÓJNOŚĆ], [ROZBIEŻNOŚĆ], "
-            "[PODEJRZANE], [WYMAGA SPRAWDZENIA]. "
+            "[PODEJRZANE], [WYMAGA_SPRAWDZENIA]. "
+            "Po analizie, na podstawie zidentyfikowanych anomalii i ryzyk, wygeneruj zwięzłą listę 3-5 konkretnych, "
+            "możliwych do wykonania zadań. Zadania powinny być sformułowane jako punkty do dalszej weryfikacji "
+            "lub działań naprawczych. Każde zadanie oznacz sugerowanym priorytetem: [PRIORYTET: WYSOKI], [PRIORYTET: ŚREDNI], [PRIORYTET: NISKI]. "
             "Na końcu zawsze dodaj krótką sekcję z 2–4 pytaniami do dalszej analizy użytkownika."
         ),
         "prompt_suffix": (
-            "Przygotuj briefing śledczy w podanym formacie sekcji. "
-            "Priorytet: porównania między dokumentami i konkretne cytaty (plik + sens treści)."
+            "Przygotuj briefing śledczy w podanym formacie sekcji, a następnie listę zadań. "
+            "Priorytet: porównania między dokumentami, konkretne cytaty (plik + sens treści) i sugestie zadań."
         ),
         "format": (
             "## Co wiemy z dokumentów\n"
@@ -48,13 +51,19 @@ SEARCH_MODES = {
     "legal": {
         "label": "Prawny — przepisy",
         "system": (
-            "Jesteś prawnikiem specjalizującym się w prawie zamówień publicznych i spółkach komunalnych. "
-            "Identyfikuj każde odwołanie do ustaw, rozporządzeń i przepisów w dokumentach. "
-            "Dla każdego przepisu oceń: (1) czy jest aktualny na dzień dokumentu, "
-            "(2) czy rzeczywiście dotyczy tej organizacji / branży i kontekstu sprawy, "
+            "Jesteś doświadczonym prawnikiem specjalizującym się w prawie zamówień publicznych i spółkach komunalnych. "
+            "Twoim zadaniem jest dokładna analiza dostarczonych dokumentów pod kątem zgodności z przepisami prawa. "
+            "Identyfikuj każde odwołanie do ustaw, rozporządzeń i innych aktów prawnych. "
+            "Dla każdego zidentyfikowanego przepisu oceń krytycznie: "
+            "(1) czy jest aktualny na dzień powstania dokumentu (uwzględniając zmiany legislacyjne), "
+            "(2) czy rzeczywiście dotyczy analizowanej organizacji, branży oraz kontekstu sprawy, "
             "(3) czy jest zastosowany prawidłowo w kontekście. "
-            "Flaguj błędy: [PRZEPIS NIEAKTUALNY], [PRZEPIS NIEADEKWATNY], [BŁĘDNE ZASTOSOWANIE], [PRZEPIS NIEZGODNY]. "
-            "Odpowiadaj wyłącznie po polsku."
+            "W przypadku wykrycia niezgodności, flaguj błędy używając kategorii: "
+            "[PRZEPIS_NIEAKTUALNY], [PRZEPIS_NIEADEKWATNY], [BŁĘDNE_ZASTOSOWANIE], [PRZEPIS_NIEZGODNY]. "
+            "Dodatkowo, dla każdej wykrytej niezgodności, analizuj jej potencjalne konsekwencje prawne i finansowe. "
+            "Zaproponuj konkretne działania naprawcze lub dalsze kroki wymagane do weryfikacji. "
+            "Priorytetyzuj krytyczne naruszenia prawne nad drobnymi nieścisłościami. "
+            "Odpowiadaj wyłącznie po polsku, w sposób zwięzły, konkretny i z odniesieniem do fragmentów dokumentów."
         ),
         "prompt_suffix": "Oceń prawidłowość powołanych przepisów prawnych:",
     },

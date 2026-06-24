@@ -52,6 +52,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_URL = "http://localhost:11434"
 LLM_MODEL = None
 EMBED_MODEL = "nomic-embed-text"
+OLLAMA_GPU_NUM: int | None = None
 
 GROQ_MODEL = None
 
@@ -118,7 +119,7 @@ def _sync_llm_client_config(**kwargs):
     global GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OPENROUTER_MAX_RETRIES
     global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER, EMBED_MODEL
-    global ANTHROPIC_API_KEY, CLAUDE_MODEL
+    global ANTHROPIC_API_KEY, CLAUDE_MODEL, OLLAMA_GPU_NUM
 
     GEMINI_API_KEY = kwargs.get("GEMINI_API_KEY", GEMINI_API_KEY)
     GEMINI_MODEL = _normalize_gemini_model(kwargs.get("GEMINI_MODEL", GEMINI_MODEL))
@@ -135,6 +136,7 @@ def _sync_llm_client_config(**kwargs):
     EMBED_MODEL = kwargs.get("EMBED_MODEL", EMBED_MODEL)
     ANTHROPIC_API_KEY = kwargs.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
     CLAUDE_MODEL = kwargs.get("CLAUDE_MODEL", CLAUDE_MODEL)
+    OLLAMA_GPU_NUM = kwargs.get("OLLAMA_GPU_NUM", OLLAMA_GPU_NUM)
 
 
 def get_llm_provider(request_provider: str | None = None) -> str:
@@ -614,13 +616,15 @@ def _call_ollama(
     prompt: str, system: str, stream: bool, model: str, provider: str | None = None
 ) -> dict | requests.Response:
     url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
-    payload = {
+    payload: dict = {
         "model": model,
         "prompt": prompt,
         "system": system,
         "stream": stream,
         "options": {"temperature": 0.2},
     }
+    if OLLAMA_GPU_NUM is not None:
+        payload["options"]["num_gpu"] = OLLAMA_GPU_NUM
     if stream:
         return requests.post(url, json=payload, stream=True, timeout=300)
     else:
@@ -1670,6 +1674,9 @@ def call_llm(
     provider moze byc: 'openrouter', 'ollama', lub custom endpoint ID.
     """
     pool = _load_provider_pool()
+    if not provider:
+        provider = pool.get("provider", "ollama")
+    
     custom_endpoint = None
     if provider:
         for endpoint in pool.get("custom_endpoints", []):
@@ -1780,6 +1787,9 @@ def stream_llm_tokens(
     provider moze byc: 'openrouter', 'ollama', lub custom endpoint ID.
     """
     pool = _load_provider_pool()
+    if not provider:
+        provider = pool.get("provider", "ollama")
+
     custom_endpoint = None
     if provider:
         for endpoint in pool.get("custom_endpoints", []):
