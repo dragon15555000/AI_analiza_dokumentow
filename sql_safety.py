@@ -92,3 +92,53 @@ def _validate_sql_table_refs(sql_query: str, known_tables: set[str]) -> tuple[bo
             f"Dostępne m.in.: {sample}{'…' if len(known_tables) > 12 else ''}"
         )
     return True, None
+
+# Sekwencje które mogą manipulować promptem
+_PROMPT_INJECTION_PATTERNS = [
+    r"ignore\s+(previous|above|all)",
+    r"forget\s+(everything|all|instructions)",
+    r"new\s+instructions?:",
+    r"system\s*:",
+    r"you\s+are\s+now",
+    r"act\s+as",
+    r"jailbreak",
+    r"DAN\b",
+    # SQL injection via prompt
+    r";\s*DROP",
+    r";\s*DELETE",
+    r";\s*TRUNCATE",
+    r";\s*UPDATE",
+    r"UNION\s+SELECT",
+    r"OR\s+1\s*=\s*1",
+    r"'--",
+    r"xp_cmdshell",
+]
+
+_INJECTION_RE = re.compile(
+    "|".join(_PROMPT_INJECTION_PATTERNS),
+    flags=re.IGNORECASE,
+)
+
+
+def sanitize_user_question(question: str, max_len: int = 500) -> tuple[str, bool]:
+    """
+    Sanityzuje pytanie użytkownika przed wstrzyknięciem do promptu LLM.
+    Zwraca (oczyszczone_pytanie, czy_wykryto_podejrzane).
+    """
+    if not question:
+        return "", False
+
+    # Obetnij do max długości
+    q = question[:max_len].strip()
+
+    # Wykryj podejrzane wzorce
+    suspicious = bool(_INJECTION_RE.search(q))
+
+    if suspicious:
+        # Usuń podejrzane sekwencje — nie blokuj całkowicie, loguj
+        q = _INJECTION_RE.sub("[USUNIĘTO]", q)
+
+    # Usuń null bytes i znaki kontrolne
+    q = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", q)
+
+    return q, suspicious
