@@ -2925,15 +2925,20 @@ def _build_search_prompt(
     """Buduje prompt użytkownika i zwraca (prompt, system) — chat_context tylko do LLM."""
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
     max_chunk = 1600 if mode == "detective" else 1400
+    
+    # Sanitize retrieved context to prevent prompt injection
     sanitized = [
-        {"file": c.get("file", ""), "text": _sanitize_for_prompt(c.get("text", ""), max_chunk)}
+        {"file": c.get("file", ""), "text": sanitize_user_question(c.get("text", ""), max_len=max_chunk)[0]}
         for c in contexts
     ]
+
     context_str = "\n\n".join([f"[Dokument: {c['file']}]: {c['text']}" for c in sanitized])
     chat_block = ""
     if chat_context and chat_context.strip():
+        # Also sanitize chat_context
+        sanitized_chat_context, _ = sanitize_user_question(chat_context.strip(), max_len=2500)
         chat_block = CHAT_CONTEXT_BLOCK_TEMPLATE.format(
-            chat_context=_sanitize_for_prompt(chat_context.strip(), 2500)
+            chat_context=sanitized_chat_context
         )
 
     if mode == "detective":
@@ -2988,7 +2993,12 @@ def generate_answer(
     chat_context: str = "",
 ) -> str:
     """Generuje odpowiedź używając wybranego providera (ollama lub openrouter)."""
-    prompt, system = _build_search_prompt(query, contexts, mode, chat_context=chat_context)
+    # Sanitize user query to prevent prompt injection in chat/RAG
+    clean_query, was_suspicious = sanitize_user_question(query)
+    if was_suspicious:
+        logger.warning("Prompt injection attempt detected in generate_answer query: %r", query[:100])
+
+    prompt, system = _build_search_prompt(clean_query, contexts, mode, chat_context=chat_context)
     cfg = SEARCH_MODES.get(mode, SEARCH_MODES["normal"])
 
     try:
@@ -4658,7 +4668,13 @@ def file_open():
 def hybrid_stream():
     """Wyszukiwanie hybrydowe: RAG + SQL równolegle — SSE."""
     data = request.get_json()
-    query_text = data.get("query", "").strip()
+    raw_query_text = data.get("query", "").strip()
+
+    # Sanitize user query to prevent prompt injection in chat/RAG
+    query_text, was_suspicious = sanitize_user_question(raw_query_text)
+    if was_suspicious:
+        logger.warning("Prompt injection attempt detected in chat/RAG query: %r", raw_query_text[:100])
+
     chat_context = (data.get("chat_context") or "").strip()
     conn_cfg = data.get("conn", {})
     schema_str = data.get("schema", "")
@@ -4815,7 +4831,13 @@ def hybrid_stream():
 def search_stream():
     """Wyszukiwanie z streamingiem LLM — wyniki natychmiast, odpowiedź słowo po słowie."""
     data = request.get_json()
-    query_text = data.get("query", "").strip()
+    raw_query_text = data.get("query", "").strip()
+
+    # Sanitize user query to prevent prompt injection in chat/RAG
+    query_text, was_suspicious = sanitize_user_question(raw_query_text)
+    if was_suspicious:
+        logger.warning("Prompt injection attempt detected in chat/RAG query: %r", raw_query_text[:100])
+
     if not query_text:
         return jsonify({"success": False, "error": "Zapytanie puste"})
     chat_context = (data.get("chat_context") or "").strip()
@@ -5662,9 +5684,14 @@ def agents_swarm_stream():
     """SSE: równoległa analiza dokumentów przez N niezależnych agentów LLM."""
     _require_api_key()
     data = request.get_json() or {}
-    query = (data.get("query") or "").strip()
+    raw_query = (data.get("query") or "").strip()
     swarm_mode = data.get("swarm_mode", "quality")
     file_filter = data.get("file_filter") or None
+
+    # Sanitize user query to prevent prompt injection in swarm
+    query, was_suspicious = sanitize_user_question(raw_query)
+    if was_suspicious:
+        logger.warning("Prompt injection attempt detected in swarm query: %r", raw_query[:100])
 
     def sse(event, d):
         import json as _j
