@@ -3816,6 +3816,10 @@ def browse():
 
     if raw_path:
         target = Path(_normalize_browse_path(raw_path)).expanduser()
+        # PATCH: If user provides an absolute path, it MUST be allowed from the start.
+        if target.is_absolute() and not _path_is_allowed(target):
+            logger.warning("Browse BLOCKED: Absolute path outside allowed roots %s", target)
+            return jsonify({"error": "Dostęp do tej ścieżki jest zabroniony"}), 403
     else:
         target = _default_browse_path()
 
@@ -3889,9 +3893,9 @@ def browse():
         return jsonify(
             {
                 "success": True,
-                "current": str(p),
-                "win_path": wsl_to_win(str(p)),
-                "parent": str(p.parent) if p != p.parent and _path_is_browsable(p.parent) else None,
+                "current": str(target),
+                "win_path": wsl_to_win(str(target)),
+                "parent": str(target.parent) if target != target.parent and _path_is_browsable(target.parent) else None,
                 "entries": entries,
                 "is_empty": is_empty,
                 "total_children": total_children,
@@ -3907,7 +3911,7 @@ def browse():
             }
         )
     except PermissionError:
-        return jsonify({"success": False, "error": f"Brak uprawnień do odczytu: {p}"})
+        return jsonify({"success": False, "error": f"Brak uprawnień do odczytu: {target}"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
