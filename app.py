@@ -3638,6 +3638,10 @@ def extract_text(file_path: Path, force_ocr: bool = False) -> str:
 def index_v2():
     return render_template("v2/index.html")
 
+@app.route("/v2/financial")
+def financial_audit_v2():
+    return render_template("v2/financial.html")
+
 
 @app.route("/stats", methods=["GET"])
 def get_stats():
