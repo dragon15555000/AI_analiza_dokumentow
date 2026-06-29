@@ -1582,6 +1582,18 @@ def _fallback_openrouter_to_ollama(
     prompt: str, system: str, *, stream: bool, reason: str
 ) -> dict | requests.Response:
     """Wspólny fallback OpenRouter → lokalna Ollama."""
+    if not LLM_MODEL:
+        raise RuntimeError(
+            f"Fallback do Ollama niemożliwy: LLM_MODEL nie jest ustawiony. "
+            f"Skonfiguruj model Ollama (LLM_MODEL=<model>) w .env albo w provider pool."
+        )
+    health = _check_ollama_health()
+    if not health.get("ok"):
+        error = health.get("error", "Nieznany błąd")
+        raise RuntimeError(
+            f"Fallback do Ollama niemożliwy: Ollama niedostępna ({OLLAMA_URL}). "
+            f"Błąd: {error}. Upewnij się że Ollama działa: `ollama serve`"
+        )
     logger.info("%s → fallback do Ollama (%s)", reason, LLM_MODEL)
     result = _call_ollama(prompt, system, stream=stream, model=LLM_MODEL)
     if isinstance(result, dict):
