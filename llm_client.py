@@ -53,6 +53,8 @@ OLLAMA_URL = "http://localhost:11434"
 LLM_MODEL = None
 EMBED_MODEL = "nomic-embed-text"
 OLLAMA_GPU_NUM: int | None = None
+OLLAMA_KEEP_ALIVE = None
+OLLAMA_NUM_CTX = None
 
 GROQ_MODEL = None
 
@@ -120,6 +122,7 @@ def _sync_llm_client_config(**kwargs):
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OPENROUTER_MAX_RETRIES
     global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER, EMBED_MODEL
     global ANTHROPIC_API_KEY, CLAUDE_MODEL, OLLAMA_GPU_NUM
+    global OLLAMA_KEEP_ALIVE, OLLAMA_NUM_CTX
 
     GEMINI_API_KEY = kwargs.get("GEMINI_API_KEY", GEMINI_API_KEY)
     GEMINI_MODEL = _normalize_gemini_model(kwargs.get("GEMINI_MODEL", GEMINI_MODEL))
@@ -137,6 +140,8 @@ def _sync_llm_client_config(**kwargs):
     ANTHROPIC_API_KEY = kwargs.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
     CLAUDE_MODEL = kwargs.get("CLAUDE_MODEL", CLAUDE_MODEL)
     OLLAMA_GPU_NUM = kwargs.get("OLLAMA_GPU_NUM", OLLAMA_GPU_NUM)
+    OLLAMA_KEEP_ALIVE = kwargs.get("OLLAMA_KEEP_ALIVE", OLLAMA_KEEP_ALIVE)
+    OLLAMA_NUM_CTX = kwargs.get("OLLAMA_NUM_CTX", OLLAMA_NUM_CTX)
 
 
 def get_llm_provider(request_provider: str | None = None) -> str:
@@ -612,19 +617,42 @@ def _check_ollama_health() -> dict:
         return {"ok": False, "url": OLLAMA_URL, "error": str(e)[:120]}
 
 
-def _call_ollama(
-    prompt: str, system: str, stream: bool, model: str, provider: str | None = None
-) -> dict | requests.Response:
-    url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
-    payload: dict = {
+def _prepare_ollama_payload(
+    model: str,
+    prompt: str,
+    system: str = "",
+    stream: bool = False,
+    temperature: float | None = None,
+) -> dict:
+    """Tworzy zoptymalizowany payload dla Ollama z parametrami GPU, keep_alive i kontekstu."""
+    keep_alive_val = OLLAMA_KEEP_ALIVE
+    if isinstance(keep_alive_val, str):
+        try:
+            keep_alive_val = int(keep_alive_val)
+        except ValueError:
+            pass
+
+    payload = {
         "model": model,
         "prompt": prompt,
         "system": system,
         "stream": stream,
-        "options": {"temperature": 0.2},
+        "keep_alive": keep_alive_val,
+        "options": {
+            "temperature": temperature if temperature is not None else 0.2,
+            "num_ctx": OLLAMA_NUM_CTX,
+        },
     }
     if OLLAMA_GPU_NUM is not None:
         payload["options"]["num_gpu"] = OLLAMA_GPU_NUM
+    return payload
+
+
+def _call_ollama(
+    prompt: str, system: str, stream: bool, model: str, provider: str | None = None
+) -> dict | requests.Response:
+    url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
+    payload = _prepare_ollama_payload(model, prompt, system, stream, temperature=0.2)
     if stream:
         return requests.post(url, json=payload, stream=True, timeout=300)
     else:
@@ -949,13 +977,13 @@ def _stream_openrouter_once(
             meta["fallback_used"] = True
             meta["fallback_reason"] = "openrouter_rate_limit"
         ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
-        ollama_payload = {
-            "model": LLM_MODEL,
-            "prompt": prompt,
-            "system": system,
-            "stream": True,
-            "options": {"temperature": temperature if temperature is not None else 0.2},
-        }
+        ollama_payload = _prepare_ollama_payload(
+            LLM_MODEL,
+            prompt,
+            system,
+            stream=True,
+            temperature=temperature,
+        )
         try:
             with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
                 r.raise_for_status()
@@ -1520,13 +1548,13 @@ def _call_custom_endpoint(
     headers = {}
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    payload = {
-        "model": model or LLM_MODEL,
-        "prompt": prompt,
-        "system": system,
-        "stream": stream,
-        "options": {"temperature": 0.2},
-    }
+    payload = _prepare_ollama_payload(
+        model or LLM_MODEL,
+        prompt,
+        system,
+        stream=stream,
+        temperature=0.2,
+    )
     if stream:
         return requests.post(url_clean, json=payload, headers=headers, stream=True, timeout=300)
     else:
@@ -1858,13 +1886,13 @@ def stream_llm_tokens(
         headers = {}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        payload = {
-            "model": eff_model,
-            "prompt": prompt,
-            "system": system,
-            "stream": True,
-            "options": {"temperature": temperature},
-        }
+        payload = _prepare_ollama_payload(
+            eff_model,
+            prompt,
+            system,
+            stream=True,
+            temperature=temperature,
+        )
         try:
             with requests.post(url, json=payload, headers=headers, stream=True, timeout=300) as r:
                 r.raise_for_status()
@@ -1926,13 +1954,13 @@ def stream_llm_tokens(
                 meta["fallback_used"] = True
                 meta["fallback_reason"] = "openrouter_no_endpoints"
             ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
-            ollama_payload = {
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "system": system,
-                "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2},
-            }
+            ollama_payload = _prepare_ollama_payload(
+                LLM_MODEL,
+                prompt,
+                system,
+                stream=True,
+                temperature=temperature,
+            )
             try:
                 with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
                     r.raise_for_status()
@@ -1958,13 +1986,13 @@ def stream_llm_tokens(
                 "OpenRouter limit/quota → fallback do Ollama (OPENROUTER_FALLBACK_TO_OLLAMA=true)"
             )
             ollama_url = _pick_ollama_url().rstrip("/") + "/api/generate"
-            ollama_payload = {
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "system": system,
-                "stream": True,
-                "options": {"temperature": temperature if temperature is not None else 0.2},
-            }
+            ollama_payload = _prepare_ollama_payload(
+                LLM_MODEL,
+                prompt,
+                system,
+                stream=True,
+                temperature=temperature,
+            )
             try:
                 with requests.post(ollama_url, json=ollama_payload, stream=True, timeout=300) as r:
                     r.raise_for_status()
@@ -1996,13 +2024,13 @@ def stream_llm_tokens(
     else:
         # Ollama streaming
         url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
-        payload = {
-            "model": effective_model,
-            "prompt": prompt,
-            "system": system,
-            "stream": True,
-            "options": {"temperature": temperature},
-        }
+        payload = _prepare_ollama_payload(
+            effective_model,
+            prompt,
+            system,
+            stream=True,
+            temperature=temperature,
+        )
         try:
             with requests.post(url, json=payload, stream=True, timeout=300) as r:
                 r.raise_for_status()
