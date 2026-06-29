@@ -661,6 +661,9 @@ table { margin: 0; }
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('tasks'); return false;">⚙️ Zadania w tle</a>
     </li>
+    <li class="nav-item">
+        <a class="nav-link" href="#" onclick="showTab('financial'); return false;">💰 Audyt Finansowy</a>
+    </li>
 </ul></div>
 
 <!-- Baner adaptacyjnej sugestii trybu analizy -->
@@ -2097,6 +2100,34 @@ table { margin: 0; }
         </tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<!-- Audyt Finansowy -->
+<div id="tabFinancial" class="main-wrap" style="display:none;">
+  <div class="search-card mb-4">
+    <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;margin-bottom:1rem;">💰 Audyt Finansowy — Analiza Formuł Arkusza</h5>
+    <p class="text-muted small mb-3">Wczytaj dokument Excel i analizuj formuły, zależności oraz anomalie finansowe.</p>
+
+    <div style="border:2px dashed var(--c-border);border-radius:var(--r-md);padding:20px;text-align:center;cursor:pointer;background:var(--c-accent-bg);" onclick="document.getElementById('financialFileInput').click();" id="financialDropZone">
+      <div style="font-size:2rem;margin-bottom:10px;">📄</div>
+      <p style="margin:0;font-weight:600;">Kliknij lub upuść dokument Excel tutaj</p>
+      <p class="small text-muted mb-0">Obsługiwane: .xlsx, .xls</p>
+    </div>
+    <input type="file" id="financialFileInput" accept=".xlsx,.xls" style="display:none;" onchange="uploadFinancialFile(event)">
+
+    <div id="financialUploadStatus" class="mt-3" style="display:none;"></div>
+  </div>
+
+  <div id="financialResults" class="search-card" style="display:none;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;">📊 Wyniki Analizy</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="downloadFinancialReport()">⬇ Pobierz JSON</button>
+    </div>
+
+    <div id="financialSummary" class="mb-4"></div>
+    <div id="financialAnomalies" class="mb-4"></div>
+    <div id="financialSheets"></div>
   </div>
 </div>
 
@@ -8693,6 +8724,8 @@ async function cancelTaskUi(taskId) {
     </div>
   </div>
 </div>
+
+<script src="{{ url_for('static', filename='financial_audit.js') }}"></script>
 
 </body>
 </html>
