@@ -16,17 +16,16 @@ async function uploadFinancialFile(event) {
     formData.append('file', file);
     formData.append('analysis_type', 'full');
 
+    const baseUrl = window.location.origin || 'http://localhost:5000';
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
+
     try {
-        const baseUrl = window.location.origin || 'http://localhost:5000';
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
-        try {
-            const response = await fetch(baseUrl + '/api/audit/financial', {
-                method: 'POST',
-                body: formData,
-                signal: controller.signal
-            });
-            clearTimeout(timeoutId);
+        const response = await fetch(baseUrl + '/api/audit/financial', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal
+        });
 
         if (!response.ok) {
             const error = await response.json();
@@ -41,7 +40,13 @@ async function uploadFinancialFile(event) {
         displayFinancialResults(report);
 
     } catch (error) {
-        statusDiv.innerHTML = `<div class="alert alert-danger">❌ Błąd sieciowy: ${error.message}</div>`;
+        if (error.name === 'AbortError') {
+            statusDiv.innerHTML = `<div class="alert alert-danger">❌ Timeout: Analiza trwa zbyt długo. Spróbuj z mniejszym plikiem.</div>`;
+        } else {
+            statusDiv.innerHTML = `<div class="alert alert-danger">❌ Błąd sieciowy: ${error.message}</div>`;
+        }
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
