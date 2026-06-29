@@ -724,7 +724,9 @@ app.config.update(
 )
 
 from routes.main_routes import main_bp
+from routes.financial_routes import financial_bp
 app.register_blueprint(main_bp)
+app.register_blueprint(financial_bp)
 
 
 @app.errorhandler(413)
