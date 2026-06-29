@@ -18,10 +18,15 @@ async function uploadFinancialFile(event) {
 
     try {
         const baseUrl = window.location.origin || 'http://localhost:5000';
-        const response = await fetch(baseUrl + '/api/audit/financial', {
-            method: 'POST',
-            body: formData
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
+        try {
+            const response = await fetch(baseUrl + '/api/audit/financial', {
+                method: 'POST',
+                body: formData,
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
 
         if (!response.ok) {
             const error = await response.json();
