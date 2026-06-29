@@ -17,7 +17,8 @@ async function uploadFinancialFile(event) {
     formData.append('analysis_type', 'full');
 
     try {
-        const response = await fetch('/api/audit/financial', {
+        const baseUrl = window.location.origin || 'http://localhost:5000';
+        const response = await fetch(baseUrl + '/api/audit/financial', {
             method: 'POST',
             body: formData
         });
