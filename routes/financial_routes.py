@@ -25,6 +25,8 @@ from services.financial_forensics import (
     detect_duplicate_and_numeric_signals as svc_detect_duplicate_and_numeric_signals,
     detect_hardcoded_values_and_pattern_deviations as svc_detect_hardcoded_values_and_pattern_deviations,
 )
+from services.ocr_cross_check import extract_candidates as svc_extract_ocr_candidates
+from services.ocr_cross_check import run_cross_check as svc_run_ocr_cross_check
 from utils.http import json_error, json_success
 
 logger = logging.getLogger("ai_analiza")
@@ -3051,6 +3053,48 @@ def audit_financial_opinion():
         ai_forensic_opinion=normalized_opinion,
         evidence_summary=evidence_pack.get("summary", {}),
         provider=_FINANCIAL_AI_OPINION_PROVIDER,
+    )
+
+
+@financial_bp.route("/financial/ocr-cross-check", methods=["POST"])
+def audit_financial_ocr_cross_check():
+    """Weryfikacja krzyżowa sygnałów HIGH/CRITICAL względem dokumentów OCR w Qdrant.
+
+    Sekcja dodatkowa — nie warunkuje wyniku bazowego audytu XLSX. Gdy Qdrant/OCR
+    niedostępny, zwraca status "unavailable" per kandydat (fail-closed), a nie błąd 5xx.
+    """
+    payload = request.get_json(silent=True) or {}
+    evidence_pack = payload.get("evidence_pack")
+    if not isinstance(evidence_pack, dict):
+        report = payload.get("report") or {}
+        if isinstance(report, dict):
+            evidence_pack = report.get("ai_evidence_pack")
+
+    if not isinstance(evidence_pack, dict):
+        return json_error("Brak ai_evidence_pack do weryfikacji OCR.", status=400, cross_check_available=False)
+
+    candidates, truncated = svc_extract_ocr_candidates(evidence_pack)
+    if not candidates:
+        return json_success(cross_check_available=True, cross_check=[], truncated=False)
+
+    import app as _app
+
+    def _search(query_text: str) -> list[dict]:
+        client = _app.get_qdrant_client()
+        vector = _app.get_embedding(query_text)
+        res = client.query_points(collection_name=_app.ACTIVE_COLLECTION, query=vector, limit=3)
+        return [
+            {"file": p.payload.get("file", ""), "text": p.payload.get("text", ""), "score": float(p.score)}
+            for p in res.points
+        ]
+
+    results = svc_run_ocr_cross_check(candidates, _search)
+
+    return json_success(
+        cross_check_available=True,
+        cross_check=results,
+        checked=len(results),
+        truncated=truncated,
     )
 
 
