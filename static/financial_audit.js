@@ -383,6 +383,7 @@ function displayFinancialResults(report) {
         </div>
     `;
     renderFinancialFlowExplorer(report);
+    renderFinancialLineageExplorer(report);
     loadFinancialOpinion(report);
 
     // Anomalie
@@ -515,6 +516,128 @@ function renderFinancialFlowExplorer(report) {
     }
     host.dataset.selectedSheet = selectedSheet;
     renderFinancialSheetFlow(report, selectedSheet);
+}
+
+function renderFinancialLineageExplorer(report) {
+    const host = document.getElementById('financialLineageExplorer');
+    if (!host) return;
+    const sheetEntries = Object.entries(report.sheets || {}).filter(([, sheetData]) => {
+        const relationCount = sheetData.lineage_graph?.summary?.relation_count || 0;
+        return relationCount > 0;
+    });
+    if (!sheetEntries.length) {
+        host.innerHTML = `
+            <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+                <h6 class="mb-1">🧭 Graf powiązań</h6>
+                <div class="small text-muted">Brak silnych relacji do pokazania w grafie powiązań.</div>
+            </div>
+        `;
+        return;
+    }
+
+    const selectedSheet = sheetEntries.some(([name]) => name === host.dataset.selectedSheet)
+        ? host.dataset.selectedSheet
+        : sheetEntries[0][0];
+
+    host.innerHTML = `
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <div>
+                    <h6 class="mb-1">🧭 Graf powiązań</h6>
+                    <div class="small text-muted">MVP pokazuje tylko silne zależności możliwe do prześledzenia z gotowych findings, z priorytetem dla ukrytych odwołań między arkuszami.</div>
+                </div>
+                <div>
+                    <label for="financialLineageSheetSelect" class="form-label small fw-semibold mb-1">Arkusz</label>
+                    <select id="financialLineageSheetSelect" class="form-select form-select-sm">
+                        ${sheetEntries.map(([name]) => `<option value="${financialEscape(name)}"${name === selectedSheet ? ' selected' : ''}>${financialEscape(name)}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+            <div id="financialLineageDetails"></div>
+        </div>
+    `;
+
+    const select = document.getElementById('financialLineageSheetSelect');
+    if (select) {
+        select.onchange = () => {
+            host.dataset.selectedSheet = select.value;
+            renderFinancialSheetLineage(report, select.value);
+        };
+    }
+    host.dataset.selectedSheet = selectedSheet;
+    renderFinancialSheetLineage(report, selectedSheet);
+}
+
+function renderFinancialSheetLineage(report, sheetName) {
+    const target = document.getElementById('financialLineageDetails');
+    if (!target) return;
+    const lineage = (report.sheets || {})[sheetName]?.lineage_graph || {};
+    const nodes = Array.isArray(lineage.nodes) ? lineage.nodes : [];
+    const edges = Array.isArray(lineage.edges) ? lineage.edges : [];
+    const summary = lineage.summary || {};
+
+    if (!edges.length) {
+        target.innerHTML = '<div class="text-muted small">Brak relacji do pokazania dla tego arkusza.</div>';
+        return;
+    }
+
+    const nodeMap = new Map(nodes.map(node => [node.id, node]));
+    const edgeCards = edges.map(edge => {
+        const source = nodeMap.get(edge.source) || { label: edge.source, type: 'source' };
+        const targetNode = nodeMap.get(edge.target) || { label: edge.target, type: 'target' };
+        return `
+            <div style="background:#fff;border:1px solid #e2e8f0;border-left:4px solid #dc2626;border-radius:10px;padding:12px;margin-bottom:10px;">
+                <div class="small fw-semibold mb-1">${financialEscape(source.label)} → ${financialEscape(targetNode.label)}</div>
+                <div class="small text-muted mb-1">
+                    Typ relacji: <strong>${financialEscape(edge.type || 'dependency')}</strong>
+                    ${source.hidden ? ' | źródło ukryte' : ''}
+                    ${targetNode.hidden ? ' | cel ukryty' : ''}
+                </div>
+                <div class="small">${financialEscape(edge.reason || 'Brak dodatkowego opisu relacji.')}</div>
+            </div>
+        `;
+    }).join('');
+
+    const nodesRows = nodes.map(node => `
+        <tr>
+            <td><code>${financialEscape(node.label || node.id)}</code></td>
+            <td>${financialEscape(node.type || 'node')}</td>
+            <td>${node.hidden ? 'tak' : 'nie'}</td>
+            <td>${financialEscape(node.severity || 'NONE')}</td>
+            <td>${financialEscape(node.value ?? '—')}</td>
+            <td>${node.formula ? `<code>${financialEscape(node.formula)}</code>` : '—'}</td>
+        </tr>
+    `).join('');
+
+    target.innerHTML = `
+        <div class="row g-3">
+            <div class="col-lg-6">
+                <div class="small text-muted mb-2">
+                    Relacje: <strong>${financialEscape(summary.relation_count || 0)}</strong> |
+                    Węzły ukryte: <strong>${financialEscape(summary.hidden_node_count || 0)}</strong> |
+                    Silne findings: <strong>${financialEscape(summary.high_priority_findings || 0)}</strong>
+                </div>
+                ${edgeCards}
+            </div>
+            <div class="col-lg-6">
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Węzeł</th>
+                                <th>Typ</th>
+                                <th>Ukryty</th>
+                                <th>Severity</th>
+                                <th>Wartość</th>
+                                <th>Formuła</th>
+                            </tr>
+                        </thead>
+                        <tbody>${nodesRows}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
 }
 
 function renderFinancialSheetFlow(report, sheetName) {

@@ -618,10 +618,19 @@ def detect_control_total_and_hidden_reference_signals(
                 formula=formula,
                 message=f"Formuła w {coord} odwołuje się do ukrytego arkusza „{dep_sheet}”.",
                 comment=f"Źródłowy arkusz ma stan {dep_state} i nie jest jawny w zwykłym widoku.",
-                details={"source_sheet": dep_sheet, "source_sheet_state": dep_state},
+                details={
+                    "source_sheet": dep_sheet,
+                    "source_sheet_state": dep_state,
+                    "source_cell": f"{dep.col}{dep.row}",
+                },
             )
             summary["cross_sheet_hidden_references"].append(
-                {"cell": coord, "source_sheet": dep_sheet, "source_sheet_state": dep_state}
+                {
+                    "cell": coord,
+                    "source_sheet": dep_sheet,
+                    "source_sheet_state": dep_state,
+                    "source_cell": f"{dep.col}{dep.row}",
+                }
             )
 
         sum_match = re.match(r"^=SUM\((.*)\)$", formula.strip(), re.IGNORECASE)

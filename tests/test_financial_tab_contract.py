@@ -40,6 +40,9 @@ def test_financial_endpoint_returns_success_shape():
     assert "flow_graph" in first_sheet
     assert "nodes" in first_sheet["flow_graph"]
     assert "edges" in first_sheet["flow_graph"]
+    assert "lineage_graph" in first_sheet
+    assert "nodes" in first_sheet["lineage_graph"]
+    assert "edges" in first_sheet["lineage_graph"]
 
 
 def test_show_tab_registry_includes_financial():
@@ -50,11 +53,14 @@ def test_show_tab_registry_includes_financial():
     assert "financial:14" in template
     assert "financialAnalysisMode" in template
     assert "financialFlowExplorer" in template
+    assert "financialLineageExplorer" in template
     assert "financialAiOpinion" in template
     assert "financialRunButton" in template
     assert "handleFinancialFileSelection" in template
     assert "runFinancialAnalysis" in script
     assert "financialIsHighPriority" in script
+    assert "renderFinancialLineageExplorer" in script
+    assert "renderFinancialSheetLineage" in script
     assert "loadFinancialOpinion" in script
     assert "renderFinancialOpinion" in script
 
@@ -118,6 +124,8 @@ def test_financial_endpoint_quick_mode_stops_after_screening_for_clean_sheet():
     assert first_sheet["analysis"]["deep_scan_triggered"] is False
     assert first_sheet["flow_graph"]["high_risk_relation_count"] == 0
     assert first_sheet["flow_graph"]["nodes"] == []
+    assert first_sheet["lineage_graph"]["nodes"] == []
+    assert first_sheet["lineage_graph"]["edges"] == []
 
 
 def test_financial_endpoint_targeted_mode_escalates_around_suspicious_area():
@@ -273,6 +281,16 @@ def test_financial_endpoint_detects_hidden_sheet_reference_without_low_priority_
     }
     assert first_sheet["flow_graph"]["high_risk_relation_count"] >= 1
     assert first_sheet["flow_graph"]["nodes"]
+    assert first_sheet["lineage_graph"]["edges"]
+    hidden_edge = next(
+        edge for edge in first_sheet["lineage_graph"]["edges"] if edge["type"] == "cross_sheet_reference"
+    )
+    hidden_node = next(
+        node for node in first_sheet["lineage_graph"]["nodes"] if node["id"] == "UkryteDane!A2"
+    )
+    assert set(hidden_edge.keys()) == {"source", "target", "type", "reason"}
+    assert {"id", "sheet", "cell", "label", "type", "severity", "hidden", "value", "formula"} <= set(hidden_node.keys())
+    assert hidden_node["hidden"] is True
 
 
 def test_financial_endpoint_flow_graph_shows_only_high_risk_relations():

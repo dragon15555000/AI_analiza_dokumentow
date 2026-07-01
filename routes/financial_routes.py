@@ -516,6 +516,7 @@ def _anomaly_details(anomaly: dict) -> dict:
 
 def _severity_rank(severity: str) -> int:
     return {
+        "CRITICAL": 4,
         "HIGH": 3,
         "MEDIUM": 2,
         "LOW": 1,
@@ -1057,6 +1058,280 @@ def _build_sheet_flow_graph(sheet_name: str, analyzer: AuditAnalyzer, logic_summ
         "hidden_formula_nodes": max(0, len(formula_keys) - len(selected_formula_keys)),
         "high_risk_relation_count": len(high_risk_anomalies),
     }
+
+
+def _empty_lineage_graph() -> dict:
+    return {
+        "nodes": [],
+        "edges": [],
+        "summary": {
+            "relation_count": 0,
+            "hidden_node_count": 0,
+            "high_priority_findings": 0,
+        },
+    }
+
+
+def _graph_cell_hidden(workbook, sheet_name: str, coord: str) -> bool:
+    if not workbook or sheet_name not in workbook.sheetnames or not coord:
+        return False
+    sheet = workbook[sheet_name]
+    row_idx, col_idx = _parse_excel_coord(coord)
+    if row_idx is None or col_idx is None:
+        return False
+    from openpyxl.utils import get_column_letter
+
+    col_letter = get_column_letter(col_idx)
+    return bool(
+        sheet.sheet_state != "visible"
+        or sheet.row_dimensions[row_idx].hidden
+        or sheet.column_dimensions[col_letter].hidden
+    )
+
+
+def _graph_cell_formula(workbook, sheet_name: str, coord: str) -> str:
+    if not workbook or sheet_name not in workbook.sheetnames or not coord:
+        return ""
+    row_idx, col_idx = _parse_excel_coord(coord)
+    if row_idx is None or col_idx is None:
+        return ""
+    value = workbook[sheet_name].cell(row_idx, col_idx).value
+    return value if isinstance(value, str) and value.startswith("=") else ""
+
+
+def _graph_cell_value(values_wb, sheet_name: str, coord: str):
+    if not values_wb or sheet_name not in values_wb.sheetnames or not coord:
+        return None
+    row_idx, col_idx = _parse_excel_coord(coord)
+    if row_idx is None or col_idx is None:
+        return None
+    return values_wb[sheet_name].cell(row_idx, col_idx).value
+
+
+def _append_lineage_node(nodes_by_id: dict[str, dict], **node_fields):
+    node_id = node_fields["id"]
+    existing = nodes_by_id.get(node_id)
+    if existing is None:
+        nodes_by_id[node_id] = node_fields
+        return
+    for key, value in node_fields.items():
+        if key == "severity":
+            current_rank = _severity_rank(existing.get("severity", ""))
+            new_rank = _severity_rank(value or "")
+            if new_rank > current_rank:
+                existing[key] = value
+            continue
+        if existing.get(key) in (None, "", False) and value not in (None, ""):
+            existing[key] = value
+    existing["hidden"] = bool(existing.get("hidden") or node_fields.get("hidden"))
+
+
+def _append_lineage_edge(edges: list[dict], seen: set[tuple[str, str, str]], **edge_fields):
+    fingerprint = (
+        edge_fields["source"],
+        edge_fields["target"],
+        edge_fields.get("type", ""),
+    )
+    if fingerprint in seen:
+        return
+    seen.add(fingerprint)
+    edges.append(edge_fields)
+
+
+def _build_sheet_lineage_graph(
+    sheet_name: str,
+    analyzer: AuditAnalyzer,
+    anomalies: list[dict],
+    workbook,
+    values_wb=None,
+) -> dict:
+    try:
+        high_priority_anomalies = [
+            anomaly
+            for anomaly in anomalies
+            if (anomaly.get("severity") or "").upper() in {"HIGH", "CRITICAL"}
+        ]
+        if not high_priority_anomalies:
+            return _empty_lineage_graph()
+
+        nodes_by_id: dict[str, dict] = {}
+        edges: list[dict] = []
+        seen_edges: set[tuple[str, str, str]] = set()
+
+        def add_node(
+            *,
+            node_id: str,
+            node_sheet: str,
+            node_cell: str,
+            label: str,
+            node_type: str,
+            severity: str = "",
+            hidden: bool = False,
+            value=None,
+            formula: str = "",
+        ):
+            _append_lineage_node(
+                nodes_by_id,
+                id=node_id,
+                sheet=node_sheet,
+                cell=node_cell,
+                label=label,
+                type=node_type,
+                severity=severity or "NONE",
+                hidden=bool(hidden),
+                value=_serialize_excel_value(value),
+                formula=formula or "",
+            )
+
+        for anomaly in high_priority_anomalies:
+            raw_cell = str(anomaly.get("cell", "") or "").strip()
+            if not raw_cell:
+                continue
+            target_coord = raw_cell.split(",")[0].strip().split("!")[-1]
+            target_id = f"{sheet_name}!{target_coord}"
+            target_formula = anomaly.get("formula") or _graph_cell_formula(
+                workbook, sheet_name, target_coord
+            )
+            target_hidden = _graph_cell_hidden(workbook, sheet_name, target_coord)
+            target_value = anomaly.get("value")
+            if target_value is None:
+                target_value = _graph_cell_value(values_wb, sheet_name, target_coord)
+            target_type = "formula"
+            if target_id in analyzer.cells and not analyzer.cells[target_id].dependents:
+                target_type = "output"
+            elif not target_formula:
+                target_type = "flagged_cell"
+
+            add_node(
+                node_id=target_id,
+                node_sheet=sheet_name,
+                node_cell=target_coord,
+                label=target_id,
+                node_type=target_type,
+                severity=anomaly.get("severity", ""),
+                hidden=target_hidden,
+                value=target_value,
+                formula=target_formula,
+            )
+
+            if target_id in analyzer.cells:
+                cell = analyzer.cells[target_id]
+                for dep in list(cell.dependencies)[:6]:
+                    dep_id = str(dep)
+                    dep_coord = f"{dep.col}{dep.row}"
+                    dep_hidden = _graph_cell_hidden(workbook, dep.sheet or sheet_name, dep_coord)
+                    dep_formula = (
+                        analyzer.cells[dep_id].formula if dep_id in analyzer.cells else _graph_cell_formula(workbook, dep.sheet or sheet_name, dep_coord)
+                    )
+                    dep_value = _graph_cell_value(values_wb, dep.sheet or sheet_name, dep_coord)
+                    dep_type = "input"
+                    edge_type = "formula_dependency"
+                    edge_reason = f"Formuła w {target_id} pobiera dane z {dep_id}."
+                    if dep.sheet and dep.sheet != sheet_name:
+                        dep_type = "hidden_source" if dep_hidden else "external_source"
+                        edge_type = "cross_sheet_reference"
+                        edge_reason = (
+                            f"Formuła w {target_id} odwołuje się do {'ukrytego ' if dep_hidden else ''}arkusza {dep.sheet}."
+                        )
+                    add_node(
+                        node_id=dep_id,
+                        node_sheet=dep.sheet or sheet_name,
+                        node_cell=dep_coord,
+                        label=dep_id,
+                        node_type=dep_type,
+                        severity=anomaly.get("severity", "") if dep.sheet and dep.sheet != sheet_name else "",
+                        hidden=dep_hidden,
+                        value=dep_value,
+                        formula=dep_formula,
+                    )
+                    _append_lineage_edge(
+                        edges,
+                        seen_edges,
+                        source=dep_id,
+                        target=target_id,
+                        type=edge_type,
+                        reason=edge_reason,
+                    )
+
+                for dependent in list(cell.dependents)[:4]:
+                    dependent_id = str(dependent)
+                    dependent_coord = f"{dependent.col}{dependent.row}"
+                    dependent_formula = (
+                        analyzer.cells[dependent_id].formula if dependent_id in analyzer.cells else ""
+                    )
+                    dependent_type = "output"
+                    if dependent_id in analyzer.cells and analyzer.cells[dependent_id].dependents:
+                        dependent_type = "formula"
+                    add_node(
+                        node_id=dependent_id,
+                        node_sheet=sheet_name,
+                        node_cell=dependent_coord,
+                        label=dependent_id,
+                        node_type=dependent_type,
+                        hidden=_graph_cell_hidden(workbook, sheet_name, dependent_coord),
+                        value=_graph_cell_value(values_wb, sheet_name, dependent_coord),
+                        formula=dependent_formula,
+                    )
+                    _append_lineage_edge(
+                        edges,
+                        seen_edges,
+                        source=target_id,
+                        target=dependent_id,
+                        type="feeds_result",
+                        reason=f"Wynik z {target_id} zasila dalsze obliczenie w {dependent_id}.",
+                    )
+
+            if anomaly.get("type") == "cross_sheet_hidden_reference":
+                source_sheet = anomaly.get("source_sheet")
+                source_cell = anomaly.get("source_cell")
+                if source_sheet and source_cell:
+                    source_id = f"{source_sheet}!{source_cell}"
+                    add_node(
+                        node_id=source_id,
+                        node_sheet=source_sheet,
+                        node_cell=source_cell,
+                        label=source_id,
+                        node_type="hidden_source",
+                        severity=anomaly.get("severity", ""),
+                        hidden=_graph_cell_hidden(workbook, source_sheet, source_cell),
+                        value=_graph_cell_value(values_wb, source_sheet, source_cell),
+                        formula=_graph_cell_formula(workbook, source_sheet, source_cell),
+                    )
+                    _append_lineage_edge(
+                        edges,
+                        seen_edges,
+                        source=source_id,
+                        target=target_id,
+                        type="cross_sheet_reference",
+                        reason=(
+                            f"Ukryta komórka {source_id} zasila wynik {target_id}."
+                        ),
+                    )
+
+        if not nodes_by_id and not edges:
+            return _empty_lineage_graph()
+
+        nodes = sorted(
+            nodes_by_id.values(),
+            key=lambda item: (
+                0 if item["type"] == "hidden_source" else 1,
+                -_severity_rank(item.get("severity", "")),
+                item["label"],
+            ),
+        )
+        hidden_node_count = sum(1 for node in nodes if node.get("hidden"))
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "summary": {
+                "relation_count": len(edges),
+                "hidden_node_count": hidden_node_count,
+                "high_priority_findings": len(high_priority_anomalies),
+            },
+        }
+    except Exception as exc:
+        logger.warning("Lineage graph build failed for %s: %s", sheet_name, exc)
+        return _empty_lineage_graph()
 
 
 def _empty_forensic_result(formula_count: int, structure: dict) -> dict:
@@ -2386,6 +2661,13 @@ def audit_financial():
                     analyzer,
                     logic_summary,
                     enriched_anomalies,
+                ),
+                "lineage_graph": _build_sheet_lineage_graph(
+                    sheet_name,
+                    analyzer,
+                    enriched_anomalies,
+                    formulas_result["workbook"],
+                    values_wb,
                 ),
                 "analysis": {
                     "mode": sheet_mode,
