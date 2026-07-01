@@ -7,6 +7,7 @@ import tempfile
 import math
 import json
 import hashlib
+import io
 from datetime import datetime
 from pathlib import Path
 from collections import Counter, defaultdict, deque, OrderedDict
@@ -14,7 +15,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
-from flask import Blueprint, request
+from flask import Blueprint, request, send_file
 
 from financial_audit import AuditAnalyzer, CellRef, FormulaParser
 from llm_client import call_llm, _llm_response_text, LLM_MODEL
@@ -698,6 +699,194 @@ def _normalize_ai_forensic_opinion(raw_opinion: dict | None) -> dict | None:
         "limitations": limitations,
         "findings": findings,
     }
+
+
+def _risk_label_pl(level: str) -> str:
+    return {
+        "LOW": "niskie",
+        "MEDIUM": "umiarkowane",
+        "HIGH": "wysokie",
+        "CRITICAL": "krytyczne",
+    }.get((level or "").upper(), (level or "brak").lower())
+
+
+def _report_export_filename(file_name: str, suffix: str = "docx") -> str:
+    stem = Path(file_name or "audyt_xlsx").stem
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._") or "audyt_xlsx"
+    return f"raport_audytu_finansowego_{safe}_{datetime.now().strftime('%Y%m%d_%H%M')}.{suffix}"
+
+
+def _iter_high_priority_anomalies(report: dict) -> list[tuple[str, dict]]:
+    items: list[tuple[str, dict]] = []
+    for sheet_name, sheet_data in (report.get("sheets") or {}).items():
+        if not isinstance(sheet_data, dict):
+            continue
+        for anomaly in sheet_data.get("anomalies", []) or []:
+            if not isinstance(anomaly, dict):
+                continue
+            if (anomaly.get("severity") or "").upper() not in {"HIGH", "CRITICAL"}:
+                continue
+            items.append((sheet_name, anomaly))
+    return items
+
+
+def _build_financial_docx(report: dict) -> io.BytesIO:
+    import docx as _docx
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
+
+    doc = _docx.Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+
+    title = doc.add_heading("Raport z audytu finansowego XLSX", 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    file_meta = report.get("file_metadata") or {}
+    file_name = file_meta.get("name") or report.get("file_name") or "brak"
+    summary = report.get("summary") or {}
+    risk_level = _risk_label_pl(summary.get("risk_level", ""))
+    generated_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+    doc.add_paragraph(f"Data wygenerowania: {generated_at}")
+    doc.add_paragraph(f"Nazwa pliku źródłowego: {file_name}")
+    doc.add_paragraph(
+        f"Priorytet ogólny: {risk_level} | Formuł: {summary.get('total_formulas', 0)} | "
+        f"Silnych sygnałów: {sum(1 for _, anomaly in _iter_high_priority_anomalies(report) if anomaly)}"
+    )
+
+    doc.add_heading("Podsumowanie ryzyka", level=1)
+    logic_overview = report.get("logic_overview") or {}
+    doc.add_paragraph(
+        logic_overview.get("description")
+        or "Raport prezentuje tylko silne poszlaki wymagające dalszej weryfikacji."
+    )
+
+    high_priority = _iter_high_priority_anomalies(report)
+    doc.add_heading("Findings HIGH/CRITICAL", level=1)
+    if high_priority:
+        table = doc.add_table(rows=1, cols=5)
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        hdr[0].text = "Arkusz"
+        hdr[1].text = "Komórka"
+        hdr[2].text = "Typ"
+        hdr[3].text = "Severity"
+        hdr[4].text = "Opis"
+        for sheet_name, anomaly in high_priority[:20]:
+            row = table.add_row().cells
+            row[0].text = str(sheet_name)
+            row[1].text = str(anomaly.get("cell") or "—")
+            row[2].text = str(anomaly.get("label") or anomaly.get("type") or "anomaly")
+            row[3].text = str(anomaly.get("severity") or "—")
+            row[4].text = str(anomaly.get("message") or anomaly.get("impact") or "—")
+    else:
+        doc.add_paragraph("Brak findings HIGH/CRITICAL w przekazanym raporcie.")
+
+    ai_opinion = report.get("ai_forensic_opinion")
+    if isinstance(ai_opinion, dict):
+        doc.add_heading("Wniosek śledczy AI", level=1)
+        if ai_opinion.get("overall_assessment"):
+            doc.add_paragraph(str(ai_opinion["overall_assessment"]))
+        if ai_opinion.get("sheet_comment"):
+            doc.add_paragraph(str(ai_opinion["sheet_comment"]))
+        for item in ai_opinion.get("findings", []) or []:
+            fact = str(item.get("fact") or "").strip()
+            if not fact:
+                continue
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(f"Fakt: {fact}").bold = True
+            if item.get("intent"):
+                doc.add_paragraph(f"Możliwa intencja: {item['intent']}")
+            if item.get("expert_comment"):
+                doc.add_paragraph(f"Komentarz ekspercki: {item['expert_comment']}")
+            if item.get("next_check"):
+                doc.add_paragraph(f"Co sprawdzić dalej: {item['next_check']}")
+
+    doc.add_heading("Graf powiązań", level=1)
+    lineage_included = False
+    for sheet_name, sheet_data in (report.get("sheets") or {}).items():
+        if not isinstance(sheet_data, dict):
+            continue
+        lineage = sheet_data.get("lineage_graph") or {}
+        edges = lineage.get("edges") or []
+        nodes = lineage.get("nodes") or []
+        if not edges:
+            continue
+        lineage_included = True
+        doc.add_heading(str(sheet_name), level=2)
+        summary_block = lineage.get("summary") or {}
+        doc.add_paragraph(
+            f"Relacje: {summary_block.get('relation_count', len(edges))} | "
+            f"Węzły ukryte: {summary_block.get('hidden_node_count', 0)} | "
+            f"Silne findings: {summary_block.get('high_priority_findings', 0)}"
+        )
+        edge_table = doc.add_table(rows=1, cols=4)
+        edge_table.style = "Table Grid"
+        hdr = edge_table.rows[0].cells
+        hdr[0].text = "Źródło"
+        hdr[1].text = "Cel"
+        hdr[2].text = "Typ relacji"
+        hdr[3].text = "Powód"
+        for edge in edges[:12]:
+            row = edge_table.add_row().cells
+            row[0].text = str(edge.get("source") or "—")
+            row[1].text = str(edge.get("target") or "—")
+            row[2].text = str(edge.get("type") or "dependency")
+            row[3].text = str(edge.get("reason") or "—")
+        if nodes:
+            doc.add_paragraph("Węzły objęte grafem:")
+            node_table = doc.add_table(rows=1, cols=5)
+            node_table.style = "Table Grid"
+            hdr = node_table.rows[0].cells
+            hdr[0].text = "Węzeł"
+            hdr[1].text = "Typ"
+            hdr[2].text = "Ukryty"
+            hdr[3].text = "Severity"
+            hdr[4].text = "Wartość"
+            for node in nodes[:12]:
+                row = node_table.add_row().cells
+                row[0].text = str(node.get("label") or node.get("id") or "—")
+                row[1].text = str(node.get("type") or "node")
+                row[2].text = "tak" if node.get("hidden") else "nie"
+                row[3].text = str(node.get("severity") or "NONE")
+                row[4].text = str(node.get("value") if node.get("value") is not None else "—")
+    if not lineage_included:
+        doc.add_paragraph("Brak relacji do pokazania w grafie powiązań.")
+
+    doc.add_heading("Co sprawdzić dalej", level=1)
+    next_checks: list[str] = []
+    if isinstance(ai_opinion, dict):
+        for item in ai_opinion.get("findings", []) or []:
+            next_check = str(item.get("next_check") or "").strip()
+            if next_check and next_check not in next_checks:
+                next_checks.append(next_check)
+    for _, anomaly in high_priority:
+        recommendation = str(
+            anomaly.get("verification_target")
+            or anomaly.get("recommendation")
+            or ""
+        ).strip()
+        if recommendation and recommendation not in next_checks:
+            next_checks.append(recommendation)
+        if len(next_checks) >= 8:
+            break
+    if next_checks:
+        for item in next_checks[:8]:
+            doc.add_paragraph(item, style="List Bullet")
+    else:
+        doc.add_paragraph("Brak dodatkowych kroków weryfikacyjnych w przekazanym payloadzie.")
+
+    doc.add_heading("Zastrzeżenie", level=1)
+    doc.add_paragraph(
+        "Raport wskazuje poszlaki i nietypowe wzorce wymagające weryfikacji przez człowieka. "
+        "Nie przesądza winy, oszustwa ani odpowiedzialności prawnej."
+    )
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
 
 
 def _format_evidence_cell(sheet_name: str, cell: str) -> str:
@@ -2862,4 +3051,25 @@ def audit_financial_opinion():
         ai_forensic_opinion=normalized_opinion,
         evidence_summary=evidence_pack.get("summary", {}),
         provider=_FINANCIAL_AI_OPINION_PROVIDER,
+    )
+
+
+@financial_bp.route("/financial/export", methods=["POST"])
+def export_financial_report_docx():
+    payload = request.get_json(silent=True) or {}
+    report = payload.get("report") if isinstance(payload.get("report"), dict) else payload
+    if not isinstance(report, dict) or not isinstance(report.get("sheets"), dict):
+        return json_error("Brak payloadu raportu audytu finansowego.", status=400)
+
+    try:
+        buf = _build_financial_docx(report)
+    except Exception as exc:
+        logger.error("Financial DOCX export failed: %s", exc, exc_info=True)
+        return json_error(f"Błąd eksportu DOCX: {str(exc)[:200]}", status=500)
+
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=_report_export_filename(report.get("file_name") or (report.get("file_metadata") or {}).get("name") or "audyt_xlsx"),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )

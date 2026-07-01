@@ -56,11 +56,13 @@ def test_show_tab_registry_includes_financial():
     assert "financialLineageExplorer" in template
     assert "financialAiOpinion" in template
     assert "financialRunButton" in template
+    assert "downloadFinancialDocx" in template
     assert "handleFinancialFileSelection" in template
     assert "runFinancialAnalysis" in script
     assert "financialIsHighPriority" in script
     assert "renderFinancialLineageExplorer" in script
     assert "renderFinancialSheetLineage" in script
+    assert "downloadFinancialDocx" in script
     assert "loadFinancialOpinion" in script
     assert "renderFinancialOpinion" in script
 

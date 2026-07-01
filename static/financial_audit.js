@@ -787,4 +787,43 @@ function downloadFinancialReport() {
     URL.revokeObjectURL(url);
 }
 
+async function downloadFinancialDocx() {
+    if (!currentFinancialReport) {
+        alert('Brak raportu do eksportu');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/audit/financial/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ report: currentFinancialReport })
+        });
+
+        if (!response.ok) {
+            let errorMessage = 'Nie udało się wygenerować raportu DOCX.';
+            try {
+                const data = await response.json();
+                errorMessage = data.error || errorMessage;
+            } catch (_) {
+                // keep default message when server did not return JSON
+            }
+            throw new Error(errorMessage);
+        }
+
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get('Content-Disposition') || '';
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
+        const filename = filenameMatch ? filenameMatch[1] : 'raport_audytu_finansowego.docx';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        setFinancialStatus(`❌ Eksport DOCX nie powiódł się: ${financialEscape(error.message)}`, 'danger');
+    }
+}
+
 syncFinancialSelectionUi();
