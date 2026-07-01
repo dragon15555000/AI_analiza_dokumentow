@@ -13,6 +13,7 @@ import urllib.request
 
 import requests
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from utils.resource_guard import ensure_resources_available, safe_thread_count
 
 logger = logging.getLogger("ai_analiza")
 
@@ -55,6 +56,12 @@ EMBED_MODEL = "nomic-embed-text"
 OLLAMA_GPU_NUM: int | None = None
 OLLAMA_KEEP_ALIVE = None
 OLLAMA_NUM_CTX = None
+OLLAMA_NUM_THREAD = safe_thread_count(80)
+OLLAMA_CPU_LIMIT_PCT = 80
+OLLAMA_RAM_LIMIT_PCT = 80
+OLLAMA_DISK_LIMIT_PCT = 80
+OLLAMA_GPU_LIMIT_PCT = 80
+OLLAMA_MAX_CONCURRENT = 1
 
 GROQ_MODEL = None
 
@@ -68,6 +75,8 @@ CLAUDE_API_BASE = "https://api.anthropic.com/v1"
 _load_provider_pool_func = None
 _openrouter_rr_idx = 0
 _openrouter_rr_lock = threading.Lock()
+_openai_models_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_ollama_request_semaphore = threading.Semaphore(OLLAMA_MAX_CONCURRENT)
 
 
 def _set_load_provider_pool(func):
@@ -122,7 +131,9 @@ def _sync_llm_client_config(**kwargs):
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA, OPENROUTER_MAX_RETRIES
     global LLM_MODEL, GROQ_MODEL, DEFAULT_LLM_PROVIDER, EMBED_MODEL
     global ANTHROPIC_API_KEY, CLAUDE_MODEL, OLLAMA_GPU_NUM
-    global OLLAMA_KEEP_ALIVE, OLLAMA_NUM_CTX
+    global OLLAMA_KEEP_ALIVE, OLLAMA_NUM_CTX, OLLAMA_NUM_THREAD
+    global OLLAMA_CPU_LIMIT_PCT, OLLAMA_RAM_LIMIT_PCT, OLLAMA_DISK_LIMIT_PCT, OLLAMA_GPU_LIMIT_PCT
+    global OLLAMA_MAX_CONCURRENT, _ollama_request_semaphore
 
     GEMINI_API_KEY = kwargs.get("GEMINI_API_KEY", GEMINI_API_KEY)
     GEMINI_MODEL = _normalize_gemini_model(kwargs.get("GEMINI_MODEL", GEMINI_MODEL))
@@ -142,6 +153,15 @@ def _sync_llm_client_config(**kwargs):
     OLLAMA_GPU_NUM = kwargs.get("OLLAMA_GPU_NUM", OLLAMA_GPU_NUM)
     OLLAMA_KEEP_ALIVE = kwargs.get("OLLAMA_KEEP_ALIVE", OLLAMA_KEEP_ALIVE)
     OLLAMA_NUM_CTX = kwargs.get("OLLAMA_NUM_CTX", OLLAMA_NUM_CTX)
+    OLLAMA_NUM_THREAD = kwargs.get("OLLAMA_NUM_THREAD", OLLAMA_NUM_THREAD)
+    OLLAMA_CPU_LIMIT_PCT = kwargs.get("OLLAMA_CPU_LIMIT_PCT", OLLAMA_CPU_LIMIT_PCT)
+    OLLAMA_RAM_LIMIT_PCT = kwargs.get("OLLAMA_RAM_LIMIT_PCT", OLLAMA_RAM_LIMIT_PCT)
+    OLLAMA_DISK_LIMIT_PCT = kwargs.get("OLLAMA_DISK_LIMIT_PCT", OLLAMA_DISK_LIMIT_PCT)
+    OLLAMA_GPU_LIMIT_PCT = kwargs.get("OLLAMA_GPU_LIMIT_PCT", OLLAMA_GPU_LIMIT_PCT)
+    new_max_concurrent = kwargs.get("OLLAMA_MAX_CONCURRENT", OLLAMA_MAX_CONCURRENT)
+    if new_max_concurrent != OLLAMA_MAX_CONCURRENT:
+        OLLAMA_MAX_CONCURRENT = max(1, int(new_max_concurrent or 1))
+        _ollama_request_semaphore = threading.Semaphore(OLLAMA_MAX_CONCURRENT)
 
 
 def get_llm_provider(request_provider: str | None = None) -> str:
@@ -641,6 +661,7 @@ def _prepare_ollama_payload(
         "options": {
             "temperature": temperature if temperature is not None else 0.2,
             "num_ctx": OLLAMA_NUM_CTX,
+            "num_thread": OLLAMA_NUM_THREAD,
         },
     }
     if OLLAMA_GPU_NUM is not None:
@@ -651,14 +672,24 @@ def _prepare_ollama_payload(
 def _call_ollama(
     prompt: str, system: str, stream: bool, model: str, provider: str | None = None
 ) -> dict | requests.Response:
+    ok, reason, _snapshot = ensure_resources_available(
+        cpu_limit_pct=OLLAMA_CPU_LIMIT_PCT,
+        ram_limit_pct=OLLAMA_RAM_LIMIT_PCT,
+        disk_limit_pct=OLLAMA_DISK_LIMIT_PCT,
+        gpu_limit_pct=OLLAMA_GPU_LIMIT_PCT,
+        gpu_index=OLLAMA_GPU_NUM,
+    )
+    if not ok:
+        raise RuntimeError(f"Ollama wstrzymana ochronnie: {reason}")
     url = _ollama_url_for_provider(provider).rstrip("/") + "/api/generate"
     payload = _prepare_ollama_payload(model, prompt, system, stream, temperature=0.2)
-    if stream:
-        return requests.post(url, json=payload, stream=True, timeout=300)
-    else:
-        r = requests.post(url, json=payload, timeout=180)
-        r.raise_for_status()
-        return r.json()
+    with _ollama_request_semaphore:
+        if stream:
+            return requests.post(url, json=payload, stream=True, timeout=300)
+        else:
+            r = requests.post(url, json=payload, timeout=180)
+            r.raise_for_status()
+            return r.json()
 
 
 def _check_openrouter_health() -> dict:
@@ -1544,6 +1575,15 @@ def _call_custom_endpoint(
         return _call_openai_compatible(
             url, key, prompt, system, stream, model or LLM_MODEL, max_tokens, temperature
         )
+    ok, reason, _snapshot = ensure_resources_available(
+        cpu_limit_pct=OLLAMA_CPU_LIMIT_PCT,
+        ram_limit_pct=OLLAMA_RAM_LIMIT_PCT,
+        disk_limit_pct=OLLAMA_DISK_LIMIT_PCT,
+        gpu_limit_pct=OLLAMA_GPU_LIMIT_PCT,
+        gpu_index=OLLAMA_GPU_NUM,
+    )
+    if not ok:
+        raise RuntimeError(f"Ollama wstrzymana ochronnie: {reason}")
     url_clean = url.rstrip("/") + "/api/generate"
     headers = {}
     if key:
@@ -1555,12 +1595,13 @@ def _call_custom_endpoint(
         stream=stream,
         temperature=0.2,
     )
-    if stream:
-        return requests.post(url_clean, json=payload, headers=headers, stream=True, timeout=300)
-    else:
-        r = requests.post(url_clean, json=payload, headers=headers, timeout=180)
-        r.raise_for_status()
-        return r.json()
+    with _ollama_request_semaphore:
+        if stream:
+            return requests.post(url_clean, json=payload, headers=headers, stream=True, timeout=300)
+        else:
+            r = requests.post(url_clean, json=payload, headers=headers, timeout=180)
+            r.raise_for_status()
+            return r.json()
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -1695,8 +1736,56 @@ def _effective_custom_endpoint_model(ep_url: str, ep_name: str, model: str | Non
     if _custom_endpoint_is_groq(ep_url, ep_name):
         return raw or (GROQ_MODEL or "llama-3.3-70b-versatile").strip()
     if _custom_endpoint_is_openai(ep_url):
-        return raw or LLM_MODEL or "llama-3.3-70b-versatile"
+        return raw or _autodetect_openai_compatible_model(ep_url, ep_name) or LLM_MODEL or "llama-3.3-70b-versatile"
     return raw or LLM_MODEL or ""
+
+
+def _openai_models_url(base_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if base.endswith("/models"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/models"
+    return base + "/models"
+
+
+def _list_openai_compatible_models(base_url: str, key: str = "") -> list[str]:
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    response = requests.get(_openai_models_url(base_url), headers=headers, timeout=20)
+    response.raise_for_status()
+    data = response.json()
+    models = []
+    for item in data.get("data", []):
+        model_id = str(item.get("id") or "").strip()
+        if model_id:
+            models.append(model_id)
+    return sorted(dict.fromkeys(models))
+
+
+def _autodetect_openai_compatible_model(ep_url: str, ep_name: str = "") -> str:
+    cache_key = ((ep_url or "").rstrip("/"), (ep_name or "").strip())
+    now = time.time()
+    cached = _openai_models_cache.get(cache_key)
+    if cached and now - cached[0] < 300 and cached[1]:
+        return cached[1][0]
+
+    pool = _load_provider_pool()
+    endpoint_key = ""
+    for endpoint in pool.get("custom_endpoints", []):
+        if endpoint.get("url", "").rstrip("/") == cache_key[0]:
+            endpoint_key = endpoint.get("key", "")
+            break
+
+    try:
+        models = _list_openai_compatible_models(cache_key[0], endpoint_key)
+        if models:
+            _openai_models_cache[cache_key] = (now, models)
+            return models[0]
+    except Exception as exc:
+        logger.debug("Autodetekcja modeli OpenAI-compatible nieudana dla %s: %s", cache_key[0], exc)
+    return ""
 
 
 def call_llm(

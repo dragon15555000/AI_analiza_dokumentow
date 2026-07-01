@@ -555,8 +555,7 @@ table { margin: 0; }
     </div>
     <div class="topbar-ctrl-group">
         <select id="llmProviderSelect" onchange="onLlmProviderChange()">
-            <option value="openrouter">OpenRouter</option>
-            <option value="gemini">Gemini</option>
+            <option value="newapi_gate">NewAPI</option>
             <option value="ollama">Lokalny (Ollama)</option>
         </select>
         <span id="llmModelSeparator" style="color:rgba(255,255,255,0.2);">│</span>
@@ -575,17 +574,13 @@ table { margin: 0; }
         <input id="topbarLlmModel" type="text" placeholder="model (np. llama3)" class="ctrl-input"
                style="display:none; max-width:180px;" onchange="onTopbarLlmModelChange()"
                title="Nazwa modelu Ollama lub custom endpoint">
-        <select id="openaiModelSelect" onchange="onOpenaiModelSelectChange()" style="display:none; max-width:220px;">
+        <select id="openaiModelSelect" onchange="onOpenaiModelSelectChange()" style="display:none; max-width:260px;">
             <option value="">-- wybierz model --</option>
-            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (Groq)</option>
-            <option value="groq/compound">Groq Compound</option>
-            <option value="groq/compound-mini">Groq Compound Mini</option>
-            <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
-            <option value="custom">Własny model...</option>
+            <option value="loading">Ładowanie modeli z NewAPI…</option>
         </select>
         <input id="openaiModelInput" type="text" placeholder="np. llama-3.3-70b-versatile" class="ctrl-input"
                style="display:none; max-width:180px;" onchange="onOpenaiModelInputChange()"
-               title="Nazwa modelu OpenAI-compatible (Groq, LM Studio…)">
+               title="Awaryjne pole modelu NewAPI">
         <select id="claudeModelSelect" onchange="onClaudeModelSelectChange()" style="display:none; max-width:240px;">
             <option value="">-- wybierz model --</option>
             <option value="claude-sonnet-4-6">Claude Sonnet 4.6 ★ zalecany</option>
@@ -656,7 +651,7 @@ table { margin: 0; }
         <a class="nav-link" href="#" onclick="showTab('swarm'); return false;">🤖 Rój agentów</a>
     </li>
     <li class="nav-item">
-        <a class="nav-link" href="#" onclick="showTab('fleet'); return false;">⚡ Flota LLM</a>
+
     </li>
     <li class="nav-item">
         <a class="nav-link" href="#" onclick="showTab('tasks'); return false;">⚙️ Zadania w tle</a>
@@ -1909,150 +1904,6 @@ table { margin: 0; }
   </div>
 </div>
 
-<!-- TAB: FLOTA LLM -->
-<div id="tabFleet" class="main-wrap" style="display:none;">
-  <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
-    <div>
-      <h4 style="margin:0;font-weight:700;">⚡ Flota modeli LLM</h4>
-      <p class="small text-muted mb-0">Live status, ranking i inteligentny routing dla roju agentów.</p>
-    </div>
-    <div class="d-flex gap-2 flex-wrap">
-      <button class="btn btn-primary btn-sm" onclick="fleetPingAll()" id="fleetPingBtn">🔄 Sprawdź wszystkie</button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="fleetLoad()">↺ Odśwież dane</button>
-    </div>
-  </div>
-
-  <!-- Progress ping -->
-  <div id="fleetPingProgress" style="display:none;" class="mb-3">
-    <div class="d-flex align-items-center gap-2 mb-1">
-      <div class="spinner-border spinner-border-sm text-primary"></div>
-      <span class="small fw-semibold" id="fleetPingLabel">Pingowanie modeli…</span>
-    </div>
-    <div class="progress" style="height:4px;">
-      <div id="fleetPingBar" class="progress-bar progress-bar-striped progress-bar-animated"
-           style="width:0%;background:var(--c-accent);"></div>
-    </div>
-  </div>
-
-  <div id="fleetOrBanner" class="alert alert-warning py-2 px-3 small d-none mb-3"></div>
-
-  <!-- Karty modeli -->
-  <div id="fleetCards" class="row g-3 mb-4"></div>
-
-  <!-- Ranking tabela -->
-  <div class="search-card mb-4">
-    <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin-bottom:12px;">🏆 Ranking (szybkość × jakość × dostępność)</h5>
-    <div class="table-responsive">
-      <table class="table table-sm mb-0" id="fleetRankTable">
-        <thead>
-          <tr>
-            <th>#</th><th>Model</th><th>Wynik</th><th>Ping (ms)</th>
-            <th>Kontekst</th><th>RPM</th><th>Specjalizacje</th><th>Akcja</th>
-          </tr>
-        </thead>
-        <tbody id="fleetRankBody">
-          <tr><td colspan="8" class="text-center text-muted py-3">Kliknij "Sprawdź wszystkie" aby zmierzyć modele.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Zarządzanie dostawcami -->
-  <div class="search-card">
-    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
-      <div>
-        <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;">🔑 Dostawcy API</h5>
-        <p class="small text-muted mb-0">Dodaj wiele kluczy OpenRouter i adresów Ollama — rotacja round-robin.</p>
-      </div>
-      <button class="btn btn-outline-secondary btn-sm" onclick="providersLoad()">↺ Odśwież</button>
-    </div>
-
-    <!-- Domyślne (z .env) -->
-    <div id="providersDefaults" class="mb-3 p-2 rounded" style="background:var(--c-bg);border:1px solid var(--c-border);font-size:0.82rem;">
-      Wczytywanie…
-    </div>
-
-    <!-- Zakładki sekcji -->
-    <ul class="nav nav-pills nav-sm gap-1 mb-3" id="providersTabs">
-      <li class="nav-item"><a class="nav-link active py-1 px-2 small" href="#" onclick="providersShowSection('openrouter');return false;">OpenRouter</a></li>
-      <li class="nav-item"><a class="nav-link py-1 px-2 small" href="#" onclick="providersShowSection('ollama');return false;">Ollama / local</a></li>
-      <li class="nav-item"><a class="nav-link py-1 px-2 small" href="#" onclick="providersShowSection('custom');return false;">Custom endpoint</a></li>
-    </ul>
-
-    <!-- Sekcja OpenRouter -->
-    <div id="providersSectionOpenrouter">
-      <table class="table table-sm mb-2" id="providersTableOpenrouter">
-        <thead><tr><th>Nazwa</th><th>Klucz</th><th>Status</th><th style="width:130px;"></th></tr></thead>
-        <tbody id="providersBodyOpenrouter">
-          <tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych kluczy</td></tr>
-        </tbody>
-      </table>
-      <div class="d-flex gap-2 flex-wrap align-items-end">
-        <input type="text" id="providerOrName" class="form-control form-control-sm" style="width:130px;" placeholder="Nazwa (opcja)">
-        <input type="text" id="providerOrKey" class="form-control form-control-sm" style="flex:1;min-width:200px;" placeholder="sk-or-…  klucz API OpenRouter">
-        <button class="btn btn-primary btn-sm" onclick="providerAdd('openrouter_key')">+ Dodaj</button>
-      </div>
-    </div>
-
-    <!-- Sekcja Ollama -->
-    <div id="providersSectionOllama" style="display:none;">
-      <table class="table table-sm mb-2" id="providersTableOllama">
-        <thead><tr><th>Nazwa</th><th>URL</th><th>Status</th><th style="width:130px;"></th></tr></thead>
-        <tbody id="providersBodyOllama">
-          <tr><td colspan="4" class="text-muted small text-center py-2">Brak dodatkowych serwerów</td></tr>
-        </tbody>
-      </table>
-      <div class="d-flex gap-2 flex-wrap align-items-end">
-        <input type="text" id="providerOllamaName" class="form-control form-control-sm" style="width:130px;" placeholder="Nazwa (opcja)">
-        <input type="text" id="providerOllamaUrl" class="form-control form-control-sm" style="flex:1;min-width:200px;" placeholder="http://192.168.1.x:11434">
-        <button class="btn btn-primary btn-sm" onclick="providerAdd('ollama_url')">+ Dodaj</button>
-      </div>
-    </div>
-
-    <!-- Sekcja Custom -->
-    <div id="providersSectionCustom" style="display:none;">
-      <table class="table table-sm mb-2" id="providersTableCustom">
-        <thead><tr><th>Nazwa</th><th>URL</th><th>Status</th><th style="width:130px;"></th></tr></thead>
-        <tbody id="providersBodyCustom">
-          <tr><td colspan="4" class="text-muted small text-center py-2">Brak custom endpointów</td></tr>
-        </tbody>
-      </table>
-      <div class="d-flex gap-2 flex-wrap align-items-end">
-        <input type="text" id="providerCustomName" class="form-control form-control-sm" style="width:120px;" placeholder="Nazwa">
-        <input type="text" id="providerCustomUrl" class="form-control form-control-sm" style="flex:1;min-width:180px;" placeholder="Claude: https://api.anthropic.com/v1 · Groq: …/openai/v1">
-        <input type="text" id="providerCustomKey" class="form-control form-control-sm" style="width:160px;" placeholder="Klucz API (opcja)">
-        <button class="btn btn-primary btn-sm" onclick="providerAdd('custom_endpoint')">+ Dodaj</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="search-card mt-4" id="claude-test-panel">
-    <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap mb-3">
-      <div>
-        <h5 style="font-size:0.95rem;font-weight:700;color:var(--c-text);margin:0;">🤖 Test integracji - Claude Anthropic</h5>
-        <p class="small text-muted mb-0">
-          Wyślij szybkie zapytanie, aby sprawdzić czy nowy moduł <code>llm_client.py</code> odpowiada prawidłowo.
-        </p>
-      </div>
-      <span class="badge text-bg-light border small align-self-center">POST /claude_test</span>
-    </div>
-
-    <textarea
-      id="claudeTestMessage"
-      rows="3"
-      class="form-control mb-2"
-      style="resize:vertical;min-height:88px;"
-      placeholder="Napisz coś do Claude (np. 'Napisz krótką fraszkę o programowaniu w Pythonie')..."></textarea>
-
-    <div class="d-flex gap-2 align-items-center flex-wrap">
-      <button id="btnSendClaude" type="button" class="btn btn-primary btn-sm">Wyślij zapytanie</button>
-      <span class="small text-muted">Klucz Anthropic jest pobierany z aktualnej konfiguracji LLM.</span>
-    </div>
-
-    <div class="mt-3">
-      <strong style="color:var(--c-text);">Odpowiedź modelu:</strong>
-      <pre id="claudeTestResponse" class="mt-2 mb-0 p-3 rounded border" style="background:#fff;white-space:pre-wrap;min-height:72px;font-family:inherit;color:var(--c-text);">Czekam na zapytanie...</pre>
-    </div>
 </div>
 
 <div id="tabTasks" class="main-wrap" style="display:none;">
@@ -2114,7 +1965,20 @@ table { margin: 0; }
       <p style="margin:0;font-weight:600;">Kliknij lub upuść dokument Excel tutaj</p>
       <p class="small text-muted mb-0">Obsługiwane: .xlsx, .xls</p>
     </div>
-    <input type="file" id="financialFileInput" accept=".xlsx,.xls" style="display:none;" onchange="uploadFinancialFile(event)">
+    <input type="file" id="financialFileInput" accept=".xlsx,.xls" style="display:none;" onchange="handleFinancialFileSelection(event)">
+    <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+      <button id="financialRunButton" class="btn btn-primary btn-sm" type="button" onclick="runFinancialAnalysis()" disabled>GO</button>
+      <div id="financialSelectedFile" class="small text-muted">Najpierw wybierz plik.</div>
+    </div>
+    <div class="mt-3">
+      <label for="financialAnalysisMode" class="form-label small fw-semibold mb-1">Tryb analizy</label>
+      <select id="financialAnalysisMode" class="form-select form-select-sm" style="max-width:340px;">
+        <option value="quick">Szybki</option>
+        <option value="targeted" selected>Normalny (zalecany)</option>
+        <option value="full">Dokładny</option>
+      </select>
+      <div class="small text-muted mt-1">Szybki robi screening, normalny dogłębia tylko podejrzane miejsca, a dokładny rozwija pełny odczyt bez cofania do słabszego trybu.</div>
+    </div>
 
     <div id="financialUploadStatus" class="mt-3" style="display:none;"></div>
   </div>
@@ -2125,7 +1989,10 @@ table { margin: 0; }
       <button class="btn btn-outline-secondary btn-sm" onclick="downloadFinancialReport()">⬇ Pobierz JSON</button>
     </div>
 
+    <div id="financialMetadata" class="mb-4"></div>
     <div id="financialSummary" class="mb-4"></div>
+    <div id="financialLogic" class="mb-4"></div>
+    <div id="financialFlowExplorer" class="mb-4"></div>
     <div id="financialAnomalies" class="mb-4"></div>
     <div id="financialSheets"></div>
   </div>
@@ -2227,7 +2094,7 @@ function _suggestModelForTab(name) {
 
 function showTab(name) {
     // Ukrywamy WSZYSTKIE zakładki (w tym raporty)
-    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabAudit','tabSwarm','tabFleet','tabTasks'].forEach(id => {
+    ['tabSearch','tabDocs','tabAi','tabCompare','tabNetwork','tabTimeline','tabReports','tabSql','tabCollections','tabImport','tabAudit','tabSwarm','tabFleet','tabTasks','tabFinancial'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
@@ -2236,7 +2103,7 @@ function showTab(name) {
     document.querySelectorAll('.nav-tabs .nav-link').forEach(el => el.classList.remove('active'));
 
     // Poprawiona mapa indeksów zakładek
-    const map = {search:0, docs:1, ai:2, compare:3, network:4, timeline:5, reports:6, sql:7, collections:8, import:9, audit:10, swarm:11, fleet:12, tasks:13};
+    const map = {search:0, docs:1, ai:2, compare:3, network:4, timeline:5, reports:6, sql:7, collections:8, import:9, audit:10, swarm:11, fleet:12, tasks:13, financial:14};
     const tabs = document.querySelectorAll('.nav-tabs .nav-link');
     if (tabs[map[name]]) tabs[map[name]].classList.add('active');
 
@@ -4980,8 +4847,7 @@ function syncTopbarProviders(pool) {
     _poolOllamaProviders = {};
 
     const opts = [
-        { value: 'openrouter', label: 'OpenRouter' },
-        { value: 'gemini', label: 'Gemini' },
+        { value: 'newapi_gate', label: 'NewAPI' },
         { value: 'ollama', label: 'Lokalny (Ollama)' },
     ];
 
@@ -5010,7 +4876,7 @@ function syncTopbarProviders(pool) {
         const n = normalizeLlmProvider(v);
         return n && opts.some(o => o.value === n) ? n : null;
     };
-    sel.value = pick(current) || pick(localStorage.getItem('llm_provider')) || 'openrouter';
+    sel.value = pick(current) || pick(localStorage.getItem('llm_provider')) || 'newapi_gate';
     if (localStorage.getItem('llm_provider') === 'claude') {
         localStorage.setItem('llm_provider', 'openrouter');
     }
@@ -5043,8 +4909,10 @@ function isClaudeProvider(prov) {
 
 /** Claude wyłączony z topbara — stary wybór w localStorage → OpenRouter free. */
 function normalizeLlmProvider(prov) {
-    if (prov === 'claude') return 'openrouter';
-    return prov || 'openrouter';
+    if (!prov || prov === 'openrouter' || prov === 'gemini' || prov === 'claude' || prov === 'groq') {
+        return 'newapi_gate';
+    }
+    return prov;
 }
 
 function isOpenAiCustomProvider(prov) {
@@ -5186,6 +5054,41 @@ function getCurrentLlmProvider() {
     const sel = document.getElementById('llmProviderSelect');
     if (sel) return normalizeLlmProvider(sel.value);
     return normalizeLlmProvider(localStorage.getItem('llm_provider'));
+}
+
+async function fetchModelsForProvider(providerId) {
+    const sel = document.getElementById('openaiModelSelect');
+    if (!sel) return;
+    if (sel.dataset.loading === providerId) return;
+    sel.dataset.loading = providerId;
+    sel.innerHTML = '<option value="loading">Ładowanie modeli z NewAPI…</option>';
+    try {
+        const r = await fetch(`/api/providers/${providerId}/models`);
+        const d = await r.json();
+        if (d.success && d.models) {
+            sel.innerHTML = '<option value="">-- wybierz model --</option>';
+            d.models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                sel.appendChild(opt);
+            });
+            sel.innerHTML += '<option value="custom">Własny model...</option>';
+            // Restore saved model if any
+            const saved = localStorage.getItem('openai_model');
+            if (saved && d.models.includes(saved)) {
+                sel.value = saved;
+            } else if (d.default_model) {
+                sel.value = d.default_model;
+            }
+        } else {
+            sel.innerHTML = '<option value="">Błąd ładowania</option><option value="custom">Wpisz ręcznie...</option>';
+        }
+    } catch (e) {
+        sel.innerHTML = '<option value="">Błąd połączenia</option><option value="custom">Wpisz ręcznie...</option>';
+    } finally {
+        delete sel.dataset.loading;
+    }
 }
 
 function getCurrentLlmModel() {
@@ -5349,6 +5252,10 @@ function onLlmProviderChange() {
     }
     refreshFavoriteModelOptions();
     updateActiveLlmBadge();
+    if (isOpenAiCustomProvider(sel.value)) {
+        fetchModelsForProvider(sel.value);
+    }
+
 
     const badge = sel.parentElement;
     badge.style.transition = 'all 0.2s';
@@ -5462,6 +5369,9 @@ function restoreLlmProvider() {
     syncLlmModelPickerVisibility();
     refreshFavoriteModelOptions();
     updateActiveLlmBadge();
+    if (isOpenAiCustomProvider(sel.value)) {
+        fetchModelsForProvider(sel.value);
+    }
 }
 
 const LLM_FAVORITES_KEY = 'llm_favorite_models_v1';
@@ -8725,7 +8635,7 @@ async function cancelTaskUi(taskId) {
   </div>
 </div>
 
-<script src="{{ url_for('static', filename='financial_audit.js') }}"></script>
+<script src="{{ url_for('static', filename='financial_audit.js', v=asset_version) }}"></script>
 
 </body>
 </html>

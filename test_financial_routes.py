@@ -53,9 +53,11 @@ class TestFinancialRoutes(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertIn("Sheet1", result["sheets"])
-        self.assertEqual(len(result["sheets"]["Sheet1"]), 2)
+        self.assertIn("workbook", result)
+        self.assertEqual(result["sheets"]["Sheet1"]["sheet_state"], "visible")
+        self.assertEqual(len(result["sheets"]["Sheet1"]["formulas"]), 2)
 
-        formulas = result["sheets"]["Sheet1"]
+        formulas = result["sheets"]["Sheet1"]["formulas"]
         self.assertEqual(formulas[0]["formula"], "=A2*B2")
         self.assertEqual(formulas[1]["formula"], "=A3*B3")
 
@@ -77,6 +79,18 @@ class TestFinancialRoutes(unittest.TestCase):
         summary = analyzer.get_summary()
         self.assertEqual(summary["total_formulas"], 2)
         self.assertEqual(summary["risk_level"], "LOW")
+
+    def test_detects_cosmetic_check_formula(self):
+        """Test: wykryj formułę, która tylko udaje kontrolę."""
+        from financial_audit import AuditAnalyzer, CellRef
+
+        analyzer = AuditAnalyzer()
+        analyzer.add_cell(CellRef("Kontrola", "C", 2), '=IF(A2=A2,"OK","BŁĄD")')
+        analyzer.build_dependency_graph()
+        analyzer.detect_anomalies()
+
+        anomaly_types = [anomaly["type"] for anomaly in analyzer.anomalies]
+        self.assertIn("cosmetic_check", anomaly_types)
 
 
 if __name__ == "__main__":

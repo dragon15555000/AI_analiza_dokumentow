@@ -1,6 +1,8 @@
 import pytest
 
 def test_import_smoke():
+    import routes.admin_routes
+    import routes.diagnostics_routes
     import sql_safety
     import prompts
     import llm_client

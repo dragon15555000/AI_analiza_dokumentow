@@ -58,6 +58,8 @@ from sql_safety import (
     sanitize_user_question,
 )
 from task_queue import cancel_task, get_task, get_task_status, submit_task, update_task
+from utils.http import json_error, json_success, sse_event, sse_response
+from utils.resource_guard import ensure_resources_available, safe_thread_count
 from werkzeug.utils import secure_filename
 
 import llm_client
@@ -723,18 +725,19 @@ app.config.update(
     MAX_CONTENT_LENGTH=_MAX_UPLOAD_MB * 1024 * 1024,
 )
 
+from routes.admin_routes import admin_bp
+from routes.diagnostics_routes import diagnostics_bp
 from routes.main_routes import main_bp
 from routes.financial_routes import financial_bp
+app.register_blueprint(admin_bp)
+app.register_blueprint(diagnostics_bp)
 app.register_blueprint(main_bp)
 app.register_blueprint(financial_bp)
 
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
-    return (
-        jsonify({"error": f"Plik zbyt duży. Maksymalny rozmiar: {_MAX_UPLOAD_MB} MB."}),
-        413,
-    )
+    return json_error(f"Plik zbyt duży. Maksymalny rozmiar: {_MAX_UPLOAD_MB} MB.", status=413)
 
 
 def _sanitize_upload_filename(filename: str) -> str:
@@ -761,6 +764,43 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLM_MODEL = os.environ.get("LLM_MODEL", "llama3")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 OCR_LANG = os.environ.get("OCR_LANG", "pol+eng")
+
+# Zoptymalizowana konfiguracja Ollama dla GPU
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "-1")
+try:
+    OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
+except ValueError:
+    OLLAMA_NUM_CTX = 16384
+
+try:
+    OLLAMA_GPU_NUM_VAL = os.environ.get("OLLAMA_GPU_NUM")
+    OLLAMA_GPU_NUM = int(OLLAMA_GPU_NUM_VAL) if OLLAMA_GPU_NUM_VAL is not None else None
+except ValueError:
+    OLLAMA_GPU_NUM = None
+try:
+    OLLAMA_NUM_THREAD = int(os.environ.get("OLLAMA_NUM_THREAD", str(safe_thread_count(80))))
+except ValueError:
+    OLLAMA_NUM_THREAD = safe_thread_count(80)
+try:
+    OLLAMA_MAX_CONCURRENT = max(1, int(os.environ.get("OLLAMA_MAX_CONCURRENT", "1")))
+except ValueError:
+    OLLAMA_MAX_CONCURRENT = 1
+try:
+    OLLAMA_CPU_LIMIT_PCT = max(10, min(95, int(os.environ.get("OLLAMA_CPU_LIMIT_PCT", "80"))))
+except ValueError:
+    OLLAMA_CPU_LIMIT_PCT = 80
+try:
+    OLLAMA_RAM_LIMIT_PCT = max(10, min(95, int(os.environ.get("OLLAMA_RAM_LIMIT_PCT", "80"))))
+except ValueError:
+    OLLAMA_RAM_LIMIT_PCT = 80
+try:
+    OLLAMA_DISK_LIMIT_PCT = max(10, min(95, int(os.environ.get("OLLAMA_DISK_LIMIT_PCT", "80"))))
+except ValueError:
+    OLLAMA_DISK_LIMIT_PCT = 80
+try:
+    OLLAMA_GPU_LIMIT_PCT = max(10, min(95, int(os.environ.get("OLLAMA_GPU_LIMIT_PCT", "80"))))
+except ValueError:
+    OLLAMA_GPU_LIMIT_PCT = 80
 
 # OpenRouter
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -844,6 +884,7 @@ IMPORT_CLEANUP_TTL_DAYS = int(os.environ.get("IMPORT_CLEANUP_TTL_DAYS", "7"))
 
 import threading
 _ocr_semaphore = threading.Semaphore(IMPORT_MAX_CONCURRENT_OCR)
+_ollama_semaphore = threading.Semaphore(OLLAMA_MAX_CONCURRENT)
 
 # Anthropic Claude (bezpośrednie API)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
@@ -875,18 +916,44 @@ def _load_provider_pool() -> dict:
 
     # Klucz z env — NIGDY nie hardkoduj w kodzie
     newapi_key = os.environ.get("NEW_API_GATEWAY_KEY", "").strip()
+    newapi_url = os.environ.get("NEW_API_GATEWAY_URL", "http://127.0.0.1:3000/v1").strip().rstrip("/")
+    newapi_name = os.environ.get("NEW_API_GATEWAY_NAME", "NewAPI Gateway").strip() or "NewAPI Gateway"
     if newapi_key:
         customs = pool.setdefault("custom_endpoints", [])
         has_newapi = any(e.get("id") == "newapi_gate" for e in customs)
         if not has_newapi:
             customs.append({
                 "id": "newapi_gate",
-                "name": "new-api Gateway (:3000)",
-                "url": "http://127.0.0.1:3000/v1",
+                "name": newapi_name,
+                "url": newapi_url,
                 "key": newapi_key,
                 "active": True
             })
     return pool
+
+
+def _newapi_endpoint(pool: dict | None = None) -> dict | None:
+    pool = pool or _load_provider_pool()
+    for entry in pool.get("custom_endpoints", []):
+        if entry.get("id") == "newapi_gate":
+            return entry
+    return None
+
+
+def _normalize_llm_provider_choice(provider: str | None) -> str:
+    raw = (provider or "").strip()
+    pool = _load_provider_pool()
+    newapi = _newapi_endpoint(pool)
+    if raw in {"", "openrouter", "gemini", "claude", "groq"}:
+        return newapi.get("id", "ollama") if newapi and newapi.get("active", True) else "ollama"
+    if raw == "ollama" or raw.startswith("ollama:"):
+        return raw
+    if newapi and raw == newapi.get("id"):
+        return raw
+    return newapi.get("id", "ollama") if newapi and newapi.get("active", True) else "ollama"
+
+
+DEFAULT_LLM_PROVIDER = _normalize_llm_provider_choice(DEFAULT_LLM_PROVIDER)
 
 
 def _save_provider_pool(pool: dict) -> None:
@@ -935,6 +1002,15 @@ llm_client._sync_llm_client_config(
     DEFAULT_LLM_PROVIDER=DEFAULT_LLM_PROVIDER,
     ANTHROPIC_API_KEY=ANTHROPIC_API_KEY,
     CLAUDE_MODEL=CLAUDE_MODEL,
+    OLLAMA_KEEP_ALIVE=OLLAMA_KEEP_ALIVE,
+    OLLAMA_NUM_CTX=OLLAMA_NUM_CTX,
+    OLLAMA_GPU_NUM=OLLAMA_GPU_NUM,
+    OLLAMA_NUM_THREAD=OLLAMA_NUM_THREAD,
+    OLLAMA_MAX_CONCURRENT=OLLAMA_MAX_CONCURRENT,
+    OLLAMA_CPU_LIMIT_PCT=OLLAMA_CPU_LIMIT_PCT,
+    OLLAMA_RAM_LIMIT_PCT=OLLAMA_RAM_LIMIT_PCT,
+    OLLAMA_DISK_LIMIT_PCT=OLLAMA_DISK_LIMIT_PCT,
+    OLLAMA_GPU_LIMIT_PCT=OLLAMA_GPU_LIMIT_PCT,
 )
 
 _HEAVY_TASK_HISTORY_LIMIT = 20
@@ -1759,9 +1835,10 @@ def _apply_llm_config(cfg: dict):
     global OPENROUTER_MODEL_VERIFY, OPENROUTER_FALLBACK_TO_OLLAMA
     global OLLAMA_URL, LLM_MODEL, APP_API_KEY, GEMINI_MODEL, GEMINI_API_KEY
     global ANTHROPIC_API_KEY, CLAUDE_MODEL
+    global OLLAMA_KEEP_ALIVE, OLLAMA_NUM_CTX, OLLAMA_GPU_NUM, OLLAMA_NUM_THREAD
 
     if cfg.get("provider"):
-        DEFAULT_LLM_PROVIDER = cfg["provider"]
+        DEFAULT_LLM_PROVIDER = _normalize_llm_provider_choice(cfg["provider"])
     if cfg.get("openrouter_key"):
         OPENROUTER_API_KEY = cfg["openrouter_key"]
     if cfg.get("openrouter_model"):
@@ -1778,6 +1855,23 @@ def _apply_llm_config(cfg: dict):
         GEMINI_MODEL = _normalize_gemini_model(cfg["gemini_model"])
     if cfg.get("gemini_api_key"):
         GEMINI_API_KEY = cfg["gemini_api_key"]
+    if "ollama_keep_alive" in cfg:
+        OLLAMA_KEEP_ALIVE = str(cfg["ollama_keep_alive"])
+    if "ollama_num_ctx" in cfg:
+        try:
+            OLLAMA_NUM_CTX = int(cfg["ollama_num_ctx"])
+        except ValueError:
+            pass
+    if "ollama_gpu_num" in cfg:
+        try:
+            OLLAMA_GPU_NUM = int(cfg["ollama_gpu_num"]) if cfg["ollama_gpu_num"] is not None else None
+        except ValueError:
+            pass
+    if "ollama_num_thread" in cfg:
+        try:
+            OLLAMA_NUM_THREAD = max(1, int(cfg["ollama_num_thread"]))
+        except ValueError:
+            pass
 
     APP_API_KEY = _effective_app_api_key(cfg)
 
@@ -1793,6 +1887,15 @@ def _apply_llm_config(cfg: dict):
         GEMINI_API_KEY=GEMINI_API_KEY,
         ANTHROPIC_API_KEY=ANTHROPIC_API_KEY,
         CLAUDE_MODEL=CLAUDE_MODEL,
+        OLLAMA_KEEP_ALIVE=OLLAMA_KEEP_ALIVE,
+        OLLAMA_NUM_CTX=OLLAMA_NUM_CTX,
+        OLLAMA_GPU_NUM=OLLAMA_GPU_NUM,
+        OLLAMA_NUM_THREAD=OLLAMA_NUM_THREAD,
+        OLLAMA_MAX_CONCURRENT=OLLAMA_MAX_CONCURRENT,
+        OLLAMA_CPU_LIMIT_PCT=OLLAMA_CPU_LIMIT_PCT,
+        OLLAMA_RAM_LIMIT_PCT=OLLAMA_RAM_LIMIT_PCT,
+        OLLAMA_DISK_LIMIT_PCT=OLLAMA_DISK_LIMIT_PCT,
+        OLLAMA_GPU_LIMIT_PCT=OLLAMA_GPU_LIMIT_PCT,
     )
 
 
@@ -1811,22 +1914,30 @@ def get_llm_config():
         return auth
 
     cfg = _load_llm_config()
-    env_gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    pool = _load_provider_pool()
+    newapi = _newapi_endpoint(pool)
+    raw_provider = (cfg.get("provider") or DEFAULT_LLM_PROVIDER or "").strip()
+    provider_for_ui = raw_provider or _normalize_llm_provider_choice(DEFAULT_LLM_PROVIDER)
 
     # Zawsze zwracamy tylko flagi "czy klucz jest ustawiony" — nigdy preview kluczy
     return jsonify(
         {
             "success": True,
-            "provider": cfg.get("provider", DEFAULT_LLM_PROVIDER),
+            "provider": provider_for_ui,
             "ollama_url": cfg.get("ollama_url", OLLAMA_URL),
             "llm_model": cfg.get("llm_model", LLM_MODEL),
-            "gemini_model": cfg.get("gemini_model", GEMINI_MODEL),
             "openrouter_model": cfg.get("openrouter_model", OPENROUTER_MODEL),
             "openrouter_model_verify": cfg.get("openrouter_model_verify", OPENROUTER_MODEL_VERIFY),
-            "openrouter_fallback": cfg.get("openrouter_fallback", OPENROUTER_FALLBACK_TO_OLLAMA),
-            # Bezpieczne flagi zamiast podglądów kluczy
-            "openrouter_key_set": bool(cfg.get("openrouter_key")),
-            "gemini_key_set": bool(cfg.get("gemini_api_key") or env_gemini_key or GEMINI_API_KEY),
+            "openrouter_key_set": bool(cfg.get("openrouter_key") or OPENROUTER_API_KEY),
+            "openrouter_fallback_to_ollama": cfg.get(
+                "openrouter_fallback_to_ollama",
+                OPENROUTER_FALLBACK_TO_OLLAMA,
+            ),
+            "gemini_model": cfg.get("gemini_model", GEMINI_MODEL),
+            "gemini_api_key_set": bool(cfg.get("gemini_api_key") or GEMINI_API_KEY),
+            "newapi_provider_id": newapi.get("id") if newapi else None,
+            "newapi_configured": bool(newapi and newapi.get("key") and newapi.get("url")),
+            "newapi_url": newapi.get("url") if newapi else None,
             "app_api_key_set": bool(_effective_app_api_key(cfg)),
             "app_api_key_source": "env" if APP_API_KEY_ENV else None,
         }
@@ -1848,10 +1959,14 @@ def save_llm_config():
         "provider",
         "ollama_url",
         "llm_model",
-        "gemini_model",
         "openrouter_model",
         "openrouter_model_verify",
-        "openrouter_fallback",
+        "openrouter_fallback_to_ollama",
+        "gemini_model",
+        "ollama_keep_alive",
+        "ollama_num_ctx",
+        "ollama_gpu_num",
+        "ollama_num_thread",
     ]
 
     for k in allowed:
@@ -1859,10 +1974,10 @@ def save_llm_config():
             current[k] = data[k]
 
     # Klucze — zapisujemy tylko jeśli użytkownik je podał (nie nadpisujemy pustymi)
-    if data.get("openrouter_key"):
-        current["openrouter_key"] = data["openrouter_key"]
-    if data.get("gemini_api_key"):
-        current["gemini_api_key"] = data["gemini_api_key"]
+    if "openrouter_key" in data and str(data.get("openrouter_key", "")).strip():
+        current["openrouter_key"] = str(data["openrouter_key"]).strip()
+    if "gemini_api_key" in data and str(data.get("gemini_api_key", "")).strip():
+        current["gemini_api_key"] = str(data["gemini_api_key"]).strip()
     current.pop("app_api_key", None)
 
     _save_llm_config(current)
@@ -1881,30 +1996,20 @@ def get_llm_provider(request_provider: str | None = None) -> str:
     if request_provider:
         p = request_provider.strip()
         pl = p.lower()
-        if pl == "openrouter":
-            return "openrouter"
-        if pl == "gemini":
-            return "gemini"
-        if pl == "claude":
-            return "claude"
         if pl == "ollama" or pl.startswith("ollama:"):
-            return "ollama"
+            return _normalize_llm_provider_choice(p)
         pool = _load_provider_pool()
-        for endpoint in pool.get("custom_endpoints", []):
-            if endpoint.get("id") == p and endpoint.get("active", True):
-                return p
-    return DEFAULT_LLM_PROVIDER
+        newapi = _newapi_endpoint(pool)
+        if newapi and p == newapi.get("id") and newapi.get("active", True):
+            return p
+    return _normalize_llm_provider_choice(DEFAULT_LLM_PROVIDER)
 
 
 def _effective_llm_model(provider: str | None = None) -> str:
     """Model pokazywany w diagnostyce dla aktywnego providera."""
-    prov = (provider or DEFAULT_LLM_PROVIDER or "").strip().lower()
-    if prov == "openrouter":
-        return OPENROUTER_MODEL
-    if prov == "gemini":
-        return GEMINI_MODEL
-    if prov == "groq":
-        return GROQ_MODEL
+    prov = _normalize_llm_provider_choice(provider or DEFAULT_LLM_PROVIDER)
+    if prov == "newapi_gate":
+        return "auto"
     return LLM_MODEL
 
 
@@ -2374,6 +2479,35 @@ def _openai_chat_completions_url(base_url: str) -> str:
     return base + "/chat/completions"
 
 
+def _openai_models_url(base_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if base.endswith("/models"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/models"
+    return base + "/models"
+
+
+def _list_openai_compatible_models(base_url: str, key: str = "") -> tuple[bool, list[str], str | None]:
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        r = requests.get(_openai_models_url(base_url), headers=headers, timeout=20)
+        if r.status_code != 200:
+            return False, [], (r.text or f"HTTP {r.status_code}")[:200]
+        data = r.json()
+        models = []
+        for item in data.get("data", []):
+            model_id = str(item.get("id") or "").strip()
+            if model_id:
+                models.append(model_id)
+        models = sorted(dict.fromkeys(models))
+        return True, models, None
+    except Exception as exc:
+        return False, [], str(exc)[:200]
+
+
 def _stream_openai_compatible(
     url: str,
     key: str,
@@ -2704,19 +2838,41 @@ def get_embedding(text: str) -> list:
         logger.warning(f"Błąd odczytu cache embeddingów: {e}")
 
     # 2. Jeśli nie ma w cache, odpytaj Ollamę (z retry przy Connection reset)
+    ok, reason, _snapshot = ensure_resources_available(
+        cpu_limit_pct=OLLAMA_CPU_LIMIT_PCT,
+        ram_limit_pct=OLLAMA_RAM_LIMIT_PCT,
+        disk_limit_pct=OLLAMA_DISK_LIMIT_PCT,
+        gpu_limit_pct=OLLAMA_GPU_LIMIT_PCT,
+        gpu_index=OLLAMA_GPU_NUM,
+    )
+    if not ok:
+        raise RuntimeError(f"Ollama embeddings wstrzymane ochronnie: {reason}")
     url = OLLAMA_URL + "/api/embeddings"
-    payload = {"model": EMBED_MODEL, "prompt": text[:1500]}
+    
+    keep_alive_val = OLLAMA_KEEP_ALIVE
+    if isinstance(keep_alive_val, str):
+        try:
+            keep_alive_val = int(keep_alive_val)
+        except ValueError:
+            pass
+            
+    payload = {
+        "model": EMBED_MODEL,
+        "prompt": text[:1500],
+        "keep_alive": keep_alive_val,
+    }
 
     for attempt in range(4):  # max 4 próby
         try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=45) as r:
-                vec = json.loads(r.read().decode("utf-8"))["embedding"]
+            with _ollama_semaphore:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    vec = json.loads(r.read().decode("utf-8"))["embedding"]
 
             # 3. Zapisz nowy wektor natychmiast do bazy SQLite
             try:
@@ -3095,7 +3251,7 @@ def verify_endpoint():
     llm_provider = data.get("llm_provider")
     openrouter_model = data.get("openrouter_model")
     if not answer or not query or not contexts:
-        return jsonify({"success": False, "error": "Brak danych do weryfikacji"})
+        return json_error("Brak danych do weryfikacji")
     # Przekazujemy provider, żeby weryfikacja też szła przez wybrany model (w tym osobny model_verify)
     result = verify_answer(answer, contexts, query, provider=llm_provider, model=openrouter_model)
     return jsonify(result)
@@ -3727,11 +3883,9 @@ def create_collection():
     switch = data.get("switch_to", False)
 
     if not name:
-        return jsonify({"success": False, "error": "Brak nazwy kolekcji"})
+        return json_error("Brak nazwy kolekcji", status=200)
     if not name.replace("_", "").replace("-", "").isalnum():
-        return jsonify(
-            {"success": False, "error": "Nazwa może zawierać tylko litery, cyfry, _ i -"}
-        )
+        return json_error("Nazwa może zawierać tylko litery, cyfry, _ i -", status=200)
 
     try:
         from qdrant_client.models import Distance, VectorParams
@@ -3741,7 +3895,7 @@ def create_collection():
 
         client = get_qdrant_client()
         if client.collection_exists(name):
-            return jsonify({"success": False, "error": f"Kolekcja '{name}' już istnieje"})
+            return json_error(f"Kolekcja '{name}' już istnieje", status=200)
 
         client.create_collection(name, vectors_config=VectorParams(size=vec_size, distance=dist))
 
@@ -3753,11 +3907,9 @@ def create_collection():
             _docs_cache["data"] = None
             _COLLECTION_PROFILE_CACHE.clear()
 
-        return jsonify(
-            {"success": True, "name": name, "switched": switch, "active": ACTIVE_COLLECTION}
-        )
+        return json_success(name=name, switched=switch, active=ACTIVE_COLLECTION)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return json_error(str(e), status=200)
 
 
 @app.route("/collections/switch", methods=["POST"])
@@ -3766,20 +3918,20 @@ def switch_collection():
     data = request.get_json()
     name = data.get("name", "").strip()
     if not name:
-        return jsonify({"success": False, "error": "Brak nazwy"})
+        return json_error("Brak nazwy", status=200)
     try:
         client = get_qdrant_client()
         if not client.collection_exists(name):
-            return jsonify({"success": False, "error": f"Kolekcja '{name}' nie istnieje"})
+            return json_error(f"Kolekcja '{name}' nie istnieje", status=200)
         ACTIVE_COLLECTION = name
         _persist_active_collection(name)
         _qdrant_client = None  # Reset połączenia po zmianie kolekcji
         _suggestions_cache["data"] = None
         _docs_cache["data"] = None
         _COLLECTION_PROFILE_CACHE.clear()
-        return jsonify({"success": True, "active_collection": ACTIVE_COLLECTION})
+        return json_success(active_collection=ACTIVE_COLLECTION)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return json_error(str(e), status=200)
 
 
 @app.route("/collections/delete", methods=["POST"])
@@ -3788,21 +3940,19 @@ def delete_collection():
     data = request.get_json()
     name = data.get("name", "").strip()
     if not name:
-        return jsonify({"success": False, "error": "Brak nazwy"})
+        return json_error("Brak nazwy", status=200)
     if name == ACTIVE_COLLECTION:
-        return jsonify(
-            {
-                "success": False,
-                "error": "Nie można usunąć aktywnej kolekcji. Najpierw przełącz się na inną.",
-            }
+        return json_error(
+            "Nie można usunąć aktywnej kolekcji. Najpierw przełącz się na inną.",
+            status=200,
         )
     try:
         client = get_qdrant_client()
         client.delete_collection(name)
         _qdrant_client = None  # Reset połączenia po usunięciu kolekcji
-        return jsonify({"success": True})
+        return json_success()
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return json_error(str(e), status=200)
 
 
 @app.route("/browse", methods=["GET"])
@@ -3929,40 +4079,30 @@ def browse_pick_folder():
     initial = (data.get("initial") or "").strip()
     try:
         if platform.system() == "Windows":
-            return jsonify(
-                {
-                    "success": False,
-                    "error": "Dialog Windows działa z WSL — uruchom aplikację w WSL i otwórz UI w przeglądarce Windows.",
-                }
-            ), 400
+            return json_error(
+                "Dialog Windows działa z WSL — uruchom aplikację w WSL i otwórz UI w przeglądarce Windows.",
+                status=400,
+            )
         wsl_path = _pick_windows_folder(initial)
         if not wsl_path:
-            return jsonify({"success": False, "error": "Anulowano lub nie wybrano folderu"})
+            return json_error("Anulowano lub nie wybrano folderu", status=200)
         p = Path(wsl_path).expanduser()
         try:
             p = p.resolve()
         except OSError:
             pass
         if not p.is_dir():
-            return jsonify({"success": False, "error": f"Folder nie istnieje: {wsl_path}"})
+            return json_error(f"Folder nie istnieje: {wsl_path}", status=200)
         if not _path_is_allowed(p):
             roots_hint = ", ".join(str(r) for r in _resolve_allowed_roots()[:5])
-            return jsonify(
-                {
-                    "success": False,
-                    "error": f"Folder poza SEARCH_ROOTS. Dozwolone: {roots_hint}",
-                    "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
-                }
+            return json_error(
+                f"Folder poza SEARCH_ROOTS. Dozwolone: {roots_hint}",
+                status=200,
+                allowed_roots=[str(r) for r in _resolve_allowed_roots()],
             )
-        return jsonify(
-            {
-                "success": True,
-                "path": str(p),
-                "win_path": wsl_to_win(str(p)),
-            }
-        )
+        return json_success(path=str(p), win_path=wsl_to_win(str(p)))
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return json_error(str(e), status=200)
 
 
 # ============================================================
@@ -3982,36 +4122,30 @@ def api_drives():
         default_path = str(_default_browse_path())
         for drive in drives:
             drive["win_path"] = wsl_to_win(drive.get("path", ""))
-        return jsonify(
-            {
-                "success": True,
-                "platform": platform.system(),
-                "drives": drives,
-                "default_path": default_path,
-                "default_win_path": wsl_to_win(default_path),
-                "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
-            }
+        return json_success(
+            platform=platform.system(),
+            drives=drives,
+            default_path=default_path,
+            default_win_path=wsl_to_win(default_path),
+            allowed_roots=[str(r) for r in _resolve_allowed_roots()],
         )
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return json_error(str(e), status=200)
 
 
 @app.route("/tasks", methods=["GET"])
 def tasks_status():
     """Pobierz status wszystkich tasków (queued, running, finished)."""
     status = get_task_status()
-    return jsonify(
-        {
-            "success": True,
-            "queued": [t.to_dict() for t in status["queued"]],
-            "running": [t.to_dict() for t in status["running"]],
-            "finished": [t.to_dict() for t in status["finished"]],
-            "stats": {
-                "total_queued": len(status["queued"]),
-                "total_running": len(status["running"]),
-                "total_finished": len(status["finished"]),
-            },
-        }
+    return json_success(
+        queued=[t.to_dict() for t in status["queued"]],
+        running=[t.to_dict() for t in status["running"]],
+        finished=[t.to_dict() for t in status["finished"]],
+        stats={
+            "total_queued": len(status["queued"]),
+            "total_running": len(status["running"]),
+            "total_finished": len(status["finished"]),
+        },
     )
 
 
@@ -4020,17 +4154,17 @@ def task_detail(task_id: str):
     """Pobierz szczegóły jednego taska."""
     task = get_task(task_id)
     if not task:
-        return jsonify({"success": False, "error": "Task not found"}), 404
-    return jsonify({"success": True, "task": task.to_dict()})
+        return json_error("Task not found", status=404)
+    return json_success(task=task.to_dict())
 
 
 @app.route("/tasks/<task_id>", methods=["DELETE"])
 def task_cancel(task_id: str):
     """Anuluj task (jeśli queued) lub oznacz jako cancelled (jeśli running)."""
     cancelled = cancel_task(task_id)
-    return jsonify(
-        {"success": cancelled, "message": "Task cancelled" if cancelled else "Task not found"}
-    )
+    if cancelled:
+        return json_success(message="Task cancelled")
+    return json_error("Task not found", status=200, message="Task not found")
 
 
 @app.route("/tasks/<task_id>/stream", methods=["GET"])
@@ -4038,11 +4172,6 @@ def task_stream(task_id: str):
     """SSE stream z live updates dla jednego taska."""
 
     def generate():
-        def sse(event: str, data: dict) -> str:
-            import json as _json
-
-            return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
-
         last_sent = {"progress_pct": -1, "done": -1, "status": ""}
         max_idle_iterations = 0
 
@@ -4050,7 +4179,7 @@ def task_stream(task_id: str):
             try:
                 task = get_task(task_id)
                 if not task:
-                    yield sse("error", {"msg": "Task not found"})
+                    yield sse_event("error", {"msg": "Task not found", "error": "Task not found"})
                     break
 
                 # Sprawdź czy coś się zmieniło
@@ -4066,11 +4195,11 @@ def task_stream(task_id: str):
                     last_sent["done"] = task.done
                     last_sent["status"] = task.status.value
 
-                    yield sse("update", task.to_dict())
+                    yield sse_event("update", task.to_dict())
 
                     # Jeśli task się skończył, wyślij done event
                     if task.status.value in ["completed", "failed", "cancelled"]:
-                        yield sse("done", {"status": task.status.value, "error": task.error})
+                        yield sse_event("done", {"status": task.status.value, "error": task.error})
                         break
                 else:
                     max_idle_iterations += 1
@@ -4079,14 +4208,10 @@ def task_stream(task_id: str):
 
             except Exception as e:
                 logger.error(f"task_stream error: {e}")
-                yield sse("error", {"msg": str(e)[:200]})
+                yield sse_event("error", {"msg": str(e)[:200], "error": str(e)[:200]})
                 break
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return sse_response(generate())
 
 
 def _generate_file_summary_helper(text: str, file_name: str) -> str:
@@ -4697,12 +4822,9 @@ def hybrid_stream():
     openrouter_model = data.get("openrouter_model")
 
     if not query_text:
-        return jsonify({"success": False, "error": "Zapytanie puste"}), 400
+        return json_error("Zapytanie puste", status=400)
 
     def generate():
-        def sse(event, d):
-            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
-
         try:
             # 1. RAG — Qdrant query
             client = get_qdrant_client()
@@ -4711,10 +4833,10 @@ def hybrid_stream():
                     client, query_text, limit, file_filter, mode
                 )
             except EmbeddingError as e:
-                yield sse("error", {"error": str(e)})
+                yield sse_event("error", {"error": str(e)})
                 return
 
-            yield sse("rag_results", {"results": rag_results, "contexts": rag_contexts})
+            yield sse_event("rag_results", {"results": rag_results, "contexts": rag_contexts})
 
             # 2. SQL — jeśli konfiguracja dostępna (z pełnymi guardami bezpieczeństwa)
             sql_data = {"success": False, "table": "", "columns": [], "rows": [], "sql": ""}
@@ -4756,7 +4878,7 @@ def hybrid_stream():
 
             # 3. LLM synteza — łączy RAG + SQL
             if not rag_contexts:
-                yield sse("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
+                yield sse_event("done", {"ai_answer": "Brak dokumentów w bazie RAG."})
                 return
 
             rag_cap = 10 if mode == "detective" else 5
@@ -4808,15 +4930,15 @@ def hybrid_stream():
                         or token.startswith("[FALLBACK]")
                     ):
                         logger.warning(f"LLM stream error (hybrid): {token[:120]}")
-                        yield sse(
+                        yield sse_event(
                             "error", {"error": token, "provider": get_llm_provider(llm_provider)}
                         )
                         return
                     full_answer += token
-                    yield sse("token", {"token": token})
+                    yield sse_event("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error: {e}")
-                yield sse("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
+                yield sse_event("error", {"error": f"Błąd streamingu LLM: {str(e)}"})
 
             done_payload = {"ai_answer": full_answer}
             if llm_meta:
@@ -4825,16 +4947,12 @@ def hybrid_stream():
                 done_payload["llm_fallback_used"] = llm_meta.get("fallback_used", False)
                 if llm_meta.get("fallback_reason"):
                     done_payload["llm_fallback_reason"] = llm_meta.get("fallback_reason")
-            yield sse("done", done_payload)
+            yield sse_event("done", done_payload)
 
         except Exception as e:
-            yield sse("error", {"error": str(e)})
+            yield sse_event("error", {"error": str(e)})
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return sse_response(generate())
 
 
 @app.route("/search/stream", methods=["POST"])
@@ -4849,7 +4967,7 @@ def search_stream():
         logger.warning("Prompt injection attempt detected in chat/RAG query: %r", raw_query_text[:100])
 
     if not query_text:
-        return jsonify({"success": False, "error": "Zapytanie puste"})
+        return json_error("Zapytanie puste", status=200)
     chat_context = (data.get("chat_context") or "").strip()
     limit = min(int(data.get("limit", 5)), 20)
     file_filter = data.get("file_filter", None)
@@ -4859,9 +4977,6 @@ def search_stream():
         mode = "normal"
 
     def generate():
-        def sse(event, d):
-            return f"event: {event}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n"
-
         try:
             client = get_qdrant_client()
             try:
@@ -4869,11 +4984,11 @@ def search_stream():
                     client, query_text, limit, file_filter, mode
                 )
             except EmbeddingError as e:
-                yield sse("error", {"error": str(e)})
+                yield sse_event("error", {"error": str(e)})
                 return
 
             # Wyślij wyniki od razu
-            yield sse(
+            yield sse_event(
                 "results",
                 {
                     "results": results,
@@ -4884,7 +4999,7 @@ def search_stream():
             )
 
             if not raw_contexts:
-                yield sse("done", {"ai_answer": "Brak dokumentów."})
+                yield sse_event("done", {"ai_answer": "Brak dokumentów."})
                 return
 
             prompt, system = _build_search_prompt(
@@ -4911,15 +5026,15 @@ def search_stream():
                     ):
                         # Czysty błąd zamiast zaśmiecania odpowiedzi
                         logger.warning(f"LLM stream error (search): {token[:120]}")
-                        yield sse(
+                        yield sse_event(
                             "error", {"error": token, "provider": get_llm_provider(llm_provider)}
                         )
                         return
                     full_answer += token
-                    yield sse("token", {"token": token})
+                    yield sse_event("token", {"token": token})
             except Exception as e:
                 logger.warning(f"LLM stream error w search_stream: {e}")
-                yield sse("error", {"error": "Błąd streamingu modelu językowego."})
+                yield sse_event("error", {"error": "Błąd streamingu modelu językowego."})
 
             done_payload = {"ai_answer": full_answer}
             approx_tokens = max(1, int(len(full_answer) / 3.5))
@@ -4930,16 +5045,12 @@ def search_stream():
                 done_payload["llm_fallback_used"] = llm_meta.get("fallback_used", False)
                 if llm_meta.get("fallback_reason"):
                     done_payload["llm_fallback_reason"] = llm_meta.get("fallback_reason")
-            yield sse("done", done_payload)
+            yield sse_event("done", done_payload)
 
         except Exception as e:
-            yield sse("error", {"error": str(e)})
+            yield sse_event("error", {"error": str(e)})
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return sse_response(generate())
 
 
 @app.route("/search", methods=["POST"])
@@ -5998,328 +6109,30 @@ def _format_openrouter_ping_error(status: int, body: str) -> str:
     return f"OpenRouter HTTP {status}"
 
 
-def _openrouter_fleet_unhealthy() -> bool:
-    """True gdy ostatni ping wskazuje na martwy klucz / brak kredytów OpenRouter."""
-    if not OPENROUTER_API_KEY:
-        return True
-    bad_markers = ("401", "402", "403", "user not found", "payment", "invalid", "unauthorized")
-    checked = 0
-    failed = 0
-    for mid in MODEL_REGISTRY:
-        live = _model_live.get(mid, {})
-        if live.get("ping_ok") is None:
-            continue
-        checked += 1
-        if live.get("ping_ok") is False:
-            err = (live.get("ping_err") or "").lower()
-            if any(x in err for x in bad_markers):
-                failed += 1
-    return checked > 0 and failed >= max(1, checked // 2)
-
-
-def _swarm_is_custom_endpoint(model_id: str) -> bool:
-    pool = _load_provider_pool()
-    for ep in pool.get("custom_endpoints", []):
-        if ep.get("id") == model_id and ep.get("active", True):
-            return True
-    return False
-
-
-def _swarm_online_custom_endpoints(limit: int = 6) -> list[tuple[str, str]]:
-    """Custom endpointy z Floty (pomija te z ostatnim ping_ok=False)."""
-    stats_all = _load_custom_endpoint_stats()
-    out: list[tuple[str, str]] = []
-    for eid, name in _get_best_custom_endpoints_wrapper(limit=limit):
-        st = stats_all.get(eid, {})
-        if st.get("ping_ok") is False:
-            continue
-        out.append((eid, name))
-    return out
+def _require_api_key():
+    """Weryfikuje klucz API jeśli APP_API_KEY jest ustawiony."""
+    if not APP_API_KEY_ENV:
+        return None
+    key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    if key != APP_API_KEY_ENV:
+        return jsonify({"success": False, "error": "Brak lub błędny klucz API"}), 401
+    return None
 
 
 @app.route("/api/models/registry", methods=["GET"])
 def models_registry_endpoint():
-    """Zwraca rejestr modeli + live statystyki + custom endpointy."""
+    """Zwraca rejestr modeli — uproszczony do NewAPI i Ollama."""
+    pool = _load_provider_pool()
+    newapi = _newapi_endpoint(pool)
     out = {}
-    for mid, info in MODEL_REGISTRY.items():
-        live = _model_live.get(mid, {})
-        out[mid] = {**info, "live": live, "score": _model_score(mid)}
-
-    pool = _load_provider_pool()
-    all_custom_stats = _load_custom_endpoint_stats()
-    for endpoint in pool.get("custom_endpoints", []):
-        if not endpoint.get("active"):
-            continue
-        eid = endpoint.get("id")
-        stats = all_custom_stats.get(
-            eid,
-            {
-                "ping_ok": None,
-                "ping_ms": None,
-                "ping_ts": None,
-                "err_count": 0,
-                "ok_count": 0,
-                "avg_ms": None,
-            },
-        )
+    if newapi and newapi.get("active", True):
+        eid = newapi.get("id", "newapi_gate")
         out[eid] = {
-            "kind": "custom_endpoint",
-            "name": endpoint.get("name", endpoint.get("url")),
-            "short": endpoint.get("name", "Custom")[:20],
-            "provider": "Custom",
+            "name": newapi.get("name", "NewAPI Gateway"),
+            "provider": "newapi",
             "icon": "🔌",
-            "context_k": 128,
-            "speed_tier": 2,
-            "quality_tier": 2,
-            "free": True,
-            "rate_rpm": 60,
-            "rate_day": 1000,
-            "tags": ["custom", "swarm"],
-            "url": endpoint.get("url"),
-            "live": stats,
-            "score": _custom_endpoint_score(eid),
         }
-
-    return jsonify(
-        {"success": True, "models": out, "openrouter_unhealthy": _openrouter_fleet_unhealthy()}
-    )
-
-
-@app.route("/api/llm/fleet", methods=["GET"])
-def llm_fleet_endpoint():
-    """Kompatybilny endpoint floty LLM używany przez testy i starszy frontend."""
-    task = request.args.get("task", "general").strip() or "general"
-    models_payload = models_registry_endpoint().get_json() or {}
-    models = models_payload.get("models") or {}
-    providers = []
-    for model_id, info in models.items():
-        providers.append(
-            {
-                "id": model_id,
-                "model_id": model_id,
-                "name": info.get("name") or info.get("short") or model_id,
-                "provider": info.get("provider", ""),
-                "score": info.get("score", 0),
-                "ping_ms": (info.get("live") or {}).get("avg_ms")
-                or (info.get("live") or {}).get("ping_ms"),
-                "ping_ok": (info.get("live") or {}).get("ping_ok"),
-                "context_k": info.get("context_k"),
-                "rate_rpm": info.get("rate_rpm"),
-                "rate_day": info.get("rate_day"),
-                "tags": info.get("tags", []),
-            }
-        )
-    providers.sort(key=lambda item: item.get("score") or 0, reverse=True)
-    return jsonify(
-        {
-            "success": True,
-            "task": task,
-            "auto_route": bool(_load_llm_config().get("fleet_auto_route", False)),
-            "providers": providers,
-            "models": models,
-        }
-    )
-
-
-@app.route("/api/models/ping/all", methods=["POST"])
-def models_ping_all():
-    """SSE: pinguje wszystkie modele + custom endpointy równolegle i streamuje wyniki."""
-    _require_api_key()
-    TEST = "Odpowiedz jednym słowem: OK"
-    pool = _load_provider_pool()
-    custom_endpoints = [e for e in pool.get("custom_endpoints", []) if e.get("active")]
-    total_count = len(MODEL_REGISTRY) + len(custom_endpoints)
-
-    def generate():
-        import json as _json
-
-        def sse(event, data):
-            payload = {"event": event, "data": data}
-            return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        yield sse("start", {"count": total_count})
-
-        def _ping_model(mid: str):
-            t0 = time.time()
-            try:
-                with _FLEET_PING_SEMAPHORE:
-                    r = requests.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {_pick_openrouter_key()}",
-                            "Content-Type": "application/json",
-                            "HTTP-Referer": "http://localhost",
-                            "X-Title": "AI Analiza Dokumentów",
-                        },
-                        json={
-                            "model": mid,
-                            "messages": [{"role": "user", "content": TEST}],
-                            "max_tokens": 5,
-                            "temperature": 0.0,
-                        },
-                        timeout=30,
-                    )
-                ms = int((time.time() - t0) * 1000)
-                if r.status_code != 200:
-                    err = _format_openrouter_ping_error(r.status_code, r.text or "")
-                    return ("model", mid, False, ms, err)
-                txt = _llm_response_text(r.json())
-                ok = bool(txt and not txt.startswith("["))
-                return ("model", mid, ok, ms, None if ok else "Pusta odpowiedź modelu")
-            except Exception as exc:
-                return ("model", mid, False, int((time.time() - t0) * 1000), str(exc)[:160])
-
-        def _ping_custom(
-            endpoint_id: str, endpoint_url: str, endpoint_key: str, endpoint_name: str
-        ):
-            t0 = time.time()
-            try:
-                health = _check_custom_endpoint_health(endpoint_url, endpoint_key, endpoint_name)
-                ms = int(health.get("ms") or ((time.time() - t0) * 1000))
-                ok = bool(health.get("ok"))
-                return ("custom", endpoint_id, ok, ms, health.get("error"))
-            except Exception as exc:
-                ms = int((time.time() - t0) * 1000)
-                return ("custom", endpoint_id, False, ms, str(exc)[:120])
-
-        ping_jobs = [(_ping_model, (mid,)) for mid in MODEL_REGISTRY]
-        ping_jobs.extend(
-            [
-                (_ping_custom, (e["id"], e["url"], e.get("key", ""), e.get("name", "")))
-                for e in custom_endpoints
-            ]
-        )
-
-        done = 0
-        max_workers = min(12, max(1, total_count))
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(fn, *args) for fn, args in ping_jobs]
-            try:
-                completed_futures = as_completed(futures, timeout=90)
-                for fut in completed_futures:
-                    try:
-                        kind, eid, ok, ms, err = fut.result()
-                    except Exception as exc:
-                        yield sse(
-                            "result",
-                            {
-                                "kind": "model",
-                                "model_id": "?",
-                                "ok": False,
-                                "ms": 0,
-                                "err": str(exc)[:120],
-                                "score": 0,
-                                "avg_ms": None,
-                            },
-                        )
-                        done += 1
-                        continue
-
-                    if kind == "model":
-                        live = _model_live[eid]
-                        live["ping_ok"] = ok
-                        live["ping_ms"] = ms
-                        live["ping_ts"] = time.time()
-                        live["ping_err"] = None if ok else (err or "Błąd ping")
-                        if ok:
-                            live["ok_count"] += 1
-                            prev = live.get("avg_ms")
-                            live["avg_ms"] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
-                        else:
-                            live["err_count"] += 1
-                        _save_model_live_stats(_model_live)
-                        score = _model_score(eid)
-                        live_copy = dict(live)
-                        yield sse(
-                            "result",
-                            {
-                                "kind": "model",
-                                "model_id": eid,
-                                "ok": ok,
-                                "ms": ms,
-                                "err": err,
-                                "score": score,
-                                "avg_ms": live_copy.get("avg_ms"),
-                            },
-                        )
-                    elif kind == "custom":
-                        all_stats = _load_custom_endpoint_stats()
-                        stats = all_stats.get(
-                            eid,
-                            {
-                                "ping_ok": None,
-                                "ping_ms": None,
-                                "ping_ts": None,
-                                "err_count": 0,
-                                "ok_count": 0,
-                                "avg_ms": None,
-                            },
-                        )
-                        stats["ping_ok"] = ok
-                        stats["ping_ms"] = ms
-                        stats["ping_ts"] = time.time()
-                        if ok:
-                            stats["ok_count"] += 1
-                            prev = stats.get("avg_ms")
-                            stats["avg_ms"] = ms if prev is None else int(prev * 0.7 + ms * 0.3)
-                        else:
-                            stats["err_count"] += 1
-                        all_stats[eid] = stats
-                        _save_custom_endpoint_stats(all_stats)
-                        yield sse(
-                            "result",
-                            {
-                                "kind": "custom",
-                                "endpoint_id": eid,
-                                "ok": ok,
-                                "ms": ms,
-                                "err": err,
-                                "avg_ms": stats.get("avg_ms"),
-                            },
-                        )
-                    done += 1
-            except FuturesTimeoutError:
-                for fut in futures:
-                    fut.cancel()
-                yield sse("timeout", {})
-
-        yield sse("done", {"pinged": done})
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.route("/api/models/recommend", methods=["GET"])
-def models_recommend():
-    """Zwraca ranking modeli dla zadanego typu zadania i min. kontekstu."""
-    task = request.args.get("task", "analysis")
-    ctx_k = int(request.args.get("context_k", 8))
-    task_tags = {
-        "analysis": ["analiza", "prawo", "raporty", "rozumowanie"],
-        "speed": ["szybkość", "krótkie_pytania", "klasyfikacja"],
-        "data": ["dane_strukturalne", "tabele", "ekstrakcja"],
-        "long": ["bardzo_długi_kontekst", "długi_kontekst"],
-    }.get(task, [])
-    ranked = []
-    for mid, info in MODEL_REGISTRY.items():
-        if info.get("context_k", 0) < ctx_k:
-            continue
-        base = _model_score(mid)
-        bonus = sum(4 for t in info.get("tags", []) if t in task_tags)
-        ranked.append(
-            {
-                "model_id": mid,
-                "name": info["name"],
-                "icon": info["icon"],
-                "score": round(base + bonus, 1),
-            }
-        )
-    ranked.sort(key=lambda x: x["score"], reverse=True)
-    return jsonify({"success": True, "ranked": ranked[:5], "task": task})
-
+    return jsonify({"success": True, "models": out})
 
 # ===== PROVIDER POOL API =====
 
@@ -6328,44 +6141,30 @@ def models_recommend():
 def providers_list():
     """Lista wszystkich skonfigurowanych dostawców."""
     pool = _load_provider_pool()
-    # Maskuj klucze API — pokaż tylko ostatnie 6 znaków
-    safe = json.loads(json.dumps(pool))
-    for entry in safe.get("openrouter_keys", []):
-        k = entry.get("key", "")
-        entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
-        del entry["key"]
-    for entry in safe.get("custom_endpoints", []):
-        k = entry.get("key", "")
-        entry["key_masked"] = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
-        entry["api_type"] = (
-            "gemini"
-            if _custom_endpoint_is_gemini(entry.get("url", ""), entry.get("name", ""))
-            else "anthropic"
-            if _custom_endpoint_is_anthropic(entry.get("url", ""), entry.get("name", ""))
-            else "openai"
-            if _custom_endpoint_is_openai(entry.get("url", ""))
-            else "ollama"
-        )
-        if "key" in entry:
-            del entry["key"]
-    pool_or = [e for e in pool.get("openrouter_keys", []) if e.get("active")]
-    pool_ol = [e for e in pool.get("ollama_urls", []) if e.get("active")]
-    # effective = wpisy w .providers.json albo fallback z .env (gdy pula UI pusta)
-    safe["defaults"] = {
-        "openrouter_key_set": bool(OPENROUTER_API_KEY),
-        "ollama_url": OLLAMA_URL,
-        "gemini_key_set": bool(GEMINI_API_KEY),
-        "gemini_model": GEMINI_MODEL,
-        "claude_key_set": bool(ANTHROPIC_API_KEY),
-        "claude_model": CLAUDE_MODEL,
-        "pool_active_keys": len(pool_or),
-        "pool_active_ollamas": len(pool_ol),
-        "active_keys": len(pool_or) if pool_or else (1 if OPENROUTER_API_KEY else 0),
-        "active_ollamas": len(pool_ol) if pool_ol else (1 if OLLAMA_URL else 0),
-        "using_env_fallback_or": not pool_or and bool(OPENROUTER_API_KEY),
-        "using_env_fallback_ollama": not pool_ol and bool(OLLAMA_URL),
-    }
-    return jsonify({"success": True, "pool": safe})
+    newapi = _newapi_endpoint(pool)
+    
+    customs = []
+    if newapi and newapi.get("active", True):
+        k = newapi.get("key", "")
+        masked = ("*" * max(0, len(k) - 6)) + k[-6:] if k else ""
+        customs.append({
+            "id": newapi.get("id", "newapi_gate"),
+            "name": newapi.get("name", "NewAPI Gateway"),
+            "url": newapi.get("url", ""),
+            "key_masked": masked,
+            "api_type": "openai",
+            "active": True
+        })
+
+    ollamas = [e for e in pool.get("ollama_urls", []) if e.get("active")]
+    
+    return jsonify({
+        "success": True,
+        "pool": {
+            "custom_endpoints": customs,
+            "ollama_urls": ollamas
+        }
+    })
 
 
 @app.route("/api/providers", methods=["POST"])
@@ -6374,52 +6173,26 @@ def providers_add():
     if not _is_local_request():
         return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
     data = request.get_json() or {}
-    ptype = data.get("type")  # openrouter_key | ollama_url | custom_endpoint
-    if ptype not in ("openrouter_key", "ollama_url", "custom_endpoint"):
-        return jsonify({"success": False, "error": "Nieznany typ dostawcy"})
+    ptype = data.get("type")
+    if ptype != "ollama_url":
+        return jsonify({"success": False, "error": "Możesz dodać tylko dodatkowe serwery Ollama"}), 400
 
     import uuid
 
     pool = _load_provider_pool()
     entry_id = str(uuid.uuid4())[:8]
 
-    if ptype == "openrouter_key":
-        key = (data.get("key") or "").strip()
-        if not key:
-            return jsonify({"success": False, "error": "Brak klucza API"})
-        pool.setdefault("openrouter_keys", []).append(
-            {
-                "id": entry_id,
-                "name": data.get("name", f"Konto {entry_id}"),
-                "key": key,
-                "active": True,
-            }
-        )
-    elif ptype == "ollama_url":
-        url = (data.get("url") or "").strip().rstrip("/")
-        if not url:
-            return jsonify({"success": False, "error": "Brak adresu URL"})
-        pool.setdefault("ollama_urls", []).append(
-            {
-                "id": entry_id,
-                "name": data.get("name", url),
-                "url": url,
-                "active": True,
-            }
-        )
-    elif ptype == "custom_endpoint":
-        url = (data.get("url") or "").strip().rstrip("/")
-        if not url:
-            return jsonify({"success": False, "error": "Brak adresu URL"})
-        pool.setdefault("custom_endpoints", []).append(
-            {
-                "id": entry_id,
-                "name": data.get("name", url),
-                "url": url,
-                "key": data.get("key", ""),
-                "active": True,
-            }
-        )
+    url = (data.get("url") or "").strip().rstrip("/")
+    if not url:
+        return jsonify({"success": False, "error": "Brak adresu URL"})
+    pool.setdefault("ollama_urls", []).append(
+        {
+            "id": entry_id,
+            "name": data.get("name", url),
+            "url": url,
+            "active": True,
+        }
+    )
 
     _save_provider_pool(pool)
     return jsonify({"success": True, "id": entry_id})
@@ -6432,7 +6205,9 @@ def providers_delete(entry_id: str):
         return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
     pool = _load_provider_pool()
     removed = False
-    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+    if entry_id == "newapi_gate":
+        return jsonify({"success": False, "error": "Wbudowanego provider NewAPI nie można usunąć"}), 400
+    for section in ("ollama_urls", "custom_endpoints"):
         before = len(pool.get(section, []))
         pool[section] = [e for e in pool.get(section, []) if e.get("id") != entry_id]
         if len(pool[section]) < before:
@@ -6449,9 +6224,11 @@ def providers_toggle(entry_id: str):
     if not _is_local_request():
         return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
     pool = _load_provider_pool()
-    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+    for section in ("ollama_urls", "custom_endpoints"):
         for entry in pool.get(section, []):
             if entry.get("id") == entry_id:
+                if entry_id == "newapi_gate":
+                    return jsonify({"success": False, "error": "Provider NewAPI ma być stale aktywny"}), 400
                 entry["active"] = not entry.get("active", True)
                 _save_provider_pool(pool)
                 return jsonify({"success": True, "active": entry["active"]})
@@ -6464,7 +6241,7 @@ def providers_test(entry_id: str):
     pool = _load_provider_pool()
     entry = None
     ptype = None
-    for section in ("openrouter_keys", "ollama_urls", "custom_endpoints"):
+    for section in ("ollama_urls", "custom_endpoints"):
         for e in pool.get(section, []):
             if e.get("id") == entry_id:
                 entry = e
@@ -6473,27 +6250,15 @@ def providers_test(entry_id: str):
 
     if not entry:
         # Może to być test domyślnego
-        if entry_id == "default_openrouter":
-            entry = {"key": OPENROUTER_API_KEY}
-            ptype = "openrouter_keys"
-        elif entry_id == "default_ollama":
+        if entry_id == "default_ollama":
             entry = {"url": OLLAMA_URL}
             ptype = "ollama_urls"
-        elif entry_id == "default_gemini":
-            ok, message, ms = _test_gemini_api(GEMINI_API_KEY)
-            return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
-        elif entry_id == "default_claude":
-            ok, message, ms = _test_claude_api(ANTHROPIC_API_KEY)
-            return jsonify({"success": ok, "ms": ms, "error": None if ok else message})
         else:
             return jsonify({"success": False, "error": "Nie znaleziono"}), 404
 
     t0 = time.time()
     try:
-        if ptype == "openrouter_keys":
-            key = entry.get("key", "")
-            return jsonify(_test_openrouter_api_key(key))
-        elif ptype == "ollama_urls":
+        if ptype == "ollama_urls":
             url = entry.get("url", "").rstrip("/")
             key = entry.get("key", "")
             headers = {}
@@ -6506,25 +6271,12 @@ def providers_test(entry_id: str):
             url = entry.get("url", "").rstrip("/")
             key = entry.get("key", "")
             name = entry.get("name", "") or entry.get("label", "")
-            if _custom_endpoint_is_gemini(url, name):
-                health = _check_custom_endpoint_health(url, key, name)
-                return jsonify(
-                    {
-                        "success": bool(health.get("ok")),
-                        "ms": health.get("ms", 0),
-                        "error": health.get("error"),
-                    }
-                )
-            if _custom_endpoint_is_anthropic(url, name):
-                health = _check_custom_endpoint_health(url, key, name)
-                return jsonify(
-                    {
-                        "success": bool(health.get("ok")),
-                        "ms": health.get("ms", 0),
-                        "error": health.get("error"),
-                    }
-                )
-            elif _custom_endpoint_is_openai(url):
+            if _custom_endpoint_is_openai(url):
+                ok, models, list_error = _list_openai_compatible_models(url, key)
+                if not ok:
+                    return jsonify({"success": False, "ms": int((time.time() - t0) * 1000), "error": list_error})
+                if not models:
+                    return jsonify({"success": False, "ms": int((time.time() - t0) * 1000), "error": "Brak modeli w NewAPI"})
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
@@ -6532,7 +6284,7 @@ def providers_test(entry_id: str):
                     _openai_chat_completions_url(url),
                     headers=headers,
                     json={
-                        "model": "llama-3.3-70b-versatile",
+                        "model": models[0],
                         "messages": [{"role": "user", "content": "Say: OK"}],
                         "max_tokens": 5,
                     },
@@ -6544,90 +6296,44 @@ def providers_test(entry_id: str):
                         "success": r.status_code == 200,
                         "ms": ms,
                         "status": r.status_code,
+                        "model": models[0],
+                        "models_count": len(models),
                         "error": None if r.status_code == 200 else r.text[:200],
                     }
                 )
             else:
-                headers = {}
-                if key:
-                    headers["Authorization"] = f"Bearer {key}"
-                r = requests.get(f"{url}/api/tags", headers=headers, timeout=8)
-                ms = int((time.time() - t0) * 1000)
-                return jsonify({"success": r.status_code == 200, "ms": ms, "status": r.status_code})
+                return jsonify({"success": False, "ms": 0, "error": "Obsługiwane są tylko Ollama i NewAPI"}), 400
     except Exception as exc:
         ms = int((time.time() - t0) * 1000)
         return jsonify({"success": False, "ms": ms, "error": str(exc)[:200]})
 
 
-@app.route("/claude_test", methods=["POST"])
-def claude_test():
-    """Krótki test integracji Claude Anthropic przez llm_client."""
-    auth = _require_api_key()
-    if auth:
-        return auth
-
-    data = request.get_json(silent=True) or {}
-    message = (data.get("message") or "").strip()
-    system = (data.get("system") or "").strip() or (
-        "Jesteś pomocnym asystentem. Odpowiadaj po polsku, zwięźle i konkretnie."
+@app.route("/api/providers/<entry_id>/models", methods=["GET"])
+def providers_models(entry_id: str):
+    pool = _load_provider_pool()
+    entry = None
+    for e in pool.get("custom_endpoints", []):
+        if e.get("id") == entry_id:
+            entry = e
+            break
+    if not entry:
+        return jsonify({"success": False, "error": "Nie znaleziono providera"}), 404
+    url = entry.get("url", "").rstrip("/")
+    if not _custom_endpoint_is_openai(url):
+        return jsonify({"success": False, "error": "Lista modeli jest obsługiwana tylko dla NewAPI"}), 400
+    ok, models, error = _list_openai_compatible_models(url, entry.get("key", ""))
+    if not ok:
+        return jsonify({"success": False, "error": error or "Nie udało się pobrać modeli"}), 502
+    return jsonify(
+        {
+            "success": True,
+            "provider_id": entry_id,
+            "models": models,
+            "default_model": models[0] if models else None,
+        }
     )
-    model = (data.get("model") or "").strip() or None
 
-    if not message:
-        return jsonify(
-            {
-                "success": False,
-                "status": "error",
-                "error": "Brak wiadomości do wysłania",
-                "message": "Brak wiadomości do wysłania",
-            }
-        ), 400
-    if len(message) > 8000:
-        return jsonify(
-            {
-                "success": False,
-                "status": "error",
-                "error": "Wiadomość jest zbyt długa",
-                "message": "Wiadomość jest zbyt długa",
-            }
-        ), 400
 
-    try:
-        result = call_llm(
-            prompt=message,
-            system=system,
-            stream=False,
-            provider="claude",
-            model=model,
-            max_tokens=1024,
-            temperature=0.2,
-        )
-        response_text = ""
-        usage = {}
-        if isinstance(result, dict):
-            response_text = (result.get("response") or "").strip()
-            usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        if not response_text:
-            response_text = "Claude nie zwrócił treści odpowiedzi."
-        return jsonify(
-            {
-                "success": True,
-                "status": "success",
-                "response": response_text,
-                "usage": usage,
-                "model": model or llm_client.CLAUDE_MODEL,
-            }
-        )
-    except Exception as exc:
-        logger.exception("claude_test error")
-        return jsonify(
-            {
-                "success": False,
-                "status": "error",
-                "error": _redact_api_keys(str(exc))[:500],
-                "message": _redact_api_keys(str(exc))[:500],
-            }
-        ), 500
 
 
 # ===== SWARM REPORTS API =====
@@ -6882,13 +6588,10 @@ def get_documents():
         and _docs_cache["data"]
         and (now - _docs_cache["ts"]) < DOCS_CACHE_TTL
     ):
-        return jsonify(
-            {
-                "success": True,
-                "documents": _docs_cache["data"],
-                "total": len(_docs_cache["data"]),
-                "cached": True,
-            }
+        return json_success(
+            documents=_docs_cache["data"],
+            total=len(_docs_cache["data"]),
+            cached=True,
         )
     try:
         client = get_qdrant_client()
@@ -6929,17 +6632,14 @@ def get_documents():
         _docs_cache["data"] = docs
         _docs_cache["ts"] = now
         filtered = _filter_documents_list(docs, ext_filter or None, modified_after, modified_before)
-        return jsonify(
-            {
-                "success": True,
-                "documents": filtered,
-                "total": len(filtered),
-                "total_unfiltered": len(docs),
-                "cached": False,
-            }
+        return json_success(
+            documents=filtered,
+            total=len(filtered),
+            total_unfiltered=len(docs),
+            cached=False,
         )
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return json_error(str(e), status=200)
 
 
 @app.route("/api/get_context", methods=["GET"])
@@ -6951,7 +6651,7 @@ def get_context():
     source = (request.args.get("source") or "chunk").strip().lower()
 
     if not point_id and not file_name:
-        return jsonify({"success": False, "error": "Wymagany point_id lub file"}), 400
+        return json_error("Wymagany point_id lub file", status=400)
 
     try:
         client = get_qdrant_client()
@@ -6969,17 +6669,14 @@ def get_context():
                 if query:
                     text = highlight_backend(text, query)
                 full_path = p.get("full_path", "")
-                return jsonify(
-                    {
-                        "success": True,
-                        "point_id": point_id,
-                        "file": p.get("file", file_name),
-                        "text": text,
-                        "full_path": full_path,
-                        "win_path": wsl_to_win(full_path),
-                        "metadata": p.get("metadata"),
-                        "source": "qdrant",
-                    }
+                return json_success(
+                    point_id=point_id,
+                    file=p.get("file", file_name),
+                    text=text,
+                    full_path=full_path,
+                    win_path=wsl_to_win(full_path),
+                    metadata=p.get("metadata"),
+                    source="qdrant",
                 )
 
         if file_name:
@@ -7000,20 +6697,17 @@ def get_context():
                         p = res.points[0].payload or {}
                         text = highlight_backend(p.get("text", ""), query)
                         full_path = p.get("full_path", "")
-                        return jsonify(
-                            {
-                                "success": True,
-                                "point_id": str(res.points[0].id),
-                                "file": file_name,
-                                "text": text,
-                                "full_path": full_path,
-                                "win_path": wsl_to_win(full_path),
-                                "metadata": p.get("metadata"),
-                                "source": "qdrant_search",
-                            }
+                        return json_success(
+                            point_id=str(res.points[0].id),
+                            file=file_name,
+                            text=text,
+                            full_path=full_path,
+                            win_path=wsl_to_win(full_path),
+                            metadata=p.get("metadata"),
+                            source="qdrant_search",
                         )
                 except EmbeddingError as e:
-                    return jsonify({"success": False, "error": str(e)})
+                    return json_error(str(e), status=200)
 
             scroll_filter = Filter(
                 must=[FieldCondition(key="file", match=MatchValue(value=file_name))]
@@ -7029,17 +6723,14 @@ def get_context():
                 p = records[0].payload or {}
                 text = highlight_backend(p.get("text", ""), query)
                 full_path = p.get("full_path", "")
-                return jsonify(
-                    {
-                        "success": True,
-                        "point_id": str(records[0].id),
-                        "file": file_name,
-                        "text": text,
-                        "full_path": full_path,
-                        "win_path": wsl_to_win(full_path),
-                        "metadata": p.get("metadata"),
-                        "source": "qdrant_scroll",
-                    }
+                return json_success(
+                    point_id=str(records[0].id),
+                    file=file_name,
+                    text=text,
+                    full_path=full_path,
+                    win_path=wsl_to_win(full_path),
+                    metadata=p.get("metadata"),
+                    source="qdrant_scroll",
                 )
 
             path = _find_file_by_name_safe(file_name)
@@ -7047,23 +6738,20 @@ def get_context():
                 excerpt = extract_text(path)[:12000]
                 if query:
                     excerpt = highlight_backend(excerpt, query)
-                return jsonify(
-                    {
-                        "success": True,
-                        "file": file_name,
-                        "text": excerpt,
-                        "full_path": str(path),
-                        "win_path": wsl_to_win(str(path)),
-                        "metadata": extract_file_metadata(path),
-                        "source": "file",
-                        "truncated": len(excerpt) >= 12000,
-                    }
+                return json_success(
+                    file=file_name,
+                    text=excerpt,
+                    full_path=str(path),
+                    win_path=wsl_to_win(str(path)),
+                    metadata=extract_file_metadata(path),
+                    source="file",
+                    truncated=len(excerpt) >= 12000,
                 )
 
-        return jsonify({"success": False, "error": "Nie znaleziono fragmentu dokumentu"}), 404
+        return json_error("Nie znaleziono fragmentu dokumentu", status=404)
     except Exception as e:
         logger.exception("get_context")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return json_error(str(e), status=500)
 
 
 @app.route("/export/metadata_report", methods=["POST"])
@@ -9150,191 +8838,6 @@ def sql_vectorize_all():
 # ============================================================
 
 
-@app.route("/health", methods=["GET"])
-def health():
-    """Zwraca bogaty status systemu dla UI (dashboard + modal diagnostyczny)."""
-    light = request.args.get("light", "0") == "1"
-    try:
-        q = _check_qdrant_health()
-        ocr = _ocr_health_status()
-        parsers = _file_parsers_health() if not light else {}
-        ollama_h = {"ok": True} if light else _check_ollama_health()
-        or_h = {"ok": True} if light else _check_openrouter_health()
-
-        # LLM status (preferuj OpenRouter jeśli skonfigurowany)
-        llm_ok = False
-        llm_detail = ""
-        if light:
-            llm_ok = True
-            llm_detail = "light"
-        elif OPENROUTER_API_KEY:
-            llm_ok = or_h.get("ok", False)
-            llm_detail = or_h.get("error") or "OpenRouter"
-        else:
-            llm_ok = ollama_h.get("ok", False)
-            llm_detail = ollama_h.get("error") or "Ollama"
-
-        # SQL
-        sql_cfg = _load_sql_config()
-        sql_configured = _sql_conn_configured(sql_cfg)
-        sql_status = (
-            "ok"
-            if (sql_configured and (_sql_dialect(sql_cfg) == "sqlite" or PYMSSQL_AVAILABLE))
-            else ("warn" if sql_configured else "absent")
-        )
-
-        # Wektory / kolekcja
-        vectors = 0
-        coll_name = ACTIVE_COLLECTION
-        try:
-            if q.get("ok") and q.get("active_collection_exists"):
-                vectors = q.get("points_in_active", 0)
-        except Exception:
-            pass
-
-        # Ogólny status
-        critical_ok = q.get("ok", False) and (llm_ok or True)  # LLM fallbacki istnieją
-        overall = "ok" if critical_ok else "degraded"
-
-        # Wersja (z git describe lub stałej)
-        try:
-            ver = _get_app_version()
-        except Exception:
-            ver = "dev"
-
-        return jsonify(
-            {
-                "success": True,
-                "overall": overall,
-                "version": ver,
-                "timestamp": int(time.time()),
-                # Połączenia (dla kropek i tabeli w modalu)
-                "qdrant": q,
-                "qdrant_status": "ok" if q.get("ok") else "error",
-                "llm": {"ok": llm_ok, "detail": llm_detail},
-                "llm_status": "ok" if llm_ok else "warn",
-                "embedding": {
-                    "ok": ollama_h.get("ok", False),  # embeddingi idą przez Ollama
-                    "model": "nomic-embed-text",
-                },
-                "ocr": ocr,
-                "ocr_available": ocr.get("available", False),
-                "file_parsers": parsers,
-                # SQL (opcjonalny)
-                "sql_available": PYMSSQL_AVAILABLE,
-                "sql_configured": sql_configured,
-                "sql_status": sql_status,
-                # Aktywna kolekcja + wektory (dla topbara)
-                "active_collection": {"name": coll_name, "points": vectors},
-                "vectors_count": vectors,
-                # Inne przydatne dla UI
-                "provider": DEFAULT_LLM_PROVIDER,
-                "llm_model": _effective_llm_model(DEFAULT_LLM_PROVIDER),
-                "gemini_configured": bool(GEMINI_API_KEY),
-                "gemini_model": GEMINI_MODEL,
-                "gemini": _check_gemini_health(),
-                "app_api_key_set": bool(APP_API_KEY),
-            }
-        )
-    except Exception as e:
-        logger.exception("health endpoint error")
-        return jsonify({"success": False, "overall": "error", "error": str(e)[:200]}), 500
-
-
-@app.route("/api/update/status", methods=["GET"])
-def api_update_status():
-    """Zwraca status aktualizacji — aktualna wersja, najnowsza, changelog."""
-    if not _localhost_only():
-        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
-    try:
-        local_tag = _get_local_latest_tag()
-        remote_tag = _get_remote_latest_tag()
-        release_info = _get_latest_github_release() or {}
-
-        if release_info.get("tag_name"):
-            remote_tag = release_info["tag_name"]
-
-        def _version_key(v: str) -> tuple:
-            try:
-                return tuple(int(x) for x in v.lstrip("v").split("."))
-            except Exception:
-                return (0, 0)
-
-        update_available = bool(
-            remote_tag and local_tag and _version_key(remote_tag) > _version_key(local_tag)
-        )
-
-        return jsonify(
-            {
-                "success": True,
-                "local_version": local_tag,
-                "remote_version": remote_tag or local_tag,
-                "current_version": local_tag,
-                "latest_version": remote_tag or local_tag,
-                "update_available": update_available,
-                "release": release_info,
-                "changelog": release_info.get("body", ""),
-                "release_url": release_info.get("html_url"),
-                "message": "Nowa wersja dostępna"
-                if update_available
-                else "Jesteś na najnowszej wersji",
-            }
-        )
-    except Exception as e:
-        logger.exception("api_update_status error")
-        return jsonify({"success": False, "error": str(e)[:200]}), 500
-
-
-@app.route("/api/update/pull", methods=["POST"])
-def api_update_pull():
-    """Pobiera najnowszy kod z GitHub (git pull origin master)."""
-    if not _localhost_only():
-        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
-    try:
-        result = _git_pull()
-        ok = result.get("success", False)
-        msg = (
-            result.get("stdout")
-            or result.get("stderr")
-            or (
-                "Kod zaktualizowany. Zalecany restart aplikacji."
-                if ok
-                else "Błąd podczas aktualizacji."
-            )
-        )
-        return jsonify(
-            {
-                "success": ok,
-                "message": msg,
-                "output": result.get("stdout", ""),
-                "error": result.get("stderr", "") if not ok else "",
-                "details": result,
-            }
-        )
-    except Exception as e:
-        logger.exception("api_update_pull error")
-        return jsonify({"success": False, "error": str(e)[:200]}), 500
-
-
-@app.route("/api/update/restart", methods=["POST"])
-def api_update_restart():
-    """Restartuje aplikację (poprzez systemd --user service)."""
-    if not _localhost_only():
-        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
-    try:
-        result = _try_restart_service()
-        return jsonify(
-            {
-                "success": result.get("success", False),
-                "message": result.get("message", "Restart initiated"),
-                "method": result.get("method", "unknown"),
-            }
-        )
-    except Exception as e:
-        logger.exception("api_update_restart error")
-        return jsonify({"success": False, "error": str(e)[:200]}), 500
-
-
 def _localhost_only() -> bool:
     """True gdy żądanie pochodzi z localhost (self-update / service API).
     Nagłówki X-Forwarded-For są ufane tylko gdy TRUST_PROXY=true.
@@ -9392,52 +8895,6 @@ def _systemd_service_logs(limit: int = 30) -> str:
         except Exception:
             pass
     return ""
-
-
-@app.route("/api/service/status", methods=["GET"])
-def service_status():
-    """Status usługi systemd i ostatnie logi — tylko localhost."""
-    if not _localhost_only():
-        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
-
-    return jsonify(
-        {
-            "success": True,
-            "is_systemd": bool(os.environ.get("INVOCATION_ID")),
-            "active": _systemd_service_state(),
-            "logs": _systemd_service_logs(30),
-        }
-    )
-
-
-@app.route("/api/service/restart", methods=["POST"])
-def service_restart():
-    """Restart usługi ai_analiza — tylko localhost."""
-    if not _localhost_only():
-        return jsonify({"success": False, "error": "Dostępne tylko z localhost"}), 403
-
-    def _do_restart():
-        time.sleep(0.6)
-        try:
-            import shutil
-
-            if shutil.which("systemctl"):
-                for cmd in (
-                    ["systemctl", "--user", "restart", "ai_analiza"],
-                    ["systemctl", "restart", "ai_analiza"],
-                ):
-                    try:
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                        if result.returncode == 0:
-                            return
-                    except Exception:
-                        continue
-            os._exit(0)
-        except Exception:
-            os._exit(0)
-
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return jsonify({"success": True, "msg": "Restart zlecony"})
 
 
 if __name__ == "__main__":

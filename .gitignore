@@ -81,7 +81,9 @@ docker-compose.override.yml
 # === Local dev binaries (Qdrant standalone, etc.) ===
 .local/
 qdrant_data/
+qdrant_data_corrupted_bak/
 storage/
+storage_corrupted_bak/
 
 # === Misc ===
 .sql_config.json
@@ -92,6 +94,7 @@ storage/
 .active_collection
 .providers.json
 .swarm_reports/
+tasks.db
 *.pid
 
 # === Claude Code agent worktrees ===
