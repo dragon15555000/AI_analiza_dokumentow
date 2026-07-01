@@ -7,6 +7,7 @@ let currentFinancialFile = null;
 let currentFinancialFileToken = '';
 let currentFinancialReportToken = '';
 let currentFinancialOpinionToken = '';
+let currentFinancialOcrToken = '';
 
 function financialEscape(value) {
     if (value == null) return '';
@@ -179,6 +180,123 @@ async function loadFinancialOpinion(report) {
     } catch (error) {
         if (currentFinancialOpinionToken !== requestedToken) return;
         renderFinancialOpinionEmpty(`Błąd opinii AI: ${error.message}`);
+    }
+}
+
+const OCR_STATUS_META = {
+    match: { label: 'Zgodność', color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0' },
+    mismatch: { label: 'Rozbieżność', color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
+    not_found: { label: 'Nie znaleziono dokumentu', color: '#d97706', bg: '#fffbeb', border: '#fde68a' },
+    ambiguous: { label: 'Niejednoznaczne', color: '#d97706', bg: '#fffbeb', border: '#fde68a' },
+    unavailable: { label: 'Weryfikacja niedostępna', color: '#64748b', bg: '#f8fafc', border: '#e2e8f0' }
+};
+
+function setFinancialOcrHtml(html) {
+    const host = document.getElementById('financialOcrCrossCheck');
+    if (!host) return;
+    host.innerHTML = html;
+}
+
+function renderFinancialOcrEmpty(message) {
+    setFinancialOcrHtml(`
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <h6 class="mb-1">🔎 Weryfikacja OCR</h6>
+            <div class="small text-muted">${financialEscape(message)}</div>
+        </div>
+    `);
+}
+
+function renderFinancialOcrLoading() {
+    setFinancialOcrHtml(`
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <h6 class="mb-2">🔎 Weryfikacja OCR</h6>
+            <div class="small text-muted">
+                <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
+                Trwa porównanie sygnałów z dokumentami OCR w bazie wektorowej.
+            </div>
+        </div>
+    `);
+}
+
+function renderFinancialOcrCrossCheck(items) {
+    const list = Array.isArray(items) ? items : [];
+    // Sekcja ma pokazywać tylko rozbieżności/niepewne wyniki oraz ważne dopasowania — nie zalewać widoku samymi "match".
+    const relevant = list.filter(item => item.status !== 'match');
+    const matches = list.filter(item => item.status === 'match');
+
+    if (!list.length) {
+        renderFinancialOcrEmpty('Brak kandydatów HIGH/CRITICAL do weryfikacji OCR.');
+        return;
+    }
+
+    const renderItem = (item) => {
+        const meta = OCR_STATUS_META[item.status] || OCR_STATUS_META.unavailable;
+        return `
+            <div style="background:${meta.bg};border:1px solid ${meta.border};border-left:4px solid ${meta.color};border-radius:10px;padding:12px;margin-bottom:10px;">
+                <div class="d-flex justify-content-between align-items-start">
+                    <strong style="color:${meta.color};">${financialEscape(meta.label)}</strong>
+                    <span class="small text-muted">${financialEscape(item.sheet || '')} ${item.cell ? '· ' + financialEscape(item.cell) : ''}</span>
+                </div>
+                <div class="small mt-1">
+                    <strong>Excel:</strong> ${item.excel_amount != null ? financialEscape(item.excel_amount) : 'brak liczby'}
+                    &nbsp;|&nbsp;
+                    <strong>OCR:</strong> ${item.ocr_amount != null ? financialEscape(item.ocr_amount) : 'brak liczby'}
+                    ${item.matched_ocr_document ? ` &nbsp;|&nbsp; <strong>Dokument:</strong> ${financialEscape(item.matched_ocr_document)}` : ''}
+                </div>
+                ${item.evidence_snippet ? `<div class="small text-muted mt-1" style="font-style:italic;">"${financialEscape(item.evidence_snippet)}"</div>` : ''}
+                ${item.next_check ? `<div class="small mt-1"><strong>Co sprawdzić dalej:</strong> ${financialEscape(item.next_check)}</div>` : ''}
+            </div>
+        `;
+    };
+
+    const relevantHtml = relevant.length
+        ? relevant.map(renderItem).join('')
+        : '<div class="small text-muted">Brak rozbieżności ani niejednoznacznych wyników.</div>';
+
+    const matchesHtml = matches.length
+        ? `<details class="mt-2"><summary class="small text-muted" style="cursor:pointer;">Pokaż ${matches.length} potwierdzonych zgodności</summary>${matches.map(renderItem).join('')}</details>`
+        : '';
+
+    setFinancialOcrHtml(`
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <h6 class="mb-2">🔎 Weryfikacja OCR</h6>
+            <div class="small text-muted mb-3">Sygnały poniżej to wskazania do dalszej weryfikacji, nie dowód nieprawidłowości.</div>
+            ${relevantHtml}
+            ${matchesHtml}
+        </div>
+    `);
+}
+
+async function loadFinancialOcrCrossCheck(report) {
+    const evidencePack = report?.ai_evidence_pack;
+    if (!evidencePack || !Array.isArray(evidencePack.sheets) || !evidencePack.sheets.length) {
+        renderFinancialOcrEmpty('Brak sygnałów HIGH/CRITICAL do weryfikacji OCR.');
+        return;
+    }
+
+    const requestedToken = currentFinancialReportToken;
+    currentFinancialOcrToken = requestedToken;
+    renderFinancialOcrLoading();
+
+    try {
+        const response = await fetch('/api/audit/financial/ocr-cross-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ evidence_pack: evidencePack })
+        });
+        const data = await response.json();
+        if (currentFinancialOcrToken !== requestedToken) return;
+
+        if (!response.ok || !data.success || !data.cross_check_available) {
+            renderFinancialOcrEmpty(data.error || data.warning || 'Weryfikacja OCR nie jest dostępna.');
+            return;
+        }
+
+        currentFinancialReport.ocr_cross_check = data.cross_check;
+        renderFinancialOcrCrossCheck(data.cross_check);
+    } catch (error) {
+        if (currentFinancialOcrToken !== requestedToken) return;
+        renderFinancialOcrEmpty(`Błąd weryfikacji OCR: ${error.message}`);
     }
 }
 
@@ -385,6 +503,7 @@ function displayFinancialResults(report) {
     renderFinancialFlowExplorer(report);
     renderFinancialLineageExplorer(report);
     loadFinancialOpinion(report);
+    loadFinancialOcrCrossCheck(report);
 
     // Anomalie
     if (highPriorityAnomalies.length > 0) {
