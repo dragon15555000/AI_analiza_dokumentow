@@ -18,6 +18,7 @@ from flask import Blueprint, request
 
 from financial_audit import AuditAnalyzer, CellRef, FormulaParser
 from llm_client import call_llm, _llm_response_text, LLM_MODEL
+from prompts import SEARCH_MODES
 from services.financial_forensics import (
     detect_control_total_and_hidden_reference_signals as svc_detect_control_total_and_hidden_reference_signals,
     detect_duplicate_and_numeric_signals as svc_detect_duplicate_and_numeric_signals,
@@ -30,6 +31,8 @@ logger = logging.getLogger("ai_analiza")
 financial_bp = Blueprint("financial", __name__, url_prefix="/api/audit")
 _FINANCIAL_AUDIT_CACHE_MAX = 6
 _FINANCIAL_AUDIT_CACHE: OrderedDict[str, dict] = OrderedDict()
+_FINANCIAL_AI_OPINION_PROVIDER = "ollama"
+_FINANCIAL_AI_OPINION_MAX_FINDINGS = 12
 
 
 def _normalize_analysis_type(value: str) -> str:
@@ -313,6 +316,10 @@ def _anomaly_details(anomaly: dict) -> dict:
             "severity_label": "Wysokie ryzyko",
             "impact": "Wynik może zależeć od samego siebie lub generować niestabilne przeliczenia.",
             "recommendation": "Prześledź łańcuch zależności i rozbij cykl na osobne etapy obliczeń.",
+            "fraud_hypothesis": "Logika obliczeń została spięta w pętlę, więc wynik nie ma stabilnej i przejrzystej podstawy.",
+            "intent_hypothesis": "Możliwe zaciemnienie sposobu liczenia albo niekontrolowana zmiana modelu.",
+            "verification_target": "Prześledź pełny cykl zależności i sprawdź, która komórka wprowadziła zapętlenie.",
+            "confidence_basis": "high_direct_logic_break",
         },
         "hidden_formula": {
             "label": "Ukryta formuła",
@@ -337,12 +344,20 @@ def _anomaly_details(anomaly: dict) -> dict:
             "severity_label": "Wysokie ryzyko",
             "impact": "Wynik w kolumnie obliczeniowej został wpisany ręcznie zamiast wyliczony, co może ukrywać manipulację albo błąd.",
             "recommendation": "Porównaj z sąsiednimi wierszami i ustal, czy komórka nie nadpisuje standardowego wzorca obliczeń.",
+            "fraud_hypothesis": "Użytkownik ręcznie nadpisał komórkę w obszarze, który normalnie liczy się formułami.",
+            "intent_hypothesis": "Celowe narzucenie z góry założonego wyniku bez oparcia w danych źródłowych.",
+            "verification_target": "Sprawdź, czy wpisana wartość daje korzystniejszy wynik niż wynik z sąsiedniego wzorca formuł.",
+            "confidence_basis": "high_manual_override_in_formula_region",
         },
         "hardcoded_output_like_value": {
             "label": "Ręcznie wpisany wynik końcowy",
             "severity_label": "Wysokie ryzyko",
             "impact": "Komórka wygląda jak wynik końcowy raportu lub tabeli, ale nie liczy się formułą, tylko została wpisana ręcznie.",
             "recommendation": "Ustal źródło tej wartości i sprawdź, czy nie zastępuje automatycznego wyniku obliczeń.",
+            "fraud_hypothesis": "Końcowy wynik został wpisany ręcznie zamiast wyliczony automatycznie.",
+            "intent_hypothesis": "Próba zafałszowania wyniku końcowego z pominięciem logiki arkusza.",
+            "verification_target": "Załącz dane wejściowe i przelicz, jaki powinien być prawdziwy wynik końcowy.",
+            "confidence_basis": "high_manual_final_result",
         },
         "formula_pattern_deviation": {
             "label": "Odstępstwo wzorca formuły",
@@ -373,6 +388,10 @@ def _anomaly_details(anomaly: dict) -> dict:
             "severity_label": "Wysokie ryzyko",
             "impact": "Arkusz jest ukryty głębiej niż standardowe hidden i nie pojawia się w zwykłym interfejsie Excela.",
             "recommendation": "Zweryfikuj zawartość arkusza oraz powód jego ukrycia w konfiguracji skoroszytu.",
+            "fraud_hypothesis": "Część logiki lub danych została ukryta w arkuszu niewidocznym w standardowym widoku Excela.",
+            "intent_hypothesis": "Możliwe ukrycie kluczowych danych przed zwykłą kontrolą arkusza.",
+            "verification_target": "Odkryj arkusz very-hidden i sprawdź, czy zasila wyniki albo przechowuje wyjątkowe dane wejściowe.",
+            "confidence_basis": "high_hidden_supporting_sheet",
         },
         "sheet_protection": {
             "label": "Ochrona arkusza",
@@ -391,6 +410,10 @@ def _anomaly_details(anomaly: dict) -> dict:
             "severity_label": "Wysokie ryzyko",
             "impact": "Powielony numer dokumentu może wskazywać na duplikację wpisów, korektę bez śladu albo błąd ewidencji.",
             "recommendation": "Porównaj wskazane wiersze z dokumentami źródłowymi i historią księgowania.",
+            "fraud_hypothesis": "Ten sam numer dokumentu może wskazywać na zdublowanie wpisu.",
+            "intent_hypothesis": "Próba sztucznego zawyżenia kosztów lub przychodów przez podwójne księgowanie.",
+            "verification_target": "Poproś o fizyczne lub źródłowe kopie dokumentów dla wszystkich zduplikowanych wpisów.",
+            "confidence_basis": "high_duplicate_document_identifier",
         },
         "duplicate_party": {
             "label": "Powtarzający się kontrahent",
@@ -424,15 +447,23 @@ def _anomaly_details(anomaly: dict) -> dict:
         },
         "amount_outlier": {
             "label": "Odstająca kwota",
-            "severity_label": "Średnie ryzyko",
+            "severity_label": "Wysokie ryzyko",
             "impact": "Kwota wyraźnie odstaje od reszty populacji i może wymagać osobnego uzasadnienia biznesowego.",
             "recommendation": "Porównaj transakcję z podobnymi pozycjami i sprawdź dokument źródłowy oraz ścieżkę akceptacji.",
+            "fraud_hypothesis": "Kwota skrajnie odbiega od populacji i może być podstawiona poza normalnym wzorcem transakcji.",
+            "intent_hypothesis": "Wprowadzenie jednorazowej, nieuprawnionej operacji na dużą kwotę.",
+            "verification_target": "Zweryfikuj uzasadnienie biznesowe i dokument źródłowy dla tej konkretnej transakcji.",
+            "confidence_basis": "high_statistical_outlier",
         },
         "benford_deviation": {
             "label": "Odchylenie od Benforda",
-            "severity_label": "Średnie ryzyko",
+            "severity_label": "Wysokie ryzyko",
             "impact": "Rozkład pierwszych cyfr odbiega od wzorca Benforda, co może wskazywać na nienaturalną strukturę danych liczbowych.",
             "recommendation": "Traktuj to jako sygnał statystyczny — zestaw wynik z dokumentami źródłowymi i innymi czerwonymi flagami.",
+            "fraud_hypothesis": "Rozkład cyfr wygląda nienaturalnie, co może sugerować ręczne konstruowanie wartości.",
+            "intent_hypothesis": "Możliwe dopisywanie fikcyjnych wartości tworzonych z pominięciem naturalnego wzorca danych.",
+            "verification_target": "Przeprowadź pełny audyt dokumentacji źródłowej dla tej kolumny i zestaw wynik z innymi czerwonymi flagami.",
+            "confidence_basis": "high_statistical_distribution_shift",
         },
         "weekend_activity": {
             "label": "Aktywność weekendowa",
@@ -451,12 +482,20 @@ def _anomaly_details(anomaly: dict) -> dict:
             "severity_label": "Wysokie ryzyko",
             "impact": "Wynik formuły sumującej nie zgadza się z wyliczeniem opartym na wskazanym zakresie danych.",
             "recommendation": "Porównaj zakres sumowania, wartości źródłowe i ewentualne ręczne nadpisania wyniku.",
+            "fraud_hypothesis": "Suma kontrolna nie zgadza się z zakresem wejściowym, więc wynik mógł zostać zniekształcony.",
+            "intent_hypothesis": "Ukrycie manka albo manipulacja wynikiem agregacji.",
+            "verification_target": "Sprawdź, które dokładnie komórki składowe zostały pominięte lub zmienione względem sumy kontrolnej.",
+            "confidence_basis": "high_control_total_break",
         },
         "cross_sheet_hidden_reference": {
             "label": "Odwołanie do ukrytego arkusza",
             "severity_label": "Średnie ryzyko",
             "impact": "Wynik zależy od danych z arkusza ukrytego lub very-hidden, co utrudnia audyt ścieżki obliczeń.",
             "recommendation": "Otwórz wskazany arkusz źródłowy i sprawdź, czy ukrycie jest uzasadnione oraz czy dane są spójne.",
+            "fraud_hypothesis": "Wynik zależy od ukrytego źródła, co może maskować rzeczywisty mechanizm obliczeń.",
+            "intent_hypothesis": "Ukrycie źródła wejścia albo obejście jawnej kontroli wyniku.",
+            "verification_target": "Sprawdź zawartość ukrytego arkusza i wszystkie komórki zasilające to odwołanie.",
+            "confidence_basis": "medium_hidden_cross_sheet_dependency",
         },
     }
     meta = mapping.get(
@@ -466,6 +505,10 @@ def _anomaly_details(anomaly: dict) -> dict:
             "severity_label": "Do weryfikacji",
             "impact": "Wykryto nietypowy wzorzec wymagający ręcznej oceny.",
             "recommendation": "Przejrzyj wskazaną komórkę i zweryfikuj, czy logika jest zgodna z założeniami modelu.",
+            "fraud_hypothesis": "Nietypowe zjawisko wymaga weryfikacji i może wynikać z ręcznej ingerencji albo błędu.",
+            "intent_hypothesis": "Brak wystarczających dowodów intencji",
+            "verification_target": "Zweryfikuj wskazaną komórkę, jej zależności i źródło danych wejściowych.",
+            "confidence_basis": "manual_review_required",
         },
     )
     return {**anomaly, **meta}
@@ -477,6 +520,183 @@ def _severity_rank(severity: str) -> int:
         "MEDIUM": 2,
         "LOW": 1,
     }.get((severity or "").upper(), 0)
+
+
+def _is_high_priority_anomaly(anomaly: dict) -> bool:
+    return str(anomaly.get("severity", "")).upper() in {"HIGH", "CRITICAL"}
+
+
+def _compact_text(value, limit: int = 220) -> str:
+    text = _value_to_text(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _build_ai_finding_id(sheet_name: str, anomaly: dict) -> str:
+    cell = _format_evidence_cell(sheet_name, str(anomaly.get("cell", "") or "").strip()) or "sheet"
+    return f"{sheet_name}:{cell}:{anomaly.get('type', 'anomaly')}"
+
+
+def _build_ai_evidence_lines(sheet_name: str, anomaly: dict) -> list[str]:
+    lines: list[str] = []
+    cell = _format_evidence_cell(sheet_name, anomaly.get("cell", ""))
+    if cell:
+        lines.append(f"Komórka: {cell}")
+    if anomaly.get("header"):
+        lines.append(f"Kolumna: {anomaly['header']}")
+    if anomaly.get("value") not in (None, ""):
+        lines.append(f"Wartość: {_compact_text(_serialize_excel_value(anomaly.get('value')))}")
+    if anomaly.get("formula"):
+        lines.append(f"Formuła: {_compact_text(anomaly.get('formula'), limit=180)}")
+    if anomaly.get("message"):
+        lines.append(f"Fakt techniczny: {_compact_text(anomaly.get('message'))}")
+    if anomaly.get("impact"):
+        lines.append(f"Wpływ: {_compact_text(anomaly.get('impact'))}")
+    rows = anomaly.get("rows", []) or []
+    if rows:
+        lines.append(f"Wiersze: {', '.join(map(str, rows[:12]))}")
+    return lines[:6]
+
+
+def _build_ai_evidence_item(sheet_name: str, anomaly: dict) -> dict:
+    fact = {
+        "sheet": sheet_name,
+        "cell": _format_evidence_cell(sheet_name, anomaly.get("cell", "")) or None,
+        "value": _serialize_excel_value(anomaly.get("value")),
+        "formula": anomaly.get("formula") or None,
+        "header": anomaly.get("header") or None,
+        "rows": (anomaly.get("rows", []) or [])[:25] or None,
+        "message": anomaly.get("message") or "",
+    }
+    return {
+        "finding_id": _build_ai_finding_id(sheet_name, anomaly),
+        "type": anomaly.get("type", ""),
+        "label": anomaly.get("label", anomaly.get("type", "Anomalia")),
+        "severity": anomaly.get("severity", ""),
+        "fact": fact,
+        "evidence": _build_ai_evidence_lines(sheet_name, anomaly),
+        "fraud_hypothesis": anomaly.get("fraud_hypothesis", ""),
+        "intent_hypothesis": anomaly.get("intent_hypothesis", "Brak wystarczających dowodów intencji"),
+        "verification_target": anomaly.get("verification_target", ""),
+        "confidence_basis": anomaly.get("confidence_basis", "manual_review_required"),
+    }
+
+
+def _build_sheet_ai_evidence_pack(
+    sheet_name: str,
+    sheet_risk_level: str,
+    logic_description: str,
+    logic_summary: dict,
+    analysis: dict,
+    anomalies: list[dict],
+) -> dict | None:
+    findings = [
+        _build_ai_evidence_item(sheet_name, anomaly)
+        for anomaly in anomalies
+        if _is_high_priority_anomaly(anomaly)
+    ]
+    if not findings:
+        return None
+
+    return {
+        "sheet": sheet_name,
+        "priority": sheet_risk_level,
+        "investigation_goal": "Oceń, czy zestaw sygnałów wskazuje na celową manipulację logiką lub danymi, bez przesądzania oszustwa.",
+        "logic_context": {
+            "description": logic_description,
+            "output_cells": (logic_summary.get("output_cells", []) or [])[:8],
+            "hub_cells": [item.get("cell") for item in (logic_summary.get("hub_cells", []) or [])[:5]],
+            "focus_rows": (analysis.get("focus_rows", []) or [])[:12],
+            "focus_columns": (analysis.get("focus_columns", []) or [])[:12],
+        },
+        "findings": findings[:_FINANCIAL_AI_OPINION_MAX_FINDINGS],
+    }
+
+
+def _build_ai_evidence_pack(file_name: str, sheet_packs: list[dict]) -> dict | None:
+    valid_sheets = [sheet for sheet in sheet_packs if sheet and sheet.get("findings")]
+    if not valid_sheets:
+        return None
+    findings_count = sum(len(sheet.get("findings", [])) for sheet in valid_sheets)
+    return {
+        "version": 1,
+        "source": "financial_audit",
+        "file_name": file_name,
+        "investigation_goal": "Oceń, czy zestaw sygnałów wskazuje na poszlaki celowej manipulacji logiką lub danymi, bez przesądzania winy.",
+        "summary": {
+            "sheet_count": len(valid_sheets),
+            "findings_count": findings_count,
+            "allowed_severities": ["HIGH", "CRITICAL"],
+        },
+        "sheets": valid_sheets,
+    }
+
+
+def _build_financial_forensics_prompt(evidence_pack: dict) -> tuple[str, str]:
+    mode = SEARCH_MODES["financial_forensics"]
+    prompt = (
+        "PAKIET DOWODOWY Z AUDYTU XLSX (jedyne źródło faktów):\n"
+        f"{json.dumps(evidence_pack, ensure_ascii=False, indent=2)}\n\n"
+        f"{mode['prompt_suffix']}"
+    )
+    return mode["system"], prompt
+
+
+def _extract_json_object(raw_text: str) -> dict | None:
+    text = (raw_text or "").strip()
+    if not text:
+        return None
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_ai_forensic_opinion(raw_opinion: dict | None) -> dict | None:
+    if not isinstance(raw_opinion, dict):
+        return None
+
+    findings_payload = raw_opinion.get("findings")
+    if not isinstance(findings_payload, list):
+        findings_payload = []
+
+    findings: list[dict] = []
+    for item in findings_payload[:_FINANCIAL_AI_OPINION_MAX_FINDINGS]:
+        if not isinstance(item, dict):
+            continue
+        fact = _compact_text(item.get("fact", ""))
+        expert_comment = _compact_text(item.get("expert_comment", ""))
+        if not fact and not expert_comment:
+            continue
+        findings.append(
+            {
+                "finding_id": _compact_text(item.get("finding_id", ""), 120),
+                "fact": fact,
+                "intent": _compact_text(
+                    item.get("intent", "Brak wystarczających dowodów intencji")
+                ),
+                "expert_comment": expert_comment,
+                "confidence": _compact_text(item.get("confidence", "")),
+                "next_check": _compact_text(item.get("next_check", "")),
+            }
+        )
+
+    overall = _compact_text(raw_opinion.get("overall_assessment", ""), 400)
+    sheet_comment = _compact_text(raw_opinion.get("sheet_comment", ""), 400)
+    limitations = _compact_text(raw_opinion.get("limitations", ""), 400)
+    if not overall and not findings and not sheet_comment:
+        return None
+    return {
+        "sheet_comment": sheet_comment,
+        "overall_assessment": overall,
+        "limitations": limitations,
+        "findings": findings,
+    }
 
 
 def _format_evidence_cell(sheet_name: str, cell: str) -> str:
@@ -624,6 +844,19 @@ def _build_sheet_flow_graph(sheet_name: str, analyzer: AuditAnalyzer, logic_summ
             "edges": [],
             "narratives": [],
             "hidden_formula_nodes": 0,
+            "high_risk_relation_count": 0,
+        }
+
+    high_risk_anomalies = [
+        anomaly for anomaly in anomalies if (anomaly.get("severity") or "").upper() == "HIGH"
+    ]
+    if not high_risk_anomalies:
+        return {
+            "nodes": [],
+            "edges": [],
+            "narratives": [],
+            "hidden_formula_nodes": len(formula_keys),
+            "high_risk_relation_count": 0,
         }
 
     output_keys = [
@@ -634,10 +867,10 @@ def _build_sheet_flow_graph(sheet_name: str, analyzer: AuditAnalyzer, logic_summ
         for item in logic_summary.get("hub_cells", []) or []
         if item.get("cell") in formula_keys
     ]
-    anomaly_keys = _extract_anomaly_formula_keys(sheet_name, anomalies, formula_keys)
+    anomaly_keys = _extract_anomaly_formula_keys(sheet_name, high_risk_anomalies, formula_keys)
 
     anchor_keys: list[str] = []
-    for group in (anomaly_keys, output_keys, hub_keys, sorted(formula_keys)):
+    for group in (anomaly_keys, output_keys, hub_keys):
         for key in group:
             if key and key not in anchor_keys:
                 anchor_keys.append(key)
@@ -645,6 +878,15 @@ def _build_sheet_flow_graph(sheet_name: str, analyzer: AuditAnalyzer, logic_summ
                 break
         if len(anchor_keys) >= 10:
             break
+
+    if not anchor_keys:
+        return {
+            "nodes": [],
+            "edges": [],
+            "narratives": [],
+            "hidden_formula_nodes": len(formula_keys),
+            "high_risk_relation_count": len(high_risk_anomalies),
+        }
 
     selected_formula_keys: set[str] = set()
     queue = deque((key, 0) for key in anchor_keys)
@@ -795,7 +1037,7 @@ def _build_sheet_flow_graph(sheet_name: str, analyzer: AuditAnalyzer, logic_summ
             f"{output_key.split('!', 1)[-1]} powstaje z {', '.join(dep_labels)}{extra}."
         )
 
-    for anomaly in anomalies:
+    for anomaly in high_risk_anomalies:
         cell_key = _format_evidence_cell(sheet_name, anomaly.get("cell", ""))
         if cell_key in selected_anomaly_cells:
             narratives.append(anomaly.get("message", ""))
@@ -813,6 +1055,7 @@ def _build_sheet_flow_graph(sheet_name: str, analyzer: AuditAnalyzer, logic_summ
         "edges": edges,
         "narratives": unique_narratives[:6],
         "hidden_formula_nodes": max(0, len(formula_keys) - len(selected_formula_keys)),
+        "high_risk_relation_count": len(high_risk_anomalies),
     }
 
 
@@ -828,13 +1071,8 @@ def _empty_forensic_result(formula_count: int, structure: dict) -> dict:
         },
         "data_signals": {
             "duplicates": [],
-            "numbering_gaps": [],
-            "near_thresholds": [],
-            "round_amounts": [],
             "amount_outliers": [],
             "benford_deviations": [],
-            "weekend_activity": [],
-            "night_activity": [],
         },
         "control_signals": {
             "control_total_mismatches": [],
@@ -2066,6 +2304,7 @@ def audit_financial():
                 "description": "",
             },
             "technical_appendix": [],
+            "ai_evidence_pack": None,
             "forensic_overview": {
                 "analysis_mode": analysis_type,
                 "deep_scan_sheets": 0,
@@ -2078,21 +2317,17 @@ def audit_financial():
                 "hardcoded_formula_region_hits": 0,
                 "formula_pattern_deviations": 0,
                 "duplicates": 0,
-                "numbering_gaps": 0,
-                "near_threshold_hits": 0,
-                "round_amount_hits": 0,
                 "amount_outlier_hits": 0,
                 "benford_deviation_hits": 0,
                 "control_total_mismatches": 0,
                 "cross_sheet_hidden_reference_hits": 0,
-                "weekend_activity_hits": 0,
-                "night_activity_hits": 0,
             },
         }
 
         all_anomalies = []
         logic_descriptions = []
         all_hubs = []
+        ai_sheet_packs: list[dict] = []
         values_wb = None
 
         for sheet_name, base_sheet in cache_entry["base_sheets"].items():
@@ -2116,12 +2351,13 @@ def audit_financial():
 
             enriched_anomalies = [_anomaly_details(a) for a in (screening_raw + forensic["findings"])]
             logic_description = _describe_sheet_logic(sheet_name, logic_summary)
+            sheet_risk_level = _risk_level_from_anomalies(enriched_anomalies)
 
             sheet_data = {
                 "formula_count": len(formulas),
                 "cell_count": len(analyzer.cells),
                 "anomalies": enriched_anomalies,
-                "risk_level": analyzer._calculate_risk_level(),
+                "risk_level": sheet_risk_level,
                 "sheet_state": sheet_info.get("sheet_state", "visible"),
                 "dimensions": {
                     "max_row": sheet_info.get("max_row", 0),
@@ -2160,6 +2396,15 @@ def audit_financial():
                     "reasons": scope.get("reasons", []),
                 },
             }
+            sheet_ai_pack = _build_sheet_ai_evidence_pack(
+                sheet_name,
+                sheet_risk_level,
+                logic_description,
+                logic_summary,
+                sheet_data["analysis"],
+                enriched_anomalies,
+            )
+            sheet_data["ai_evidence_pack"] = sheet_ai_pack
 
             if analysis_type in ["full", "formulas"]:
                 values_ws = values_wb[sheet_name]
@@ -2190,6 +2435,8 @@ def audit_financial():
             logic_descriptions.append(sheet_data["logic_summary"]["description_pl"])
             all_hubs.extend(logic_summary.get("hub_cells", []))
             all_anomalies.extend(enriched_anomalies)
+            if sheet_ai_pack:
+                ai_sheet_packs.append(sheet_ai_pack)
             if sheet_mode == "screening_only":
                 result["analysis"]["screening_only_sheets"] += 1
                 result["forensic_overview"]["screening_only_sheets"] += 1
@@ -2221,15 +2468,6 @@ def audit_financial():
             result["forensic_overview"]["duplicates"] += len(
                 forensic["data_signals"].get("duplicates", [])
             )
-            result["forensic_overview"]["numbering_gaps"] += len(
-                forensic["data_signals"].get("numbering_gaps", [])
-            )
-            result["forensic_overview"]["near_threshold_hits"] += len(
-                forensic["data_signals"].get("near_thresholds", [])
-            )
-            result["forensic_overview"]["round_amount_hits"] += len(
-                forensic["data_signals"].get("round_amounts", [])
-            )
             result["forensic_overview"]["amount_outlier_hits"] += len(
                 forensic["data_signals"].get("amount_outliers", [])
             )
@@ -2241,12 +2479,6 @@ def audit_financial():
             )
             result["forensic_overview"]["cross_sheet_hidden_reference_hits"] += len(
                 forensic["control_signals"].get("cross_sheet_hidden_references", [])
-            )
-            result["forensic_overview"]["weekend_activity_hits"] += len(
-                forensic["data_signals"].get("weekend_activity", [])
-            )
-            result["forensic_overview"]["night_activity_hits"] += len(
-                forensic["data_signals"].get("night_activity", [])
             )
 
         high_count = sum(1 for a in all_anomalies if a.get("severity") == "HIGH")
@@ -2277,6 +2509,7 @@ def audit_financial():
         result["logic_overview"]["description"] = " ".join(logic_descriptions) or (
             "Nie wykryto formuł, więc arkusz pełni raczej rolę danych wejściowych niż modelu obliczeniowego."
         )
+        result["ai_evidence_pack"] = _build_ai_evidence_pack(file.filename, ai_sheet_packs)
 
         return json_success(**result)
 
@@ -2289,3 +2522,62 @@ def audit_financial():
             tmp_path.unlink()
         except Exception:
             pass
+
+
+@financial_bp.route("/financial/opinion", methods=["POST"])
+def audit_financial_opinion():
+    payload = request.get_json(silent=True) or {}
+    evidence_pack = payload.get("evidence_pack")
+    if not isinstance(evidence_pack, dict):
+        report = payload.get("report") or {}
+        if isinstance(report, dict):
+            evidence_pack = report.get("ai_evidence_pack")
+
+    if not isinstance(evidence_pack, dict):
+        return json_error("Brak ai_evidence_pack do analizy.", status=400, opinion_available=False)
+
+    sheets = evidence_pack.get("sheets")
+    if not isinstance(sheets, list) or not any(
+        isinstance(sheet, dict) and sheet.get("findings") for sheet in sheets
+    ):
+        return json_error(
+            "Brak silnych anomalii do opinii AI.",
+            status=400,
+            opinion_available=False,
+        )
+
+    system_prompt, user_prompt = _build_financial_forensics_prompt(evidence_pack)
+    try:
+        llm_result = call_llm(
+            user_prompt,
+            system=system_prompt,
+            stream=False,
+            provider=_FINANCIAL_AI_OPINION_PROVIDER,
+            model=LLM_MODEL,
+            max_tokens=1200,
+            temperature=0.1,
+        )
+        raw_text = _llm_response_text(llm_result)
+    except Exception as exc:
+        logger.warning("AI forensic opinion failed: %s", exc)
+        return json_success(
+            opinion_available=False,
+            ai_forensic_opinion=None,
+            warning=f"Nie udało się wygenerować opinii AI: {str(exc)[:200]}",
+        )
+
+    normalized_opinion = _normalize_ai_forensic_opinion(_extract_json_object(raw_text))
+    if normalized_opinion is None:
+        logger.warning("AI forensic opinion returned invalid JSON: %s", raw_text[:300])
+        return json_success(
+            opinion_available=False,
+            ai_forensic_opinion=None,
+            warning="Model zwrócił niepoprawny JSON, więc opinia została odrzucona.",
+        )
+
+    return json_success(
+        opinion_available=True,
+        ai_forensic_opinion=normalized_opinion,
+        evidence_summary=evidence_pack.get("summary", {}),
+        provider=_FINANCIAL_AI_OPINION_PROVIDER,
+    )

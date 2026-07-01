@@ -1,6 +1,5 @@
-from pathlib import Path
 from io import BytesIO
-from datetime import datetime
+from pathlib import Path
 
 from openpyxl import Workbook
 
@@ -51,9 +50,13 @@ def test_show_tab_registry_includes_financial():
     assert "financial:14" in template
     assert "financialAnalysisMode" in template
     assert "financialFlowExplorer" in template
+    assert "financialAiOpinion" in template
     assert "financialRunButton" in template
     assert "handleFinancialFileSelection" in template
     assert "runFinancialAnalysis" in script
+    assert "financialIsHighPriority" in script
+    assert "loadFinancialOpinion" in script
+    assert "renderFinancialOpinion" in script
 
 
 def test_financial_endpoint_detects_cosmetic_check():
@@ -113,7 +116,8 @@ def test_financial_endpoint_quick_mode_stops_after_screening_for_clean_sheet():
     assert data["analysis"]["deep_scan_sheets"] == 0
     assert first_sheet["analysis"]["mode"] == "screening_only"
     assert first_sheet["analysis"]["deep_scan_triggered"] is False
-    assert len(first_sheet["flow_graph"]["nodes"]) >= 1
+    assert first_sheet["flow_graph"]["high_risk_relation_count"] == 0
+    assert first_sheet["flow_graph"]["nodes"] == []
 
 
 def test_financial_endpoint_targeted_mode_escalates_around_suspicious_area():
@@ -149,8 +153,8 @@ def test_financial_endpoint_targeted_mode_escalates_around_suspicious_area():
     assert first_sheet["analysis"]["mode"] == "targeted_deep_scan"
     assert first_sheet["analysis"]["deep_scan_triggered"] is True
     assert "B" in first_sheet["analysis"]["focus_columns"]
-    assert first_sheet["flow_graph"]["nodes"]
-    assert first_sheet["flow_graph"]["edges"]
+    assert first_sheet["flow_graph"]["high_risk_relation_count"] == 0
+    assert first_sheet["flow_graph"]["nodes"] == []
 
 
 def test_financial_endpoint_reuses_screening_when_upgrading_mode_for_same_file():
@@ -218,17 +222,18 @@ def test_financial_endpoint_detects_benford_and_outlier_signals():
     assert "amount_outlier" in anomaly_types
     assert first_sheet["forensic_signals"]["data_signals"]["benford_deviations"]
     assert first_sheet["forensic_signals"]["data_signals"]["amount_outliers"]
+    assert first_sheet["flow_graph"]["high_risk_relation_count"] == 0
 
 
-def test_financial_endpoint_detects_hidden_sheet_reference_and_temporal_signals():
+def test_financial_endpoint_detects_hidden_sheet_reference_without_low_priority_temporal_noise():
     client = app.test_client()
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Jawny"
-    ws["A1"] = "Data operacji"
+    ws["A1"] = "Opis"
     ws["B1"] = "Wynik"
-    ws["A2"] = datetime(2026, 7, 4, 2, 15, 0)
+    ws["A2"] = "rekord kontrolny"
     hidden = wb.create_sheet("UkryteDane")
     hidden.sheet_state = "hidden"
     hidden["A2"] = 123
@@ -249,6 +254,78 @@ def test_financial_endpoint_detects_hidden_sheet_reference_and_temporal_signals(
     assert response.status_code == 200
     assert data["success"] is True
     assert "cross_sheet_hidden_reference" in anomaly_types
-    assert "weekend_activity" in anomaly_types
-    assert "night_activity" in anomaly_types
+    assert "weekend_activity" not in anomaly_types
+    assert "night_activity" not in anomaly_types
     assert first_sheet["forensic_signals"]["control_signals"]["cross_sheet_hidden_references"]
+    assert "weekend_activity" not in first_sheet["forensic_signals"]["data_signals"]
+    assert "night_activity" not in first_sheet["forensic_signals"]["data_signals"]
+    assert "numbering_gaps" not in first_sheet["forensic_signals"]["data_signals"]
+    assert "near_thresholds" not in first_sheet["forensic_signals"]["data_signals"]
+    assert "round_amounts" not in first_sheet["forensic_signals"]["data_signals"]
+    assert first_sheet["flow_graph"]["high_risk_relation_count"] == 0
+
+
+def test_financial_endpoint_flow_graph_shows_only_high_risk_relations():
+    client = app.test_client()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Wysokie"
+    ws["A1"] = "Kwota"
+    ws["A2"] = "=10"
+    ws["A3"] = 15
+    ws["A4"] = "=20"
+    payload = BytesIO()
+    wb.save(payload)
+    payload.seek(0)
+
+    response = client.post(
+        "/api/audit/financial",
+        data={"file": (payload, "high-risk-flow.xlsx"), "analysis_type": "full"},
+        content_type="multipart/form-data",
+    )
+
+    data = response.get_json()
+    first_sheet = data["sheets"]["Wysokie"]
+    anomaly_types = [item["type"] for item in data["summary"]["anomalies"]]
+    assert response.status_code == 200
+    assert data["success"] is True
+    assert "hardcoded_in_formula_region" in anomaly_types
+    assert first_sheet["flow_graph"]["high_risk_relation_count"] >= 1
+    assert first_sheet["flow_graph"]["nodes"]
+
+
+def test_high_priority_sheet_filter_matches_report_intent():
+    client = app.test_client()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Niski"
+    ws["A1"] = "Kontrola"
+    ws["A2"] = '=IF(1=1,"OK","BŁĄD")'
+
+    high = wb.create_sheet("Wysoki")
+    high["A1"] = "Kwota"
+    high["A2"] = "=10"
+    high["A3"] = 15
+    high["A4"] = "=20"
+
+    payload = BytesIO()
+    wb.save(payload)
+    payload.seek(0)
+
+    response = client.post(
+        "/api/audit/financial",
+        data={"file": (payload, "priority-filter.xlsx"), "analysis_type": "full"},
+        content_type="multipart/form-data",
+    )
+
+    data = response.get_json()
+    high_priority_sheets = [
+        name for name, sheet in data["sheets"].items()
+        if sheet["risk_level"] in {"HIGH", "CRITICAL"}
+    ]
+    assert response.status_code == 200
+    assert data["success"] is True
+    assert "Wysoki" in high_priority_sheets
+    assert "Niski" not in high_priority_sheets

@@ -6,6 +6,7 @@ let currentFinancialReport = null;
 let currentFinancialFile = null;
 let currentFinancialFileToken = '';
 let currentFinancialReportToken = '';
+let currentFinancialOpinionToken = '';
 
 function financialEscape(value) {
     if (value == null) return '';
@@ -53,6 +54,10 @@ function financialAnalysisModeLabel(mode) {
     }[mode] || mode || 'nieznany';
 }
 
+function financialIsHighPriority(level) {
+    return level === 'HIGH' || level === 'CRITICAL';
+}
+
 function financialModeRank(mode) {
     return {
         quick: 1,
@@ -82,6 +87,98 @@ function syncFinancialSelectionUi() {
     }
     if (runButton) {
         runButton.disabled = !currentFinancialFile;
+    }
+}
+
+function setFinancialOpinionHtml(html) {
+    const host = document.getElementById('financialAiOpinion');
+    if (!host) return;
+    host.innerHTML = html;
+}
+
+function renderFinancialOpinionEmpty(message) {
+    setFinancialOpinionHtml(`
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <h6 class="mb-1">🕵️ Wniosek śledczy</h6>
+            <div class="small text-muted">${financialEscape(message)}</div>
+        </div>
+    `);
+}
+
+function renderFinancialOpinionLoading() {
+    setFinancialOpinionHtml(`
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <h6 class="mb-2">🕵️ Wniosek śledczy</h6>
+            <div class="small text-muted">
+                <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
+                Trwa przygotowanie opinii AI na podstawie pakietu dowodowego.
+            </div>
+        </div>
+    `);
+}
+
+function renderFinancialOpinion(opinion) {
+    const findings = Array.isArray(opinion?.findings) ? opinion.findings : [];
+    const findingsHtml = findings.length
+        ? findings.map(item => `
+            <div style="background:#fff;border:1px solid #fecaca;border-left:4px solid #dc2626;border-radius:10px;padding:12px;margin-bottom:10px;">
+                ${item.finding_id ? `<div class="small text-muted mb-1">ID: ${financialEscape(item.finding_id)}</div>` : ''}
+                ${item.fact ? `<div class="small mb-1"><strong>Fakt:</strong> ${financialEscape(item.fact)}</div>` : ''}
+                ${item.intent ? `<div class="small mb-1"><strong>Możliwa intencja:</strong> ${financialEscape(item.intent)}</div>` : ''}
+                ${item.expert_comment ? `<div class="small mb-1"><strong>Komentarz ekspercki:</strong> ${financialEscape(item.expert_comment)}</div>` : ''}
+                <div class="small text-muted">
+                    ${item.confidence ? `<strong>Pewność:</strong> ${financialEscape(item.confidence)}${item.next_check ? ' | ' : ''}` : ''}
+                    ${item.next_check ? `<strong>Co sprawdzić dalej:</strong> ${financialEscape(item.next_check)}` : ''}
+                </div>
+            </div>
+        `).join('')
+        : '<div class="small text-muted">Model nie zwrócił pozycji szczegółowych.</div>';
+
+    setFinancialOpinionHtml(`
+        <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+            <h6 class="mb-2">🕵️ Wniosek śledczy</h6>
+            ${opinion?.overall_assessment ? `<div class="alert alert-warning small py-2 mb-3"><strong>Ocena ogólna:</strong> ${financialEscape(opinion.overall_assessment)}</div>` : ''}
+            ${opinion?.sheet_comment ? `<div class="small text-muted mb-3">${financialEscape(opinion.sheet_comment)}</div>` : ''}
+            ${findingsHtml}
+            ${opinion?.limitations ? `<div class="small text-muted mt-2"><strong>Ograniczenia:</strong> ${financialEscape(opinion.limitations)}</div>` : ''}
+        </div>
+    `);
+}
+
+async function loadFinancialOpinion(report) {
+    const evidencePack = report?.ai_evidence_pack;
+    if (!evidencePack || !Array.isArray(evidencePack.sheets) || !evidencePack.sheets.length) {
+        renderFinancialOpinionEmpty('Brak pakietu dowodowego HIGH/CRITICAL do opinii AI.');
+        return;
+    }
+
+    const requestedToken = currentFinancialReportToken;
+    currentFinancialOpinionToken = requestedToken;
+    renderFinancialOpinionLoading();
+
+    try {
+        const response = await fetch('/api/audit/financial/opinion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ evidence_pack: evidencePack })
+        });
+        const data = await response.json();
+        if (currentFinancialOpinionToken !== requestedToken) return;
+
+        if (!response.ok) {
+            renderFinancialOpinionEmpty(data.error || 'Nie udało się uruchomić opinii AI.');
+            return;
+        }
+        if (!data.success || !data.opinion_available || !data.ai_forensic_opinion) {
+            renderFinancialOpinionEmpty(data.warning || 'Opinia AI nie została wygenerowana.');
+            return;
+        }
+
+        currentFinancialReport.ai_forensic_opinion = data.ai_forensic_opinion;
+        renderFinancialOpinion(data.ai_forensic_opinion);
+    } catch (error) {
+        if (currentFinancialOpinionToken !== requestedToken) return;
+        renderFinancialOpinionEmpty(`Błąd opinii AI: ${error.message}`);
     }
 }
 
@@ -134,6 +231,7 @@ async function runFinancialAnalysis() {
         runButton.disabled = true;
         runButton.textContent = 'Liczę...';
     }
+    currentFinancialOpinionToken = '';
     setFinancialStatus('<span class="spinner-border spinner-border-sm me-2"></span>Analizuję plik...', 'info');
 
     const formData = new FormData();
@@ -207,6 +305,8 @@ function displayFinancialResults(report) {
     const workbookMeta = fileMeta.workbook || {};
     const logicOverview = report.logic_overview || {};
     const analysisMeta = report.analysis || {};
+    const highPrioritySheets = Object.entries(report.sheets || {}).filter(([, sheetData]) => financialIsHighPriority(sheetData.risk_level));
+    const highPriorityAnomalies = (report.summary?.anomalies || []).filter(anomaly => anomaly.severity === 'HIGH');
     const riskColor = {
         'LOW': '#16a34a',
         'MEDIUM': '#d97706',
@@ -217,16 +317,16 @@ function displayFinancialResults(report) {
     const summaryHtml = `
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;">
             <div style="background:var(--c-surface);padding:15px;border-radius:var(--r-md);border-left:4px solid #4f46e5;">
-                <div class="text-muted small">Arkuszy</div>
-                <div style="font-size:1.5rem;font-weight:700;">${summary.total_sheets}</div>
+                <div class="text-muted small">Arkuszy do pilnej weryfikacji</div>
+                <div style="font-size:1.5rem;font-weight:700;">${highPrioritySheets.length}</div>
             </div>
             <div style="background:var(--c-surface);padding:15px;border-radius:var(--r-md);border-left:4px solid #16a34a;">
                 <div class="text-muted small">Formuł</div>
                 <div style="font-size:1.5rem;font-weight:700;">${summary.total_formulas}</div>
             </div>
             <div style="background:var(--c-surface);padding:15px;border-radius:var(--r-md);border-left:4px solid #d97706;">
-                <div class="text-muted small">Anomalii</div>
-                <div style="font-size:1.5rem;font-weight:700;">${summary.anomalies_count}</div>
+                <div class="text-muted small">Silnych sygnałów</div>
+                <div style="font-size:1.5rem;font-weight:700;">${highPriorityAnomalies.length}</div>
             </div>
             <div style="background:var(--c-surface);padding:15px;border-radius:var(--r-md);border-left:4px solid;"
                  style="border-left-color:${riskColor[summary.risk_level]};">
@@ -269,6 +369,9 @@ function displayFinancialResults(report) {
         <div class="search-card mb-4" style="box-shadow:none;border:1px solid var(--c-border);">
             <h6 class="mb-3">🧠 Logika skoroszytu</h6>
             <p class="mb-2">${financialEscape(logicOverview.description || 'Brak opisu logiki arkusza.')}</p>
+            <div class="alert alert-warning small py-2 mb-3">
+                Raport pokazuje tylko arkusze i sygnały z priorytetem weryfikacji <strong>wysokim</strong> albo <strong>krytycznym</strong>.
+            </div>
             <div class="small text-muted mb-2">
                 Tryb: <strong>${financialEscape(financialAnalysisModeLabel(analysisMeta.requested_mode))}</strong> |
                 Dogłębnie przeskanowane arkusze: <strong>${financialEscape(analysisMeta.deep_scan_sheets || 0)}</strong> |
@@ -279,18 +382,17 @@ function displayFinancialResults(report) {
             ${hubs ? `<div><strong>Najważniejsze węzły obliczeń:</strong><ul class="mb-0 mt-2">${hubs}</ul></div>` : '<div class="text-muted small">Nie wykryto centralnych węzłów logiki.</div>'}
         </div>
     `;
-
     renderFinancialFlowExplorer(report);
+    loadFinancialOpinion(report);
 
     // Anomalie
-    if (summary.anomalies_count > 0) {
-        let anomaliesHtml = '<h6 class="mb-3">⚠️ Wykryte nieprawidłowości:</h6>';
+    if (highPriorityAnomalies.length > 0) {
+        let anomaliesHtml = '<h6 class="mb-3">⚠️ Silne sygnały ingerencji lub manipulacji:</h6>';
         anomaliesHtml += '<div style="max-height:300px;overflow-y:auto;">';
 
-        report.summary.anomalies = report.summary.anomalies || [];
-        for (const anomaly of report.summary.anomalies.slice(0, 20)) {
-            const severityBg = anomaly.severity === 'HIGH' ? '#fee' : '#fef3c7';
-            const severityColor = anomaly.severity === 'HIGH' ? '#dc2626' : '#d97706';
+        for (const anomaly of highPriorityAnomalies.slice(0, 20)) {
+            const severityBg = '#fee';
+            const severityColor = '#dc2626';
             anomaliesHtml += `
                 <div style="background:${severityBg};padding:10px;margin-bottom:8px;border-left:4px solid ${severityColor};border-radius:4px;">
                     <strong style="color:${severityColor};">${financialEscape(anomaly.label || anomaly.type)}</strong>
@@ -306,12 +408,16 @@ function displayFinancialResults(report) {
         anomaliesHtml += '</div>';
         document.getElementById('financialAnomalies').innerHTML = anomaliesHtml;
     } else {
-        document.getElementById('financialAnomalies').innerHTML = '<div class="alert alert-success">✓ Brak anomalii!</div>';
+        document.getElementById('financialAnomalies').innerHTML = '<div class="alert alert-success">✓ Brak silnych sygnałów o wysokim lub krytycznym priorytecie.</div>';
     }
 
     // Arkusze
-    let sheetsHtml = '<h6 class="mb-3">📋 Arkusze:</h6>';
-    for (const [sheetName, sheetData] of Object.entries(report.sheets)) {
+    let sheetsHtml = '<h6 class="mb-3">📋 Arkusze do pilnej weryfikacji:</h6>';
+    if (!highPrioritySheets.length) {
+        document.getElementById('financialSheets').innerHTML = `${sheetsHtml}<div class="alert alert-success">✓ Żaden arkusz nie osiągnął priorytetu wysokiego ani krytycznego.</div>`;
+        return;
+    }
+    for (const [sheetName, sheetData] of highPrioritySheets) {
         const outputCells = (sheetData.logic_summary?.output_cells || []).slice(0, 5);
         const hubsText = (sheetData.logic_summary?.hub_cells || []).slice(0, 3).map(h => h.cell).join(', ');
         const focusRows = (sheetData.analysis?.focus_rows || []).slice(0, 8).join(', ');
@@ -367,9 +473,14 @@ function displayFinancialResults(report) {
 function renderFinancialFlowExplorer(report) {
     const host = document.getElementById('financialFlowExplorer');
     if (!host) return;
-    const sheetEntries = Object.entries(report.sheets || {}).filter(([, sheetData]) => (sheetData.flow_graph?.nodes || []).length > 0);
+    const sheetEntries = Object.entries(report.sheets || {}).filter(([, sheetData]) => (sheetData.flow_graph?.high_risk_relation_count || 0) > 0);
     if (!sheetEntries.length) {
-        host.innerHTML = '';
+        host.innerHTML = `
+            <div class="search-card" style="box-shadow:none;border:1px solid var(--c-border);">
+                <h6 class="mb-1">🕸️ Relacja arkusza</h6>
+                <div class="small text-muted">Brak relacji powiązanych z anomaliami wysokiego ryzyka.</div>
+            </div>
+        `;
         return;
     }
 
@@ -382,7 +493,7 @@ function renderFinancialFlowExplorer(report) {
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <div>
                     <h6 class="mb-1">🕸️ Relacja arkusza</h6>
-                    <div class="small text-muted">Przepływ pokazuje, skąd wynik pobiera dane i które komórki są punktami kontroli lub ręcznej ingerencji.</div>
+                    <div class="small text-muted">Pokazano tylko przepływy powiązane z anomaliami wysokiego ryzyka.</div>
                 </div>
                 <div>
                     <label for="financialFlowSheetSelect" class="form-label small fw-semibold mb-1">Arkusz</label>
@@ -416,7 +527,7 @@ function renderFinancialSheetFlow(report, sheetName) {
     const narratives = flow.narratives || [];
 
     if (!nodes.length) {
-        target.innerHTML = '<div class="text-muted small">Brak danych do wizualizacji przepływu dla tego arkusza.</div>';
+        target.innerHTML = '<div class="text-muted small">W tym arkuszu nie ma relacji powiązanych z anomaliami wysokiego ryzyka.</div>';
         return;
     }
 
@@ -508,7 +619,7 @@ function renderFinancialSheetFlow(report, sheetName) {
         <div class="row g-3">
             <div class="col-lg-8">
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px;overflow:auto;">
-                    <div class="small text-muted mb-2">Strzałki pokazują przepływ od wejść do komórek wynikowych.</div>
+                    <div class="small text-muted mb-2">Strzałki pokazują tylko podejrzane przepływy prowadzące do anomalii wysokiego ryzyka.</div>
                     <svg width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="Relacja arkusza ${financialEscape(sheetName)}">
                         <defs>
                             <marker id="financialFlowArrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
@@ -528,6 +639,7 @@ function renderFinancialSheetFlow(report, sheetName) {
                     <div class="small">${notesHtml}</div>
                     <div class="small text-muted mt-3">
                         Pokazano <strong>${financialEscape(nodes.length)}</strong> węzłów i <strong>${financialEscape(edges.length)}</strong> połączeń.
+                        Wysokie ryzyko w tym arkuszu: <strong>${financialEscape(flow.high_risk_relation_count || 0)}</strong>.
                         ${flow.hidden_formula_nodes ? ` Pozostałe formuły poza głównym przepływem: <strong>${financialEscape(flow.hidden_formula_nodes)}</strong>.` : ''}
                     </div>
                 </div>
