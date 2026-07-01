@@ -5,7 +5,6 @@ Usługi analityki śledczej dla audytu finansowego.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import datetime
 import math
 import re
 
@@ -41,33 +40,6 @@ def _coerce_number(value):
     text = text.replace(" ", "").replace("\xa0", "").replace(",", ".")
     try:
         return float(text)
-    except ValueError:
-        return None
-
-
-def _coerce_datetime(value):
-    if value is None:
-        return None
-    if hasattr(value, "hour") and hasattr(value, "weekday"):
-        return value
-    text = _value_to_text(value)
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text)
-    except ValueError:
-        return None
-
-
-def _extract_sequence_number(value) -> int | None:
-    text = _value_to_text(value)
-    if not text:
-        return None
-    matches = re.findall(r"\d+", text)
-    if not matches:
-        return None
-    try:
-        return int(matches[-1])
     except ValueError:
         return None
 
@@ -476,16 +448,17 @@ def detect_hardcoded_values_and_pattern_deviations(
 
 
 def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findings: list, appendix: list):
-    thresholds = [1000, 5000, 10000, 20000, 50000, 100000]
+    """
+    Oblicza wyłącznie sygnały danych o priorytecie HIGH/CRITICAL.
+
+    Celowo pomija słabsze heurystyki (LOW/MEDIUM), których raport nie pokazuje:
+    duplikaty kontrahentów i kwot, luki numeracji, kwoty tuż pod progami,
+    kwoty okrągłe oraz aktywność nocną/weekendową.
+    """
     summary = {
         "duplicates": [],
-        "numbering_gaps": [],
-        "near_thresholds": [],
-        "round_amounts": [],
         "amount_outliers": [],
         "benford_deviations": [],
-        "weekend_activity": [],
-        "night_activity": [],
     }
 
     for profile in column_profiles:
@@ -493,7 +466,7 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
         kind = profile["kind"]
         header = profile["header"]
 
-        if kind in {"document", "party", "amount"}:
+        if kind == "document":
             grouped = defaultdict(list)
             for entry in entries:
                 if entry["is_formula"]:
@@ -504,18 +477,12 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
             for rows in grouped.values():
                 if len(rows) < 2:
                     continue
-                finding_type = {
-                    "document": "duplicate_document",
-                    "party": "duplicate_party",
-                    "amount": "duplicate_amount",
-                }[kind]
-                severity = "HIGH" if kind == "document" else ("MEDIUM" if kind == "amount" else "LOW")
                 row_list = [row["row"] for row in rows]
                 _append_finding(
                     findings,
                     appendix,
-                    finding_type=finding_type,
-                    severity=severity,
+                    finding_type="duplicate_document",
+                    severity="HIGH",
                     sheet=sheet_name,
                     cell=", ".join(row["coord"] for row in rows[:6]),
                     value=rows[0]["display_value"],
@@ -528,33 +495,9 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
                         "header": header,
                         "value": _serialize_excel_value(rows[0]["display_value"]),
                         "rows": row_list[:25],
-                        "kind": kind,
+                        "kind": "document",
                     }
                 )
-
-        if kind == "document":
-            seq_values = []
-            for entry in entries:
-                if entry["is_formula"]:
-                    continue
-                seq = _extract_sequence_number(entry["display_value"])
-                if seq is not None:
-                    seq_values.append((seq, entry))
-            unique_numbers = sorted({seq for seq, _ in seq_values})
-            if len(unique_numbers) >= 4 and unique_numbers[-1] - unique_numbers[0] <= len(unique_numbers) + 20:
-                missing = [n for n in range(unique_numbers[0], unique_numbers[-1] + 1) if n not in set(unique_numbers)]
-                if missing:
-                    _append_finding(
-                        findings,
-                        appendix,
-                        finding_type="numbering_gap",
-                        severity="MEDIUM",
-                        sheet=sheet_name,
-                        message=f"W kolumnie „{header}” wykryto luki w numeracji dokumentów.",
-                        comment=f"Brakujące numery: {', '.join(map(str, missing[:15]))}",
-                        details={"header": header, "missing_numbers": missing[:25]},
-                    )
-                    summary["numbering_gaps"].append({"header": header, "missing_numbers": missing[:25]})
 
         if kind == "amount":
             numeric_entries = []
@@ -566,49 +509,6 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
                     continue
                 numeric_entries.append((amount, entry))
 
-                if any(abs(amount % threshold) < 0.005 for threshold in (10000, 50000, 100000)):
-                    _append_finding(
-                        findings,
-                        appendix,
-                        finding_type="round_amount",
-                        severity="LOW",
-                        sheet=sheet_name,
-                        cell=entry["coord"],
-                        value=entry["display_value"],
-                        message=f"Kwota w {entry['coord']} jest idealnie zaokrąglona.",
-                        comment="Okrągła kwota wymaga potwierdzenia, czy wynika z umowy, limitu budżetowego albo ręcznej korekty.",
-                        details={"header": header, "thresholds": [10000, 50000, 100000]},
-                    )
-                    summary["round_amounts"].append(
-                        {"cell": entry["coord"], "header": header, "value": _serialize_excel_value(entry["display_value"])}
-                    )
-
-                for threshold in thresholds:
-                    diff = threshold - amount
-                    window = max(50, threshold * 0.01)
-                    if 0 < diff <= window:
-                        _append_finding(
-                            findings,
-                            appendix,
-                            finding_type="near_threshold",
-                            severity="MEDIUM",
-                            sheet=sheet_name,
-                            cell=entry["coord"],
-                            value=entry["display_value"],
-                            message=f"Kwota w {entry['coord']} znajduje się tuż pod progiem {threshold:,.0f}.",
-                            comment="Sprawdź, czy nie jest to dzielenie lub ustawienie kwoty pod limit akceptacji.",
-                            details={"header": header, "threshold": threshold},
-                        )
-                        summary["near_thresholds"].append(
-                            {
-                                "cell": entry["coord"],
-                                "header": header,
-                                "value": _serialize_excel_value(entry["display_value"]),
-                                "threshold": threshold,
-                            }
-                        )
-                        break
-
             if len(numeric_entries) >= 6:
                 values = [amount for amount, _ in numeric_entries]
                 mean = sum(values) / len(values)
@@ -617,17 +517,17 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
                 if stddev > 0:
                     for amount, entry in numeric_entries:
                         z_score = abs((amount - mean) / stddev)
-                        if z_score < 3:
+                        if z_score < 4.5:
                             continue
                         _append_finding(
                             findings,
                             appendix,
                             finding_type="amount_outlier",
-                            severity="MEDIUM" if z_score < 4.5 else "HIGH",
+                            severity="HIGH",
                             sheet=sheet_name,
                             cell=entry["coord"],
                             value=entry["display_value"],
-                            message=f"Kwota w {entry['coord']} wyraźnie odstaje od reszty kolumny „{header}”.",
+                            message=f"Kwota w {entry['coord']} ekstremalnie odstaje od reszty kolumny „{header}”.",
                             comment=f"Średnia kolumny to {_fmt_decimal(mean)}, odchylenie standardowe {_fmt_decimal(stddev)}, z-score={z_score:.2f}.",
                             details={"header": header, "z_score": round(z_score, 2), "mean": round(mean, 6), "stddev": round(stddev, 6)},
                         )
@@ -647,16 +547,15 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
                     sample_size = len(leading_digits)
                     observed = {digit: observed_counts.get(digit, 0) / sample_size for digit in range(1, 10)}
                     mad = sum(abs(observed[digit] - expected[digit]) for digit in range(1, 10)) / 9
-                    if mad >= 0.03:
+                    if mad >= 0.05:
                         top_digit = max(range(1, 10), key=lambda digit: abs(observed[digit] - expected[digit]))
-                        severity = "HIGH" if mad >= 0.05 else "MEDIUM"
                         _append_finding(
                             findings,
                             appendix,
                             finding_type="benford_deviation",
-                            severity=severity,
+                            severity="HIGH",
                             sheet=sheet_name,
-                            message=f"Kolumna „{header}” odbiega od oczekiwanego rozkładu cyfr wiodących Benforda.",
+                            message=f"Kolumna „{header}” drastycznie odbiega od oczekiwanego rozkładu cyfr wiodących Benforda.",
                             comment=(
                                 f"Największe odchylenie dotyczy cyfry {top_digit}: obserwacja "
                                 f"{observed[top_digit] * 100:.1f}% vs oczekiwane {expected[top_digit] * 100:.1f}% (MAD={mad:.3f})."
@@ -666,46 +565,6 @@ def detect_duplicate_and_numeric_signals(sheet_name: str, column_profiles, findi
                         summary["benford_deviations"].append(
                             {"header": header, "sample_size": sample_size, "mad": round(mad, 4), "dominant_digit": top_digit}
                         )
-
-        if kind == "datetime":
-            for entry in entries:
-                if entry["is_formula"]:
-                    continue
-                dt_value = _coerce_datetime(entry["display_value"])
-                if dt_value is None:
-                    continue
-                if dt_value.weekday() >= 5:
-                    _append_finding(
-                        findings,
-                        appendix,
-                        finding_type="weekend_activity",
-                        severity="LOW",
-                        sheet=sheet_name,
-                        cell=entry["coord"],
-                        value=entry["display_value"],
-                        message=f"Data w {entry['coord']} przypada na weekend.",
-                        comment="Sprawdź, czy operacja weekendowa jest zgodna z procesem biznesowym.",
-                        details={"header": header},
-                    )
-                    summary["weekend_activity"].append(
-                        {"cell": entry["coord"], "header": header, "value": _serialize_excel_value(entry["display_value"])}
-                    )
-                if getattr(dt_value, "hour", 0) < 6:
-                    _append_finding(
-                        findings,
-                        appendix,
-                        finding_type="night_activity",
-                        severity="LOW",
-                        sheet=sheet_name,
-                        cell=entry["coord"],
-                        value=entry["display_value"],
-                        message=f"Znacznik czasu w {entry['coord']} wskazuje aktywność nocną.",
-                        comment="Sprawdź, czy wpis nie został wygenerowany poza standardowym obiegiem pracy.",
-                        details={"header": header},
-                    )
-                    summary["night_activity"].append(
-                        {"cell": entry["coord"], "header": header, "value": _serialize_excel_value(entry["display_value"])}
-                    )
 
     return summary
 
@@ -752,7 +611,7 @@ def detect_control_total_and_hidden_reference_signals(
                 findings,
                 appendix,
                 finding_type="cross_sheet_hidden_reference",
-                severity="MEDIUM",
+                severity="HIGH",
                 sheet=sheet_name,
                 cell=coord,
                 value=display_value,

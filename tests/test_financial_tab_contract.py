@@ -254,15 +254,25 @@ def test_financial_endpoint_detects_hidden_sheet_reference_without_low_priority_
     assert response.status_code == 200
     assert data["success"] is True
     assert "cross_sheet_hidden_reference" in anomaly_types
+    hidden_reference = next(
+        item for item in data["summary"]["anomalies"] if item["type"] == "cross_sheet_hidden_reference"
+    )
     assert "weekend_activity" not in anomaly_types
     assert "night_activity" not in anomaly_types
+    assert hidden_reference["severity"] == "HIGH"
     assert first_sheet["forensic_signals"]["control_signals"]["cross_sheet_hidden_references"]
     assert "weekend_activity" not in first_sheet["forensic_signals"]["data_signals"]
     assert "night_activity" not in first_sheet["forensic_signals"]["data_signals"]
     assert "numbering_gaps" not in first_sheet["forensic_signals"]["data_signals"]
     assert "near_thresholds" not in first_sheet["forensic_signals"]["data_signals"]
     assert "round_amounts" not in first_sheet["forensic_signals"]["data_signals"]
-    assert first_sheet["flow_graph"]["high_risk_relation_count"] == 0
+    assert set(first_sheet["forensic_signals"]["data_signals"].keys()) == {
+        "duplicates",
+        "amount_outliers",
+        "benford_deviations",
+    }
+    assert first_sheet["flow_graph"]["high_risk_relation_count"] >= 1
+    assert first_sheet["flow_graph"]["nodes"]
 
 
 def test_financial_endpoint_flow_graph_shows_only_high_risk_relations():

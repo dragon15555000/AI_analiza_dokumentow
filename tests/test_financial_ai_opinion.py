@@ -35,6 +35,20 @@ def _high_signal_workbook() -> Workbook:
     return wb
 
 
+def _hidden_reference_workbook() -> Workbook:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Jawny"
+    ws["A1"] = "Opis"
+    ws["B1"] = "Wynik"
+    ws["A2"] = "rekord kontrolny"
+    hidden = wb.create_sheet("UkryteDane")
+    hidden.sheet_state = "hidden"
+    hidden["A2"] = 123
+    ws["B2"] = "=UkryteDane!A2"
+    return wb
+
+
 def test_financial_audit_builds_ai_evidence_pack_only_for_high_priority_findings():
     response = _post_financial_audit(_high_signal_workbook(), "ai-pack.xlsx")
     data = response.get_json()
@@ -55,6 +69,27 @@ def test_financial_audit_builds_ai_evidence_pack_only_for_high_priority_findings
     assert all(finding["type"] != "cosmetic_check" for finding in findings)
     assert "technical_appendix" not in serialized
     assert "screening_findings" not in serialized
+
+
+def test_financial_audit_includes_high_hidden_sheet_reference_in_ai_evidence_pack():
+    response = _post_financial_audit(_hidden_reference_workbook(), "hidden-pack.xlsx")
+    data = response.get_json()
+
+    evidence_pack = data["ai_evidence_pack"]
+    findings = [
+        finding
+        for sheet in evidence_pack["sheets"]
+        for finding in sheet.get("findings", [])
+    ]
+
+    assert response.status_code == 200
+    assert data["success"] is True
+    assert any(finding["type"] == "cross_sheet_hidden_reference" for finding in findings)
+    hidden_ref = next(finding for finding in findings if finding["type"] == "cross_sheet_hidden_reference")
+    assert hidden_ref["severity"] == "HIGH"
+    assert hidden_ref["confidence_basis"] == "high_hidden_cross_sheet_dependency"
+    assert hidden_ref["fraud_hypothesis"]
+    assert hidden_ref["verification_target"]
 
 
 def test_financial_forensics_prompt_requires_json_only():

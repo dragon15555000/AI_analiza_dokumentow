@@ -489,13 +489,13 @@ def _anomaly_details(anomaly: dict) -> dict:
         },
         "cross_sheet_hidden_reference": {
             "label": "Odwołanie do ukrytego arkusza",
-            "severity_label": "Średnie ryzyko",
+            "severity_label": "Wysokie ryzyko",
             "impact": "Wynik zależy od danych z arkusza ukrytego lub very-hidden, co utrudnia audyt ścieżki obliczeń.",
             "recommendation": "Otwórz wskazany arkusz źródłowy i sprawdź, czy ukrycie jest uzasadnione oraz czy dane są spójne.",
             "fraud_hypothesis": "Wynik zależy od ukrytego źródła, co może maskować rzeczywisty mechanizm obliczeń.",
             "intent_hypothesis": "Ukrycie źródła wejścia albo obejście jawnej kontroli wyniku.",
             "verification_target": "Sprawdź zawartość ukrytego arkusza i wszystkie komórki zasilające to odwołanie.",
-            "confidence_basis": "medium_hidden_cross_sheet_dependency",
+            "confidence_basis": "high_hidden_cross_sheet_dependency",
         },
     }
     meta = mapping.get(
